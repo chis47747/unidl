@@ -241,4 +241,10 @@ authorized account, region and device data. Never include credentials, cookies,
 tokens, CDM private material, vault keys or signed URLs in commits or bug
 reports.
 
+## License
+
+UniDL is released under the [MIT License](LICENSE). Components listed in
+[`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES)
+retain their own license terms.
+
 Copyright © 2026 Chris20

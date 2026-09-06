@@ -1,6 +1,6 @@
 # Public source archives include the user-facing documentation and install
 # requirement lists, but never local runtime state or private media devices.
-include README.md README.zh-CN.md pyproject.toml requirements.txt requirements-dev.txt
+include LICENSE README.md README.zh-CN.md pyproject.toml requirements.txt requirements-dev.txt
 recursive-include docs *.md *.yaml
 recursive-exclude cdm *
 recursive-exclude helpers *

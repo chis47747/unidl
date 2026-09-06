@@ -62,7 +62,16 @@ class SelectableLog(RichLog):
     @property
     def has_selection(self) -> bool:
         """Whether a persistent range or an in-progress drag owns the viewport."""
-        return self.text_selection is not None or self._drag_anchor is not None
+        # ``write_counted`` and the callbacks it schedules can outlive the
+        # screen that owns this widget.  Textual's ``text_selection`` property
+        # consults ``self.screen.selections`` and raises ``NoScreen`` after the
+        # widget is unmounted; a late follow-tail callback must simply become a
+        # no-op instead of crashing the whole TUI while navigating back.
+        if self._drag_anchor is not None:
+            return True
+        if not self.is_attached:
+            return False
+        return self.text_selection is not None
 
     # ------------------------------------------------------------- last line
     def write_counted(self, renderable: object) -> int:
@@ -94,6 +103,11 @@ class SelectableLog(RichLog):
 
     def _follow_tail(self) -> None:
         """Follow new output only if no selection was made in the meantime."""
+        # A write schedules this callback for the next refresh.  Returning from
+        # the download page can unmount the widget before that refresh arrives;
+        # never ask Textual to scroll a detached widget.
+        if not self.is_attached:
+            return
         if self.auto_scroll and not self._follow_paused and not self.has_selection:
             self.scroll_end(animate=False, immediate=True, x_axis=False)
 

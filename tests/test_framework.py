@@ -60,6 +60,14 @@ def test_cli_services_smoke():
     assert result.stdout.startswith("bbc")
 
 
+def test_detached_log_follow_callback_is_safe_after_screen_pop():
+    from unidl.tui.logpane import SelectableLog
+
+    log = SelectableLog()
+    assert log.has_selection is False
+    log._follow_tail()
+
+
 def test_example_service_scaffold_is_import_safe_and_unregistered():
     from unidl.services import registry
     from unidl.services.example import Example

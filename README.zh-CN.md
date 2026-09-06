@@ -181,4 +181,10 @@ python -m compileall -q src
 
 修改服务后，应使用已授权的账号、地区和设备数据运行该服务的离线检查与真实播放检查。不要在 commit 或问题报告中包含凭证、cookie、token、CDM 私有材料、vault key 或已签名 URL。
 
+## 许可证
+
+UniDL 采用 [MIT License](LICENSE) 发布。列在
+[`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES)
+中的组件仍受其各自许可证条款约束。
+
 Copyright © 2026 Chris20
