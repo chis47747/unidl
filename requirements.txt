@@ -1,0 +1,17 @@
+# UniDL minimum runtime dependencies.
+# The canonical dependency metadata lives in pyproject.toml; this file is a
+# convenient input for environments that install requirements explicitly.
+textual>=0.80
+pywidevine>=1.8
+pyplayready>=0.8.5
+wasmtime>=20
+requests[socks]>=2.31
+qrcode[pil]>=7.4
+textual-image[textual]>=0.13.2; python_version >= "3.12"
+httpx[http2]>=0.27
+cryptography>=42
+PyYAML>=6.0
+geonamescache>=2.0
+pycryptodome>=3.20
+python-bidi>=0.6
+arabic-reshaper>=3.0

@@ -1,0 +1,21 @@
+# Portable, credential-free UniDL configuration example.
+# Copy this to a private path if you need to override the checked-in template.
+
+paths:
+  home: .
+  commands: ./download_commands
+  exports: ./exports
+  keys_db: ./db/keys.db
+  downloads: ./downloads
+
+cdm:
+  default: widevine-test
+  devices:
+    widevine-test: ./cdm/widevine/device.wvd
+    playready-test: ./cdm/playready/device.prd
+    monalisa-test: ./cdm/monalisa/device.mld
+
+credentials: {}
+helpers: {}
+proxies: {}
+services: {}

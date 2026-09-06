@@ -1,0 +1,22 @@
+# Clean UniDL configuration. No accounts, tokens, cookies, vault
+# entries, proxies, or remote endpoints are stored here.
+# Run UniDL from this checkout, or pass this file explicitly with --config.
+
+paths:
+  home: .
+  commands: ./download_commands
+  exports: ./exports
+  keys_db: ./db/keys.db
+  downloads: ./downloads
+
+cdm:
+  default: widevine-test
+  devices:
+    widevine-test: ./cdm/widevine/amlogic_mbox_v4.1.0-android_e3e05b35_4445_l3.wvd
+    playready-test: ./cdm/playready/ktc_msd6683_43c1_sl3000.prd
+    monalisa-test: ./cdm/monalisa/monalisa.mld
+
+credentials: {}
+helpers: {}
+proxies: {}
+services: {}

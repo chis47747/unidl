@@ -1,0 +1,7 @@
+# Development and verification dependencies.
+-r requirements.txt
+build>=1.2
+pytest>=8.0
+ruff>=0.6
+setuptools>=68
+wheel>=0.43

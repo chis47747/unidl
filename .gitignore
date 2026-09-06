@@ -1,0 +1,59 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.*.lock
+.env
+.env.*
+!.env.example
+
+# Private credentials, device identities and local databases. Runtime copies
+# normally live in the ignored directories below; these patterns also catch a
+# file accidentally dropped elsewhere in the checkout.
+*.wvd
+*.prd
+*.mld
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
+id_rsa
+id_ed25519
+
+# Runtime state - never commit. It all lives here rather than under a hidden
+# ~/.unidl so it can be seen and opened, which is exactly why it has to be listed
+# here: visible is not the same as shareable. Sessions, keys and CDM devices are
+# the three things in this tree that must never leave the machine.
+.unidl-core/
+# The lab's root YAML is a clean, portable template and may be committed.
+unidl.yaml
+!unidl.yaml
+cache/
+downloads/
+subtitles/
+tmp/
+logs/
+tokens/
+db/
+cdm/
+cookies/
+helpers/
+archive/
+commands/
+download_commands/
+exports/
+keys.db
+keys.db-shm
+keys.db-wal
+semantic-review/
+settings.json
+settings.json.bak
+
+# JVM crash reports may contain local paths and runtime details.
+hs_err_pid*.log

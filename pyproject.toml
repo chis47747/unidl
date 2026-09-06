@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unidl"
+version = "2.0.0"
+description = "Integrated TUI for browsing streaming services and downloading selected media."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "unidl contributors" }]
+dependencies = [
+    "textual>=0.80",
+    "pywidevine>=1.8",
+    # 0.8.1 is the first line that coexists with pywidevine; 0.8.5 adds signed
+    # challenge CustomData used by Peacock while retaining the newer PSSH API.
+    "pyplayready>=0.8.5",
+    # MonaLisa devices execute a local WebAssembly module.
+    "wasmtime>=20",
+    # SOCKS routes are a first-class Proxy & VPN option; plain requests omits
+    # the PySocks transport in a clean environment.
+    "requests[socks]>=2.31",
+    "qrcode[pil]>=7.4",
+    # Native TGP/Sixel QR images where the interpreter supports the renderer.
+    # Python 3.11 keeps the exact Unicode module fallback in unidl.tui.qr.
+    "textual-image[textual]>=0.13.2; python_version >= '3.12'",
+    # Optional HTTP/2 fast path used by the native delivery engine.
+    "httpx[http2]>=0.27",
+    # The native download core performs AES/CENC operations directly.
+    "cryptography>=42",
+    "PyYAML>=6.0",
+    "geonamescache>=2.0",
+    "pycryptodome>=3.20",
+    # Textual lays terminal cells left-to-right. Reorder RTL runs for display
+    # and shape Arabic glyphs without changing the logical strings services use.
+    "python-bidi>=0.6",
+    "arabic-reshaper>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "setuptools>=68",
+    "wheel>=0.43",
+]
+
+[project.scripts]
+unidl = "unidl.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"unidl" = ["locales/*.json"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",
+    # The runtime floor is 3.11, but timezone.utc and str/Enum remain valid and
+    # changing hundreds of service files mechanically would create needless
+    # concurrent-port conflicts.
+    "UP017",
+    "UP042",
+]

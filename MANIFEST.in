@@ -1,0 +1,16 @@
+# Public source archives include the user-facing documentation and install
+# requirement lists, but never local runtime state or private media devices.
+include README.md README.zh-CN.md pyproject.toml requirements.txt requirements-dev.txt
+recursive-include docs *.md *.yaml
+recursive-exclude cdm *
+recursive-exclude helpers *
+recursive-exclude db *
+recursive-exclude cookies *
+recursive-exclude tokens *
+recursive-exclude downloads *
+recursive-exclude download_commands *
+recursive-exclude exports *
+recursive-exclude logs *
+recursive-exclude cache *
+global-exclude *.wvd *.prd *.mld *.sqlite *.sqlite3 *.db-shm *.db-wal *.db-journal
+global-exclude *.pem
