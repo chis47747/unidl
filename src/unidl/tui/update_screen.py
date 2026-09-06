@@ -18,6 +18,7 @@ RELEASE_NOTES = (
     "update.note.service_views",
     "update.note.media_types",
     "update.note.documentation",
+    "update.note.clipboard",
 )
 
 
