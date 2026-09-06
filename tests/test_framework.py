@@ -13,8 +13,10 @@ if str(SRC) not in sys.path:
 
 
 def test_clean_config_is_portable_and_uses_only_project_state(tmp_path, monkeypatch):
+    import unidl
     from unidl.core.config import Config
 
+    assert unidl.__version__ == "2.0.1"
     monkeypatch.chdir(tmp_path)
     config = Config.load(ROOT / "unidl.yaml")
     assert config.paths.home == ROOT
