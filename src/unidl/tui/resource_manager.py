@@ -27,7 +27,6 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     Checkbox,
-    Input,
     Label,
     OptionList,
     Select,
@@ -44,6 +43,7 @@ from ..core.i18n import phrase, tr
 from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .input import ClipboardInput as Input
 from .vault_targets import VaultCheckbox, VaultTargetResult, VaultTargetScreen
 
 _NAME_RE = re.compile(r"^[^\s][^\n\r]*$")

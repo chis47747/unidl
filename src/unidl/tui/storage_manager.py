@@ -19,7 +19,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Input, Label, OptionList, Static, Tab, Tabs
+from textual.widgets import Label, OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
 
 from ..core import naming, template
@@ -27,6 +27,7 @@ from ..core.i18n import tr
 from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .input import ClipboardInput as Input
 
 
 @dataclass(frozen=True)

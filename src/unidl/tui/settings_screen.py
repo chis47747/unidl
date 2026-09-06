@@ -23,7 +23,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Input, Label, OptionList, Static
+from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import cdmrules, naming, template, vaults
@@ -41,6 +41,7 @@ from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, cookie_profile_setting
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
+from .input import ClipboardInput as Input
 
 
 class _Editor(ModalScreen[Any]):

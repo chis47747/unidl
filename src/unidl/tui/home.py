@@ -31,7 +31,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from ..core import drm as drm_registry
 from ..core.cdm import WIDEVINE
@@ -43,6 +43,7 @@ from .askhost import MODE_LABEL as _MODE_LABEL
 from .bidi import visual_markup
 from .cells import ServiceCell
 from .chrome import Chrome, KeyBar, StatusChip
+from .input import ClipboardInput as Input
 
 #: target width of one cell: the number, the brand, and the service tag. Wide
 #: enough for the longest brand plus a four-character tag, which at every width

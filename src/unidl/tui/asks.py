@@ -16,7 +16,7 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Input, Label, OptionList, SelectionList, Static
+from textual.widgets import DataTable, Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import ranges
@@ -26,6 +26,7 @@ from .audio import AudioPreviewWidget
 from .bidi import visual_markup, visual_text
 from .chrome import StatusChip
 from .filterbox import FILTER_MIN, FilterBox, as_number, matches, wanted
+from .input import ClipboardInput as Input
 from .qr import QrWidget
 
 BACK = object()

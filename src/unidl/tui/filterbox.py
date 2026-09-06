@@ -16,9 +16,8 @@ address, and an address that moves is not one.
 
 from __future__ import annotations
 
-from textual.widgets import Input
-
 from ..core.i18n import tr
+from .input import ClipboardInput as Input
 
 #: Lists shorter than this do not get a filter. A field under four options is
 #: clutter, and the digits already reach all four.

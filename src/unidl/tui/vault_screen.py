@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Input, Label, OptionList, Static, TextArea
+from textual.widgets import Button, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from ..core import vaults
@@ -31,6 +31,7 @@ from ..core.vault import (
 )
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .input import ClipboardInput as Input
 
 _PAIR_IN_ERROR = re.compile(
     r"(?i)(?<![0-9a-f])(?:[0-9a-f]{32}|[0-9a-f-]{36})\s*[:：]\s*[0-9a-f]{32}(?![0-9a-f])"

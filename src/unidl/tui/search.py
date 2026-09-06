@@ -22,7 +22,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import vaults
@@ -31,6 +31,7 @@ from ..core.service import Service
 from ..core.vault import KeyRecord, hex_ids, normalize_hex, playready_kid_alias, split_pair
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
+from .input import ClipboardInput as Input
 from .justwatch_screen import JustWatchScreen, regions_from, search_region_from
 from .vault_targets import VaultSearchPicker, VaultServicePicker
 

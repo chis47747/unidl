@@ -20,7 +20,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Input, OptionList, Static, Tab, Tabs
+from textual.widgets import OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
 
 from ..core.cdm import PLAYREADY, WIDEVINE, DeviceFile
@@ -29,6 +29,7 @@ from ..core.drm import all_systems, get
 from ..core.i18n import tr
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .filterbox import FilterBox, as_number, matches
+from .input import ClipboardInput as Input
 
 SYSTEM_LABEL = {WIDEVINE: "Widevine", PLAYREADY: "PlayReady"}
 
