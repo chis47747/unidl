@@ -30,10 +30,14 @@ readiness, and import.
 
 The two caption values below the Home wordmark are controls as well. Clicking
 the copyright opens the in-app open-source acknowledgements; clicking the
-version opens local release notes and the update status. Until a signed remote
-release feed is configured, that dialog states that remote checking is reserved
-and performs no network request—it must never claim that an unchecked build is
-current.
+version opens local release notes and the release status. Home checks the public
+PyPI JSON endpoint and the public GitHub Releases endpoint on a background
+worker, with short timeouts and no credentials. If a newer version is found,
+the version caption shows an upward marker and the dialog offers PyPI and
+GitHub links plus the GitHub release notes. A failed or incomplete check never
+claims that the build is current, and it never blocks service browsing. Remote
+release text is displayed as plain text and has no authority to execute
+commands.
 
 Screens 2 to 4 share `tui/askhost.py:AskHost`, which is the whole machine minus
 the header: one mounted ask, a log, and the plumbing that lets a worker thread

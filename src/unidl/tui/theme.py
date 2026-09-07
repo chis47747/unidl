@@ -1381,6 +1381,16 @@ ModalScreen.editor {
     width: 100%;
     height: 2;
 }
+#update-links {
+    width: 100%;
+    height: 2;
+    padding: 0 0 1 0;
+    align: left middle;
+}
+#update-links .chip {
+    width: auto;
+    margin-right: 1;
+}
 #update-result {
     border-left: solid $ok;
     padding: 0 1 1 1;

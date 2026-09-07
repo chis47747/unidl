@@ -4,6 +4,18 @@ GitHub and PyPI are separate services. A GitHub login controls repository
 operations; it does not select the PyPI account that owns a package. UniDL is
 uploaded with a PyPI API token or with a GitHub Actions trusted publisher.
 
+## Release metadata used by the in-app checker
+
+The Home screen treats PyPI as the installable source and checks
+`https://pypi.org/pypi/unidl/json` for its latest published version. It also
+checks the public GitHub Releases API for `chis47747/unidl`; GitHub is used for
+human-readable release notes and a browser link, not as an installation
+authority. Publish the PyPI files before announcing a GitHub release, and use a
+matching `vX.Y.Z` tag so both sources describe the same release. A repository
+push alone is not a release and will not provide release notes to the checker.
+The checker is best-effort, cached for the current process, and safe to use
+offline; it never downloads or executes an update automatically.
+
 ## Local release with a PyPI token
 
 1. Sign in to the intended account at <https://pypi.org/> and create an API

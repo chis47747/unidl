@@ -33,6 +33,7 @@ from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Static
 
+from .. import __version__
 from ..core import drm as drm_registry
 from ..core.cdm import WIDEVINE
 from ..core.devreload import ReloadError
@@ -112,6 +113,7 @@ class HomeScreen(Screen):
         self._no_match: Static | None = None
         self._chip_widths: dict[str, int] = {}
         self._columns = 1
+        self._update_info = None
 
     # -------------------------------------------------------------- composition
     def compose(self) -> ComposeResult:
@@ -172,6 +174,7 @@ class HomeScreen(Screen):
         self.refresh_env()
         self.build()
         self.query_one("#filter", Input).focus()
+        self.check_updates()
 
     def refresh_after_settings(self) -> None:
         self.refresh_env()
@@ -197,10 +200,20 @@ class HomeScreen(Screen):
 
     def _render_caption(self) -> None:
         version, copyright_text = banner.caption_parts("$muted", "$gutter")
+        if self._update_info is not None and self._update_info.update_available:
+            version = (
+                f"[$muted]v{__version__}[/] [$warn]↑ v{self._update_info.latest_version}[/]"
+            )
         found = self.query("#caption-version")
         if found:
             found.first(StatusChip).update(version)
-            found.first(StatusChip).tooltip = tr("home.caption.version_hint")
+            if self._update_info is not None and self._update_info.update_available:
+                found.first(StatusChip).tooltip = tr(
+                    "home.caption.update_available",
+                    version=self._update_info.latest_version,
+                )
+            else:
+                found.first(StatusChip).tooltip = tr("home.caption.version_hint")
         found = self.query("#caption-copyright")
         if found:
             found.first(StatusChip).update(copyright_text)
@@ -512,7 +525,33 @@ class HomeScreen(Screen):
     def action_show_update_info(self) -> None:
         from .update_screen import UpdateScreen
 
-        self.app.push_screen(UpdateScreen())
+        self.app.push_screen(UpdateScreen(self._update_info))
+
+    @work(thread=True, exclusive=True, group="update-check")
+    def check_updates(self) -> None:
+        """Check public release metadata without delaying the first Home paint."""
+        from ..core.update import check_for_updates
+
+        try:
+            result = check_for_updates()
+        except Exception:  # noqa: BLE001 - update discovery must never affect startup
+            result = None
+        try:
+            self.app.call_from_thread(self._set_update_info, result)
+        except (RuntimeError, AttributeError):
+            # The app may be closing while the bounded network worker returns.
+            pass
+
+    def _set_update_info(self, result) -> None:
+        if not self.is_attached:
+            return
+        self._update_info = result
+        self._render_caption()
+        screen = self.app.screen
+        if screen is not self:
+            refresh = getattr(screen, "set_update_info", None)
+            if callable(refresh):
+                refresh(result)
 
     def action_toggle_drm(self) -> None:
         """Step to the next registered DRM system, taking the device with it.
