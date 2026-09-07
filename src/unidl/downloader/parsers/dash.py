@@ -136,10 +136,24 @@ def _implied_period_duration(index: int, starts: list[float | None], mpd_duratio
 
 def _merge_period_streams(streams: list[StreamInfo], live: bool = False) -> list[StreamInfo]:
     merged: list[StreamInfo] = []
-    by_key: dict[tuple[str | None, ...], StreamInfo] = {}
-    merge_states: dict[tuple[str | None, ...], _PeriodSegmentMergeState] = {}
+    by_key: dict[tuple[object, ...], StreamInfo] = {}
+    merge_states: dict[tuple[object, ...], _PeriodSegmentMergeState] = {}
+    period_occurrences: dict[tuple[str | None, tuple[object, ...]], int] = {}
     for stream in streams:
         key = _period_stream_key(stream, live=live)
+        if not live:
+            # Representation IDs are not guaranteed to be stable across VOD
+            # periods. Some packagers generate a new UUID for every period,
+            # even though the representation continues the same track. Use
+            # its position among otherwise identical representations to keep
+            # genuine same-period duplicates separate without making the ID
+            # part of the cross-period identity.
+            period_id = stream.extra.get("period_id") if stream.extra else None
+            period_id = period_id if isinstance(period_id, str) else None
+            occurrence_key = (period_id, key)
+            occurrence = period_occurrences.get(occurrence_key, 0)
+            period_occurrences[occurrence_key] = occurrence + 1
+            key = (*key, occurrence)
         target = by_key.get(key)
         if target is None:
             _remember_period(stream, stream)
@@ -153,14 +167,10 @@ def _merge_period_streams(streams: list[StreamInfo], live: bool = False) -> list
     return merged
 
 
-def _period_stream_key(stream: StreamInfo, live: bool = False) -> tuple[str | None, ...]:
-    identity = stream.id or stream.url
-    if live:
-        identity = None
+def _period_stream_key(stream: StreamInfo, live: bool = False) -> tuple[object, ...]:
     return (
         stream.manifest_type,
         stream.media_type,
-        identity,
         None if live else stream.group_id,
         stream.language,
         stream.role,
@@ -168,7 +178,9 @@ def _period_stream_key(stream: StreamInfo, live: bool = False) -> tuple[str | No
         stream.resolution,
         _live_bandwidth_key(stream) if live else None,
         _codec_key(stream.codecs),
+        stream.frame_rate if not live else None,
         stream.channels,
+        stream.extension if not live else None,
         stream.video_range,
     )
 
