@@ -3,10 +3,9 @@
 Three sections, in order of how specific they are:
 
 1. **Global** - what happens on pick, command export, debug. Same everywhere.
-2. **<Service>** - that service's own vocabulary: Amazon's profile strings,
-   BBC's resolution names, Paramount's platform / region / market. Only shown
-   when a service is active, and services can declare as many of these as they
-   need; there is no fixed set.
+2. **<Service>** - that service's own vocabulary: profiles, regions, markets
+   and manifest selectors. Only shown when a service is active, and services
+   can declare as many of these as they need; there is no fixed set.
 3. **Tracks and output** - the shared quality vocabulary, applied against the
    real ladder after the manifest is parsed.
 

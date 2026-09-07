@@ -1,11 +1,11 @@
-"""MonaLisa support, the DRM iQiyi uses.
+"""MonaLisa support for services that use the local ticket DRM.
 
 Shaped like :mod:`unidl.core.cdm` and :mod:`unidl.core.playready` on purpose, so
 the registry can treat all three the same way. One thing genuinely differs, and
 it is the interesting part: there is no licence request.
 
 Widevine and PlayReady both build a challenge, post it somewhere, and parse what
-comes back. MonaLisa's ticket *is* the licence - iQiyi returns it inside the
+comes back. MonaLisa's ticket *is* the licence - a service returns it inside the
 playback response, next to the stream URLs - and the device is a WebAssembly
 module that unwraps it locally. So this module takes a ticket and returns keys,
 with no transport argument and nothing to fail over the network.

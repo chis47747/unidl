@@ -98,11 +98,11 @@ service's private payload that core is not allowed to look at, and these are
 exactly the things core has to read.
 
 A service may also supply a richer `Playback.audio_tags` dictionary when its
-catalogue knows fields the common `Title` model does not need. YouTube Music does
-this for `album_artist`, `track/total`, `disc/total`, `composer`, `copyright`,
-`ISRC` and cover-request headers. The same dictionary is stored in its JSON
-manifest so the native delivery core sees identical metadata whether the command runs immediately
-or is exported and replayed later. If the Music next/browse enrichment fails,
+catalogue knows fields the common `Title` model does not need. It can include
+`album_artist`, `track/total`, `disc/total`, `composer`, `copyright`, `ISRC` and
+cover-request headers. The same dictionary is stored in the JSON manifest so
+the native delivery core sees identical metadata whether the command runs
+immediately or is exported and replayed later. If optional enrichment fails,
 description-derived fields and the basic title/artist/album data remain usable.
 
 ## Checking it

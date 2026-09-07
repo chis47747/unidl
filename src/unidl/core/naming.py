@@ -1,9 +1,8 @@
 """Output naming.
 
-One implementation of the convention the old scripts converged on:
+One implementation of the convention used by legacy integrations:
 ``Title.S01E02.Episode.Title`` / ``Title.YEAR``. Previously this was copy-pasted
-per script (``format_title`` in bbc.py, ``build_save_name`` in paramount.py,
-``clean_filename`` in apple.py) with slight drift.
+per script with slight drift.
 
 The name is built in two halves, because the two halves are known at different
 times:
@@ -12,7 +11,7 @@ times:
   a service resolves one. That is what pickers, queue rows and logs show.
 * the **release** half, from the tracks that were actually chosen, which is not
   known until the manifest has been read and the selection has settled:
-  ``.1080p.DSNP.WEB-DL.DDP5.1.Atmos.DV-GROUP``
+  ``.1080p.SERVICE.WEB-DL.DDP5.1.Atmos.DV-GROUP``
 
 Ordering follows the scene convention that unshackle's default template spells
 out—quality, platform, source, audio, Atmos and picture range—so a file named here
@@ -169,7 +168,7 @@ TITLE_TEMPLATES = {
     "episode": "{title}.{season_episode}.{episode_name?}",
     "movie": "{title}.{year?}",
 }
-#: ``.1080p.DSNP.WEB-DL.DDP5.1.Atmos.H.265.DV-GROUP``. The order is unshackle's,
+#: ``.1080p.SERVICE.WEB-DL.DDP5.1.Atmos.H.265.DV-GROUP``. The order is unshackle's,
 #: and the whole reason this is a setting is that the order is a preference:
 #: put ``{range?}`` before ``{platform}`` here and every later name follows.
 RELEASE_TEMPLATE = (
@@ -228,8 +227,8 @@ def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
 
     if title.kind is TitleKind.TRACK:
         # The release date belongs in audio metadata, not in its file name.  In
-        # particular, it is not a film year and BBC Sounds often groups several
-        # distinct episodes under the same date.
+        # particular, it is not a film year and audio services often group
+        # several distinct episodes under the same date.
         return format_title(title.name, episode_name=title.episode_name)
 
     fields = title_fields(title)
@@ -381,7 +380,7 @@ def _audio_channels(stream: object, *, atmos: bool) -> tuple[str, float]:
     extra = getattr(stream, "extra", {})
     extra = extra if isinstance(extra, dict) else {}
     channel_hint = str(extra.get("channels_raw") or "").strip()
-    # Apple's HLS ``16/JOC`` is an Atmos signalling value, not a conventional
+    # Some HLS providers use ``16/JOC`` as an Atmos signalling value, not a conventional
     # sixteen-channel bed. The downloadable E-AC-3 core is named as 5.1.
     if atmos and (raw == "16" or channel_hint.upper().startswith("16/JOC")):
         return "5.1", 6.0
@@ -509,7 +508,7 @@ def release_suffix(
     tag: str = "",
     layout: str = "",
 ) -> str:
-    """The release half, e.g. ``.1080p.DSNP.WEB-DL.DDP5.1.Atmos.H.265.DV-GROUP``.
+    """The release half, e.g. ``.1080p.SERVICE.WEB-DL.DDP5.1.Atmos.H.265.DV-GROUP``.
 
     Anything unknown is left out rather than written as a placeholder, so a service
     that reports no resolution simply produces a shorter name. ``layout`` is the

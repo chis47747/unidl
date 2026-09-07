@@ -3,7 +3,7 @@
 The device file is the part of this project that cannot be shared, so a lot of
 setups keep it on a server and expose the three steps over HTTP instead. The
 protocol is pywidevine's ``serve`` API, which pyplayready's server copies, and
-which the working Netflix script talks to already:
+which existing service integrations use:
 
 ===============================================  ==========================
 ``GET  {host}/{device}/open``                     a session id, and the device

@@ -359,7 +359,7 @@ class IPlayerApi:
                 continue
             channel_id = str(raw["id"])
             if "radio" in channel_id:
-                continue  # radio belongs to the separate BBC Sounds service
+                continue  # radio channels are outside this video catalogue
             channel = Channel(
                 id=channel_id,
                 name=_text(raw.get("title")) or channel_id,

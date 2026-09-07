@@ -2,8 +2,8 @@
 
 A service flow is a generator. It yields *asks* ("show the user this list") and
 receives answers back. It never imports a UI framework, never prints, never
-calls ``input()``. This keeps 150+ services free of UI concerns, makes them
-unit-testable by feeding scripted answers, and lets the same flow run
+calls ``input()``. This keeps service implementations free of UI concerns,
+makes them unit-testable by feeding scripted answers, and lets the same flow run
 non-interactively by auto-answering.
 
     def browse(self, ctx):
@@ -12,8 +12,8 @@ non-interactively by auto-answering.
         for ep in self.api.episodes(picked):
             yield ctx.emit(self.get_playback(ep))
 
-Navigation mirrors the old scripts' ``BackRequest`` / ``QuitRequest``: the
-driver throws :class:`Back` or :class:`Quit` into the generator, so a flow can
+Navigation uses the same back/quit semantics as the rest of the application:
+the driver throws :class:`Back` or :class:`Quit` into the generator, so a flow can
 catch ``Back`` to pop up one level or let it bubble out to exit the flow.
 """
 
@@ -269,9 +269,9 @@ class SettingsAsk(Ask):
 class Suspend(Ask):
     """Run something with the terminal handed back to it.
 
-    Needed by the legacy runner: an unported script owns stdin/stdout and draws
-    its own menus, which cannot happen inside a full-screen app. The presenter
-    drops out of application mode, runs ``work``, then restores the UI.
+    Needed when a compatibility task owns stdin/stdout and draws its own menus,
+    which cannot happen inside a full-screen app. The presenter drops out of
+    application mode, runs ``work``, then restores the UI.
     """
 
     work: Any = None  # Callable[[], Any]

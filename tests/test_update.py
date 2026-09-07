@@ -17,6 +17,8 @@ def test_check_for_updates_uses_the_highest_public_version(monkeypatch) -> None:
             "html_url": "https://github.com/chis47747/unidl/releases/tag/v2.0.3",
         }
 
+    # Keep this fixture's positive-update scenario stable after each release bump.
+    monkeypatch.setattr(update, "__version__", "2.0.3")
     monkeypatch.setattr(update, "_json_get", fake_json_get)
     update.clear_update_cache()
     found = update.check_for_updates()

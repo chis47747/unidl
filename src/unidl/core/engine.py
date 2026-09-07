@@ -538,12 +538,12 @@ class Engine:
     def playback_input(self, playback: Playback) -> str:
         """Return the concrete input handed to UniDL.
 
-        Services such as Netflix and YouTube receive an adaptive track inventory
-        rather than an MPD/HLS URL.  ``Playback`` keeps that inventory as a dict,
-        while UniDL deliberately accepts JSON through the same file-oriented
-        input as every other manifest.  Materialising it here keeps services out
-        of temp-file management and, importantly, gives parsing, command export
-        and downloading the exact same input path.
+        Some services receive an adaptive track inventory rather than an
+        MPD/HLS URL. ``Playback`` keeps that inventory as a dict, while UniDL
+        deliberately accepts JSON through the same file-oriented input as every
+        other manifest. Materialising it here keeps services out of temp-file
+        management and gives parsing, command export and downloading the exact
+        same input path.
         """
         if playback.inline_manifest:
             payload = str(playback.inline_manifest)
@@ -702,7 +702,7 @@ class Engine:
 
         Three places, and which ones are read depends on the system. A master
         playlist may announce the key up front with ``EXT-X-SESSION-KEY``, which is
-        what Disney+ does and is the cheap answer. For a system whose init data is
+        what a master playlist may do and is the cheap answer. For a system whose init data is
         per key id, the playlists in the encrypted licence inventory are read first:
         an audio rendition and a video rendition can carry different keys, and each
         PlayReady exchange only answers for the header it was made with, so reading
@@ -728,7 +728,7 @@ class Engine:
             if media:
                 resolved = system.extract(media, drm, self.log) or resolved
         # the master last, so a per-track key line is what the first exchange uses
-        # and the master's is the fallback - the order the legacy scripts used
+        # and the master's is the fallback - the order used by earlier clients
         resolved = system.extract(text, drm, self.log) or resolved
         if resolved or "#EXT-X-STREAM-INF" not in text:
             return resolved
@@ -814,14 +814,13 @@ class Engine:
             return None
         if playback.manifest_url and _looks_like_hls(playback.manifest_url):
             # HLS does carry init data, in an EXT-X-KEY/EXT-X-SESSION-KEY attribute
-            # rather than in XML. Skipping the fetch here is what made Disney+ report
+            # rather than in XML. Skipping the fetch here would report
             # "no PSSH found in the manifest" about a playlist that announces one.
             return self._init_data_from_playlist(playback, system, tracks)
 
         # Everything else is worth fetching: this used to require ".mpd" in the URL,
-        # and a service that serves DASH from a path without it - Plex serves
-        # /library/parts/<id>-dash - was told "no PSSH found in the manifest" about a
-        # manifest nobody had looked at.
+        # and a service that serves DASH from a path without it would be told
+        # "no PSSH found in the manifest" about a manifest nobody had looked at.
         self.log(
             "Reading inline manifest for DRM init data"
             if playback.inline_manifest
@@ -1009,8 +1008,8 @@ class Engine:
             return []
         # ``license_track_kids`` normally contains the same ids as the parsed
         # streams, but a service may replace it in ``prepare_drm`` when its media
-        # and licence protocols spell the same KID differently. Netflix
-        # PlayReady Web is the important case: JSON/MP4 carries a little-endian
+        # and licence protocols spell the same KID differently. A PlayReady
+        # client may carry a little-endian
         # fragment GUID while its WRM header, licence response and stored vault
         # row use the canonical UUID. Looking up the stream spelling made every
         # repeat download miss keys that were already in the vault.
@@ -1702,7 +1701,7 @@ class Engine:
             append_url_params=overrides.append_url_params,
             ad_keywords=list(overrides.ad_keywords),
             # trick-play and thumbnail ladders otherwise win "best video" on
-            # height alone, which is what the old scripts used -dv to avoid
+            # height alone, which is why earlier clients used -dv to avoid
             drop_video=normalize_drop_video_pattern(settings.get("drop_video", "")),
         )
 

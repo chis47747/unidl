@@ -17,11 +17,11 @@ in. Otherwise it opens the service menu and asks you to supply the service's own
 URL or identifier. Disc-only offers and providers with no matching service are
 shown but cannot be opened.
 
-Channel add-ons follow the platform that actually hosts playback. For example,
-**Paramount+ Amazon Channel**, **Paramount Plus Apple TV Channel** and
-**Paramount+ Roku Premium Channel** open Amazon, Apple TV and Roku respectively,
-not Paramount's native service. If the host platform is not registered, the row
-shows no service instead of falling back to the content brand.
+Channel add-ons follow the platform that actually hosts playback. The mapper
+checks the reseller/platform prefix before the content brand and opens only a
+registered host service. If the host platform is not registered, the row shows
+no service instead of falling back to the content brand. This prevents a
+third-party channel add-on from being mistaken for the provider's native app.
 
 Availability rows are grouped by region and then by subscription, free,
 ad-supported, rental and purchase offers. Series offers include the seasons

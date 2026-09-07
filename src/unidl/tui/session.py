@@ -1265,8 +1265,8 @@ class SessionController:
         step that set it.
 
         Cleared here rather than by whoever set it, because most of what sets it is
-        service code: a hundred-odd services call ``ctx.status`` before a request
-        and none of them can be expected to take it down again on every path out,
+        service code: many services call ``ctx.status`` before a request and none
+        of them can be expected to take it down again on every path out,
         including the ones that raise. A live channel that failed to resolve is the
         case that showed it - "Resolving <channel> (widevine)" sat on the service
         menu for the rest of the session, with the menu itself proving nothing was
@@ -1686,7 +1686,7 @@ class SessionController:
         and where finishing one download tore all four screens down - while the
         very same title picked from the menu left you on the menu. Running the
         link first and then handing over to ``home`` gives all three entry points
-        the same navigation, and does not ask 150 services to know about it.
+        the same navigation, without requiring every service to know about it.
         """
         try:
             yield from entry(ctx, argument)
@@ -2087,7 +2087,7 @@ class SessionController:
             elif playback.drm is not None and (playback.drm.context.get("apple_music") or {}).get(
                 "foothill_context_keys"
             ):
-                self.post_field("key", "Apple Music FootHill ready", "ok")
+                self.post_field("key", "Audio helper ready", "ok")
             elif playback.drm is not None and playback.drm.needs_license:
                 self.post_field("key", "unavailable", "error")
             elif playback.display_keys:
@@ -2632,7 +2632,7 @@ class SessionController:
         return mode
 
     def _name_release(self, playback: Playback, tracks: TrackSet) -> None:
-        """Add the release half to the save name: ``.1080p.DSNP.WEB-DL.DV-TAG``.
+        """Add the release half to the save name: ``.1080p.SERVICE.WEB-DL.DV-TAG``.
 
         The queue row is renamed with it, so the row, the log, the command file and
         the file on disk are all one string rather than four nearly-identical ones.

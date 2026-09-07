@@ -1,22 +1,14 @@
 """External helper integration.
 
-A sizeable minority of services cannot work with Python alone. Measured in the
-existing script corpus:
+Some services cannot work with Python alone. A service may need a system
+binary, a Python module, a certificate, a native library or another small data
+asset. The service declares those requirements, and this module resolves them
+from the configured locations without exposing provider-specific implementation
+details in Core documentation.
 
-* ``xfinity``  - ``java``/``javac`` + a unidbg runner (``SecClientRunner.java``,
-  ``libsecclient.so``) driven through a JSON file bridge
-* ``ytv`` / ``youtube`` - ``node`` to evaluate player JS, plus a Python helper
-  module (``ytv_sabr``) loaded from a path at runtime
-* ``appletv`` - a local Mescal/FairPlay signing module loaded by path
-* ``skygo`` - ``adb`` to talk to a real device
-* ``10play`` - ``subby`` for subtitle conversion, before subtitles were handed
-  to UniDL
-* ``dazn`` - ``curl``
-
-The old scripts each hardcoded absolute paths and crashed mid-flow when
-something was missing. Here a service *declares* what it needs, resolution is
-centralised and configurable, and the UI can report a missing helper before the
-user starts browsing rather than after they picked an episode.
+Legacy scripts often hardcoded absolute paths and crashed mid-flow when a
+dependency was missing. Here resolution is centralised and configurable, and
+the UI can report a missing helper before the user starts browsing.
 
 Three kinds are supported:
 
@@ -153,12 +145,11 @@ class HelperResolver:
     4. ``<paths.helpers>/<service>/<name>`` then ``<paths.helpers>/<name>``
     5. the locations the service itself declares in ``extra_paths``
 
-    Step 5 is the bridge, and it is deliberately the last one: a service that needs
-    something outside the package *says where it is*, in its own declaration, where
-    it can be read. iq's signer is a 31MB tree of jars and a shared library and
-    Optimum's Nagra harness is a 150MB build tree - neither can sensibly be copied
-    into the helper directory, and one of them cannot be moved at all because its
-    entry point imports its siblings. So they are named.
+    Step 5 is the bridge, and it is deliberately the last one: a service that
+    needs something outside the package *says where it is*, in its own
+    declaration, where it can be read. Large native runtimes and device-bound
+    trees cannot always be copied into the helper directory, so they are named
+    explicitly and resolved only at that final step.
 
     Nothing is searched for. There is no directory this consults that a service or
     the configuration has not pointed it at, which is what makes "what does unidl
@@ -364,8 +355,8 @@ class HelperResult:
 class HelperRunner:
     """Runs helper processes with logging, timeouts and a JSON file bridge.
 
-    The file bridge exists because that is how the xfinity SecClient runner
-    already communicates: write ``runner_input.json``, run the process, read
+    The file bridge supports helpers that exchange structured data through files:
+    write ``runner_input.json``, run the process, then read
     ``runner_output.json``.
     """
 
@@ -448,9 +439,9 @@ class HelperRunner:
 def load_module(path: Path, name: str | None = None) -> ModuleType:
     """Import a Python module from an arbitrary file path.
 
-    Used by services that depend on a helper module living outside the package
-    (apple's local Mescal signer, ytv's SABR helper). Kept in one place so the
-    failure message is consistent instead of an opaque ImportError.
+    Used by services that depend on a helper module living outside the package.
+    Kept in one place so the failure message is consistent instead of an opaque
+    ImportError.
     """
     path = _expand(path)
     if not path.exists():

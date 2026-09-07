@@ -35,6 +35,12 @@ OPEN_SOURCE_PROJECTS = (
         "https://github.com/nilaoda/N_m3u8DL-RE",
     ),
     (
+        "unshackle",
+        "service architecture and media delivery reference",
+        "GPL-3.0-only",
+        "https://github.com/unshackle-dl/unshackle",
+    ),
+    (
         "pydecrypt",
         "MP4 CENC/CBCS and WebM media decryption",
         "GPL-3.0-only",

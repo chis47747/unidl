@@ -258,8 +258,8 @@ class CdmScreen(Screen[str | None]):
             )
             return
 
-        # every registered system, not a hardcoded pair: a MonaLisa device was
-        # discovered, counted and then never drawn, so iq's device was unpickable
+        # every registered system, not a hardcoded pair: a newly registered
+        # device must be discovered, counted and drawn in the picker.
         for system in [s.id for s in all_systems()]:
             group = [device for device in shown if device.system == system]
             if not group:

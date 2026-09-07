@@ -11,18 +11,6 @@ response, the off mode leaves that provider request intact but does not parse or
 attach the optional chapter field; this keeps the provider's primary response
 contract stable while preserving the same user-visible policy.
 
-### Paramount+ / CBS
-
-Paramount's Android-TV video metadata carries an optional `playbackEvents`
-object. UniDL reads its timestamps only when **Fetch chapter metadata** is
-enabled and converts the values, which are milliseconds, into Core `Chapter`
-objects. Paramount+ US and international entries retain the five provider
-markers (`previewStartTimeMs`, `previewEndTimeMs`, `openCreditStartTime`,
-`openCreditEndTimeMs`, and `endCreditChapterTimeMs`). CBS follows its player
-player contract and exposes the end-credit marker only. These are navigation
-markers, not ad-removal instructions; a missing or malformed marker simply
-leaves that chapter out while the Paramount-owned licence path continues.
-
 ## Service contract
 
 When a service's playback API returns chapters, convert its response in the

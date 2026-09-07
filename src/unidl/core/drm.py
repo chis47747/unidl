@@ -17,9 +17,9 @@ licence       POST        SOAP POST       none - decrypted locally
 ============  ==========  ==============  =====================  ==========
 
 That last column is why the registry carries behaviour and not just labels.
-MonaLisa has no licence round trip at all: iQiyi hands out the ticket with the
-playback response and the module unwraps it offline. A registry of names would
-have left every caller still asking "but which kind is it".
+MonaLisa has no licence round trip at all: a service hands out a ticket with
+the playback response and the module unwraps it offline. A registry of names
+would have left every caller still asking "but which kind is it".
 
 Device *discovery* lives here too, because the file extension is what says which
 system a device belongs to, and that is a fact about systems.
@@ -78,8 +78,7 @@ ChallengeMaker = Callable[[Exchange], bytes]
 """Produces a licence challenge and stops there, without asking for a licence.
 
 Needed by services that must present a challenge **before** they are allowed to
-learn anything about the content - Netflix will not describe a title to a client
-that cannot prove a CDM answered, so the challenge comes first and the key ids
+learn anything about the content. The challenge comes first and the key ids
 come back with the answer. Declared as its own capability rather than faked by
 aborting an exchange, because aborting one means raising through code whose job is
 to try alternatives and report that none worked.
@@ -549,7 +548,7 @@ def _distinct(values: Iterable[str | None]) -> list[str]:
 
 #: A refusal shaped like "you are asking too often". Worth stopping the loop for:
 #: the next header gets the same answer, and that answer says nothing about it.
-#: Disney answers 403 ``throttled`` after a handful of licence requests.
+#: Some providers answer 403 ``throttled`` after a handful of licence requests.
 _THROTTLED = ("throttl", "too many request", "rate limit", "429")
 
 
@@ -655,7 +654,7 @@ def _collect_playready_keys(
                 )
                 continue
             # Some transports need the KID from the header as well as the SOAP
-            # challenge (Amazon is one). Keep DrmInfo aligned with the exchange
+            # challenge. Keep DrmInfo aligned with the exchange
             # currently in flight rather than leaving it pinned to header one.
             drm.wrm_header = header
             try:
@@ -880,8 +879,8 @@ register(
         # response, so only the service can provide it
         extract=None,
         networked=False,
-        help="iQiyi only. The ticket comes with the playback response and is "
-        "unwrapped locally, so there is no licence request to make.",
+        help="The ticket comes with the playback response and is unwrapped "
+        "locally, so there is no licence request to make.",
         install_hint="python -m pip install pymonalisa, then configure a .mld and its "
         "wasm module under paths.cdm in unidl.yaml",
         rank=30,

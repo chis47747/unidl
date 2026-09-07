@@ -56,8 +56,7 @@ class ServiceReloader:
             name: _module_dependencies(module, set(loaded))
             for name, module in loaded.items()
         }
-        # A few service families deliberately share native Python modules (for
-        # example Discovery Canada and Sportsnet both build on Citytv). Reload
+        # A few service families deliberately share native Python modules. Reload
         # both directions inside ``unidl.services``: a requested wrapper needs
         # its edited shared dependency, and an edited shared implementation
         # needs every wrapper that imported names from it refreshed as well.

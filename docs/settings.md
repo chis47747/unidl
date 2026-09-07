@@ -48,10 +48,10 @@ you get*. A service may expose one profile or a multi-select when each selected
 profile maps to a verified API request. Core parses those service-authorized
 manifests independently, merges their track ladders and removes exact duplicate
 representations; it never invents profile names or derives URLs from shared track
-preferences. Amazon has `FHD_H264_CBR_DASH` and `4K_DV_CVBR_DASH`. BBC has
-`auto/4k/1080p/720p`. Xfinity has `sd|hd`. Paramount has platform, region and
-local market. None of these vocabularies translate into each other, so each
-service declares its own and they only appear while that service is active.
+preferences. One service may expose named video profiles, another may expose a
+quality ladder or a market selector. None of these vocabularies translate into
+each other, so each service declares its own and they only appear while that
+service is active.
 
 **Track settings apply after parsing**, against the real ladder, and are one
 shared vocabulary for every service. `1080` means the same thing everywhere
@@ -69,7 +69,7 @@ These are two different choices and must never be represented by the same settin
    subtitle settings choose representations from the ladder that was actually
    returned. They do not choose another source URL.
 
-For example, Movies Anywhere exposes `manifest_resolution`, `manifest_codec` and
+For example, a provider may expose `manifest_resolution`, `manifest_codec` and
 `manifest_color` for the source manifest. Its shared `video_quality`,
 `video_codec` and `video_range` settings remain available for the final tracks
 inside that manifest. A 4K Dolby Vision source manifest and 1080p SDR output
@@ -257,11 +257,10 @@ installed engine cannot provide. See [audio.md](audio.md).
 
 ### Do not remove `drop_video` without reading this
 
-Trick-play and thumbnail ladders are video tracks with tall dimensions. A real
-example from Paramount: a `1280x1440` thumbnail track beat the genuine `1920x1080`
-video when "best" was decided on height. The default regex keeps them out of
-quality selection. Its terms are bounded so a normal title such as `Strickland`
-is not mistaken for a `trick` track. Existing settings containing the original
+Trick-play and thumbnail ladders are video tracks with tall dimensions and can
+beat a normal video when "best" is decided on height. The default regex keeps
+them out of quality selection. Its terms are bounded so an ordinary title is
+not mistaken for a `trick` track. Existing settings containing the original
 `trick|thumbnail|image` default are upgraded at runtime. The native track
 selector keeps these auxiliary representations out of the normal quality
 choice for the same reason.
@@ -303,20 +302,18 @@ other variant's token and cookie untouched and therefore must keep
 that definitively invalidates that selected session) may clear authentication
 state.
 
-Declare as many as the service genuinely has. Paramount declares three
-(`platform`, the unified `region`, and `dma`) and none of them is a resolution.
-Its `platform` and `region` rows are routing/profile selectors; changing them
-must not sign out or delete the token/cookie cache belonging to another
-Paramount+/CBS route. `region` offers `AUTO`, `US`, and the public Paramount+
-international market country codes. The old `region: intl` plus `intl_country`
-configuration is read for compatibility, but the separate country row is no
-longer shown. Account versus TV-provider login is chosen from the service-home
-`Sign in` action and is not a service setting.
+Declare as many settings as the service genuinely has. Routing, region,
+provider profile and manifest selectors are all valid service settings, but none
+is a resolution unless the provider explicitly defines it that way. Changing a
+platform/API/region selector must not sign out or delete credentials belonging
+to another variant; leave `resets_session=False`. Account versus device-code
+login is chosen from the service-home `Sign in` action and is not an implicit
+fallback from a settings change.
 
-yes+ declares `manifest_profile` with `hd` and `uhd` values. This chooses the
-yes+ catalogue resource before playback authorization; it does not replace or
-shadow the shared `video_quality`, `video_codec` or `video_range` settings used
-after the returned manifest is parsed.
+A service-level `manifest_profile` chooses the catalogue resource before
+playback authorization; it does not replace or shadow the shared
+`video_quality`, `video_codec` or `video_range` settings used after the returned
+manifest is parsed.
 
 ## Reading
 

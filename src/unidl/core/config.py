@@ -30,9 +30,8 @@ CONFIG_NAME = "unidl.yaml"
 # default *state* home; only the YAML file there is retired.
 LEGACY_CONFIG_PATH = Path.home() / ".unidl" / CONFIG_NAME
 
-# Canonical service id -> ids used by earlier releases.  This is intentionally
-# kept in the config layer as a small compatibility table so direct callers such
-# as ``Config.credential("appletv")`` get the same behavior as a built service.
+# Canonical service id -> ids used by earlier releases. This compatibility table
+# lets direct callers using a renamed id read the same namespace as the service.
 RENAMED_SERVICE_IDS: dict[str, tuple[str, ...]] = {
     "appletv": ("apple",),
     "paramountplus": ("paramount",),

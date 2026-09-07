@@ -2,10 +2,9 @@
 
 Two tiers, deliberately kept apart:
 
-* **service settings** - each service's own vocabulary (Amazon's
-  ``FHD_H264_CBR_DASH``, BBC's ``4k/1080p/720p``, Paramount's platform+region).
-  Declared by the service, only meaningful while that service is active, and
-  they usually change *which manifest you get*.
+* **service settings** - each service's own vocabulary (profiles, regions,
+  markets or other provider selectors). Declared by the service, only meaningful
+  while that service is active, and they usually change *which manifest you get*.
 * **track settings** - one shared vocabulary for every service
   (resolution / codec / range / audio / subs). Applied *after* the manifest is
   parsed, against the real ladder.
@@ -592,8 +591,8 @@ GLOBAL_SETTINGS: list[Setting] = [
         default=False,
         help=(
             "Compatibility mode for services whose licence init data is only "
-            "available on selected media playlists (notably HLS Apple, Disney and "
-            "DIRECTV). Off keeps UniDL's default full-manifest inventory licensing; "
+            "available only on selected media playlists. Off keeps UniDL's default "
+            "full-manifest inventory licensing; "
             "on waits until you confirm the output tracks, then asks for keys only "
             "from those encrypted tracks. It uses the final selection only as the "
             "source of KIDs/init data; it never turns a shared output preference into "
@@ -931,7 +930,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "text",
         default="",
         help="What goes after the dash at the end of a file name - "
-        "Show.S01E01.1080p.DSNP.WEB-DL-YOURTAG. Yours to choose, and left off "
+        "Show.S01E01.1080p.SERVICE.WEB-DL-YOURTAG. Yours to choose, and left off "
         "entirely when empty. Films and episodes only.",
         visible=False,
     ),

@@ -8,11 +8,10 @@ participate in lookup, search and writes.
 
 ## Why it is worth having
 
-Keys are reused far more than you would expect. A single title usually issues
+Keys are reused far more than you would expect. A single title often issues
 **one KID for every encrypted track** — all video renditions and all audio
-streams. A real measurement from Paramount: 8 encrypted tracks, 1 KID. So the
-first key fetched covers the whole title, and a repeat download needs no license
-exchange at all.
+streams. The first key fetched can therefore cover the whole title, and a repeat
+download needs no licence exchange at all.
 
 This is also true within one run, which is why the vault pays for itself before
 you have downloaded anything twice.
@@ -97,7 +96,7 @@ PlayReady, where one PSSH/WRM header can return only its own key. PlayReady
 headers already covered by the vault are skipped, but a header carrying another
 KID is still sent to that service's licence endpoint. Init-data discovery runs
 before the final all-cached decision when a manifest can hide additional KIDs
-(for example Disney+ HLS media playlists or a Widevine v1 PSSH).
+(for example an HLS media playlist or a Widevine v1 PSSH).
 
 Lookup prefers a same-service match, then falls back to any service. KIDs are
 globally unique in practice, so a key imported under one service name still
@@ -119,7 +118,7 @@ For an exact KID, **Search remote vault** is the first result whenever at least
 one selected remote backend supports it. Nothing remote happens while typing.
 Selecting that row queries the sole selected remote directly; with several, a
 single-choice picker asks which backend to contact. A service-aware HTTP vault
-such as StreamFab then offers **All supported platforms** first, followed by its
+can offer **All supported platforms** first, followed by its
 declared platforms. Choosing one platform sends only that platform's `GetKey`
 request for each candidate KID; **All** intentionally walks the finite
 `supported_services` list and stops at the first hit. The result is displayed and
@@ -164,7 +163,7 @@ From the command line:
 ```bash
 unidl keys                                          # summary by service
 unidl keys 96a9ef1af1094578974d4c09ef8fcecc         # one KID
-unidl keys 96a9ef... --service paramountplus
+unidl keys 96a9ef... --service example
 ```
 
 ## API
@@ -174,17 +173,17 @@ from unidl.core.vault import KeyVault
 
 vault = KeyVault(config.paths.keys_db)
 
-vault.add("paramountplus", kid, key, title="Show.S01E01", source="license")
-vault.add_pairs("paramountplus", ["kid:key", ...], title="Show.S01E01")
+vault.add("example", kid, key, title="Show.S01E01", source="license")
+vault.add_pairs("example", ["kid:key", ...], title="Show.S01E01")
 preview = vault.preview_pairs(["kid:key", ...])
 result = vault.add_many(
-    "paramountplus", ["kid:key", ...], title="Show.S01E01", source="manual"
+    "example", ["kid:key", ...], title="Show.S01E01", source="manual"
 )
 
-vault.get_key(kid, "paramountplus")        # str | None
-vault.get_keys([kid, ...], "paramountplus")  # dict, only what was found
+vault.get_key(kid, "example")              # str | None
+vault.get_keys([kid, ...], "example")     # dict, only what was found
 vault.find("Big.Brother")              # by KID, kid:key, or title text
-vault.by_service("paramountplus")
+vault.by_service("example")
 vault.stats()
 ```
 
@@ -305,8 +304,7 @@ Three backends, because three is what the shapes are:
 separate protocols — one names the operation in the body against a single URL, the
 other puts the service and key id in the path.
 
-The StreamFab vault is an `HTTP` backend. Its JSON calls are the same shape as
-the existing adapter:
+An `HTTP` backend uses the following JSON shape:
 
 ```json
 {
@@ -324,23 +322,14 @@ switch controls whether reads and writes reach it. If a backend declares
 `supported_services`, unidl maps only the configured `service_map` aliases and
 skips unsupported local service IDs without sending them to the server.
 
-The configured StreamFab endpoint currently accepts these remote service tags:
-`abema`, `amazon`, `amazonmusic`, `applemusic`, `appletv`, `ard`, `canal`,
-`channel4`, `crackle`, `crunchyroll`, `cw`, `danime`, `dazn`, `discovery`,
-`disney`, `dmm`, `espn`, `familyclub`, `fandango`, `fanza`, `fod`, `foxtel`,
-`gyao`, `hulu`, `itv`, `joyn`, `lemino`, `linemusic`, `m6`, `max`, `mgstage`,
-`netflix`, `nhk`, `now`, `onlyfans`, `paramountplus`, `paravi`, `peacock`,
-`plex`, `pluto`, `rakuten`, `roku`, `rtl`, `shahid`, `skyshowtime`, `sokmil`,
-`spotify`, `stan`, `starzon`, `telasa`, `tidal`, `tubi`, `udemy`, `unext`,
-`viki`, `vix`, `waipu`, `wowow`, `wowtv` and `youtubemovie`. The project maps
-local IDs to those tags only for this backend: legacy `apple` → `appletv`,
-`canalplus` → `canal`, `discoveryca`/`discoverygo`/`discoveryplus` → `discovery`,
-`nowtv` → `wowtv`, legacy `paramount` → `paramountplus`, `rtlplus` → `rtl`,
-`starz`/`starzplay` → `starzon`, and `vudu` → `fandango`. Other local services
-are skipped by this backend rather than sent with an unsupported tag.
+The configured remote endpoint may publish a finite list of supported service
+tags and optional aliases. UniDL sends only a tag explicitly declared by that
+backend; unsupported local service IDs are skipped rather than guessed or sent
+over the network. Keep this list in the private configuration, not in public
+documentation.
 
-Its project entry also declares `searchable: true`. That does not make typing a
-KID issue network requests; it only makes StreamFab selectable under **Search
+An endpoint may declare `searchable: true`. That does not make typing a KID
+issue network requests; it only makes the backend selectable under **Search
 vaults** and enables the explicit result-row action.
 
 - reads take the first key offered, local before remote

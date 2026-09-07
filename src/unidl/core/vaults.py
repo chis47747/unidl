@@ -319,8 +319,7 @@ class HttpVault:
         knows its service and makes one lookup, while home search knows only the
         KID and may fan out. The caller runs it only after an explicit click.
         Passing a declared ``service`` makes exactly one request per candidate
-        KID, which is the safe route for service-aware HTTP vaults such as
-        StreamFab.
+        KID, which is the safe route for a service-aware HTTP vault.
         """
         if not self.searchable:
             return []

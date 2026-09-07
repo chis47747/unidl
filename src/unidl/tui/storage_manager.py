@@ -459,7 +459,7 @@ class StorageManagerScreen(Screen[None]):
         )
         suffix = naming.release_suffix(
             quality="1080p",
-            platform="ATV",
+            platform="SERVICE",
             audio="DDP",
             audio_channels="5.1",
             audio_full="DDP5.1",

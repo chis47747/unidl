@@ -4,9 +4,9 @@ Not a service. Nothing here downloads anything, and it is deliberately not in
 ``services/`` - it would otherwise show up in the platform grid and in "search
 in", offering to open a session it cannot run.
 
-What it is for is the question that comes *before* picking a platform. With 150
-services installed, "which of them has this" is a real question, and the answer
-changes by region. JustWatch already knows; the only part worth adding is the
+What it is for is the question that comes *before* picking a platform. "Which of
+them has this" is a real question, and the answer changes by region. JustWatch
+already knows; the only part worth adding is the
 last step - taking a provider it names and opening *our* service for it, which
 is why the provider mapping lives here rather than in a browser tab.
 
@@ -79,9 +79,8 @@ PRESENTATION = {
 
 PRESENTATION_RANK = ["_4K", "BLURAY_4K", "HD", "BLURAY", "SD", "DVD", "CANVAS"]
 
-#: The regions the legacy script looked at by default. Kept as-is: it is a
-#: reasonable spread of the catalogues these services cover, and someone's
-#: existing habit is not worth breaking for tidiness.
+#: Built-in regions used when no browsing preference has been saved. They are a
+#: reasonable spread of catalogues and remain stable for existing users.
 DEFAULT_REGIONS = [
     "US", "GB", "CA", "AU", "JP", "DE", "FR", "KR", "TW", "HK",
     "ZA", "EG", "ES", "PT", "NL", "IT", "GE",
@@ -159,8 +158,8 @@ class Offer:
     def physical(self) -> bool:
         """A disc, not a stream.
 
-        Amazon sells both, under one provider name, so without this the DVD
-        listing resolved to our Amazon service and offered to download a disc.
+        A provider may sell both physical and streaming offers under one display
+        name, so without this a DVD listing could be offered as a media stream.
         """
         return self.presentation in {"DVD", "BLURAY", "BLURAY_4K"}
 
@@ -260,8 +259,7 @@ RESELLERS = {
 }
 
 #: Tier and locale noise on the end of a package name. Stripped one at a time,
-#: longest first, so `paramountplusbasicwithads` reaches `paramountplus` and then
-#: `paramount`.
+#: longest first, so compound package names reach their base provider.
 _SUFFIXES = [
     "basicwithads", "premiumplus", "essential", "withads", "premium",
     "standard", "channel", "online", "korea", "store",
@@ -295,9 +293,9 @@ PROVIDER_MAP = {
     "animedigitalnetwork": "adn",
     "youtubefree": "youtube",
     "youtubetv": "ytv",
-    # In Canada, JustWatch lists CTV and Noovo as part of the Crave catalogue
-    # we expose. Keep these explicit so their names cannot fall through to an
-    # unrelated provider with a similar display name.
+    # Some catalogues list partner brands under a host service. Keep those
+    # aliases explicit so their names cannot fall through to an unrelated
+    # provider with a similar display name.
     "ctv": "crave",
     "noovo": "crave",
     # An empty value means "we have nothing for this", stated rather than left
@@ -343,10 +341,10 @@ def resolve_service(
 
     Tried in order of how much is known: an explicit mapping, a recognised
     reseller, then the package/display names with tier and locale noise removed.
-    Resellers must come before the content brand: ``appletvparamountplus`` plays
-    through Apple TV, not Paramount's own app. Returns ``None`` rather than
-    guessing when nothing fits - "we cannot open this one" is a useful answer
-    and a wrong service is not.
+    Resellers must come before the content brand: a channel add-on plays through
+    its host platform, not the content owner's native app. Returns ``None``
+    rather than guessing when nothing fits - "we cannot open this one" is a
+    useful answer and a wrong service is not.
     """
     mapped = PROVIDER_MAP.get(_normalize(technical_name))
     if mapped is not None:

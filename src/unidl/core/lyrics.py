@@ -219,7 +219,7 @@ class Lyrics:
 
 
 def parse_ttml(ttml: str, *, lyrics_id: str = "", source_type: str = "lyrics") -> Lyrics:
-    """Parse Apple-style TTML without discarding its original document."""
+    """Parse provider-style TTML without discarding its original document."""
     text = str(ttml or "").strip()
     if not text:
         raise ValueError("lyrics TTML is empty")

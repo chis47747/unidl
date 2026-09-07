@@ -2,22 +2,20 @@
 
 `PartnerAuthorization` is the core contract for handing a short-lived sign-in
 URL from one installed service to another without displaying, serializing or
-persisting it. It is for a provider relationship such as a library BingePass
-authorizing a separate streaming service. It is not a general browser-link
-model and it does not let services call into one another.
-
-The first implementation is Hoopla to Hallmark+:
+persisting it. It is for an explicitly allowlisted provider relationship in
+which one service authorizes a separate service. It is not a general
+browser-link model and it does not let services call into one another.
 
 ```text
-Hoopla service                 core                     Hallmark+ service
+producer service               core                     consumer service
      |                           |                              |
-     | call Hoopla /authorize    |                              |
+     | call its /authorize API   |                              |
      | create PartnerAuthorization                             |
      | yield PartnerHandoff ---->| validate and build receiver |
      |                           |----------------------------->|
      |                           |       claim URL once         |
-     |                           |       complete Hallmark SSO  |
-     |                           |       save Hallmark session  |
+     |                           |       complete provider SSO  |
+     |                           |       save consumer session  |
      |<--------------------------| PartnerAuthorizationResult   |
 ```
 
@@ -247,36 +245,25 @@ non-sensitive refusal without reading `.url`; core then discards it. When
 partner mode is selected, missing or expired partner state should direct the
 user back to the producer workflow, not silently ask for account credentials.
 
-## Hallmark+ reference implementation
+## Reference implementation
 
-Hoopla and Hallmark+ demonstrate the complete pattern:
+A producer/consumer pair should follow this pattern:
 
-- Hoopla calls its own BingePass authorization API.
-- `hoopla.api.partner_authorization()` classifies Hallmark destinations and
-  creates a contract targeting `hallmark`.
-- Hoopla yields `ctx.partner_handoff()` and never renders Hallmark's URL.
-- core builds Hallmark and verifies that it accepts authorization from `hoopla`.
-- Hallmark reads `.url` once, follows only approved Hallmark authorities,
-  completes the Hallmark login exchange and stores the resulting Hallmark token
-  and `partner_sso` cookie profile.
-- Hallmark never calls Hoopla's authorization API and never stores the handoff
-  URL.
-- Hallmark account mode remains a separate setting and uses only its TV token
-  and refresh path.
-
-Hallmark also shows why authorization and API transport may need separate
-adapters. In partner mode, its TV client reads navigation, recommendations,
-details, search and live-channel lists, while its Partner client owns profile,
-cookie refresh, VOD/Live playback, subtitles and licence transport. The two
-refresh domains are never mixed.
+- the producer calls only its own authorization API and creates a contract with
+  explicit source and target IDs;
+- Core verifies the allowlist and routes the one-time handoff in memory;
+- the consumer claims the URL once, follows only approved authorities, and
+  stores state in its own token/cookie namespace;
+- neither side reads the other service's credentials or calls its APIs;
+- account mode and partner mode remain separate authentication domains.
 
 Reference files:
 
 - `src/unidl/core/partner.py`
 - `src/unidl/core/flow.py` (`PartnerHandoff` and `partner_handoff`)
 - `src/unidl/tui/session.py` (`route_partner_authorization`)
-- `src/unidl/services/hoopla/` (producer)
-- `src/unidl/services/hallmark/` (consumer)
+- `src/unidl/services/<producer>/` (producer)
+- `src/unidl/services/<consumer>/` (consumer)
 
 ## Headless and test use
 

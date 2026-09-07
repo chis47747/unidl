@@ -22,8 +22,8 @@ right of the `SERVICES … available` heading. It has three deterministic views:
 A–Z, country, and media type. Country is metadata, not a live location check: a
 service's first `GEOFENCE` code is its primary market and an empty declaration
 is International. Media type is declared by the service as audio, video, or
-both; the combined value gets its own “Audio + video” section so a platform such
-as YouTube is not hidden from either audience. Filtering, keyboard navigation
+both; the combined value gets its own “Audio + video” section so a platform that
+supports both modes is not hidden from either audience. Filtering, keyboard navigation
 and numeric addresses continue to work in every view. The status line is
 reserved for run state and entry points: CDM, DRM, after-picking action, config,
 readiness, and import.

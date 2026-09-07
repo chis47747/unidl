@@ -1,13 +1,10 @@
 """Turning service ids into brand names.
 
-A service id is a Python package name - ``bbc``, ``10play``, ``mediaset_es`` -
-which is fine for a directory and wrong for a menu. The main screen shows
-platforms, so it shows brands.
+A service id is a Python package name, which is fine for a directory and wrong
+for a menu. The main screen shows display brands instead.
 
-An explicit table beats a clever rule here: no heuristic gets ``bbc`` to ``BBC``
-and ``binge`` to ``Binge`` and ``mytvsuper`` to ``myTV SUPER``. The fallback
-covers anything added later, and a new service listed as ``Newthing`` instead of
-``newthing`` is enough until someone adds a row.
+An explicit table beats a clever rule here. The fallback covers anything added
+later, and a new service can be given its preferred spelling by adding one row.
 """
 
 from __future__ import annotations
@@ -145,8 +142,8 @@ BRANDS: dict[str, str] = {
     "tennistv": "Tennis TV",
     "tf1": "TF1+",
     "threenow": "ThreeNow",
-    # Turner's US network - tntdrama.com - which the tnt script covers along with
-    # TBS and truTV. Not Discovery's TNT Sports.
+    # This tag is shared by multiple related catalogue endpoints; keep the
+    # display spelling explicit rather than relying on acronym heuristics.
     "tnt": "TNT",
     "tod": "TOD",
     "tsn": "TSN",
@@ -186,10 +183,8 @@ BRANDS: dict[str, str] = {
 
 #: file stem -> the short service tag unshackle uses.
 #:
-#: unshackle names a service by a short uppercase tag rather than by its brand -
-#: `DSNP`, `AMZN`, `PMPT` - and those tags turn up in file names, in shared
-#: commands and in conversation. Keeping the same ones means a name you already
-#: know still works here, and a tag written by one tool is readable by the other.
+#: A short uppercase tag is used in file names and shared commands rather than
+#: the full display brand. Keeping the tag table explicit makes imports stable.
 #:
 #: Anything absent gets a derived tag (see :func:`service_tag`), which is
 #: predictable but not authoritative; add a row when the real one is known.
@@ -358,8 +353,8 @@ def pretty_platform(raw: str) -> str:
 def service_tag(raw: str) -> str:
     """The short service tag for a stem, from the table or derived from it.
 
-    >>> service_tag("paramountplus")
-    'PMPT'
+    >>> service_tag("example")
+    'EXAM'
     >>> service_tag("somethingnew")
     'SOME'
 

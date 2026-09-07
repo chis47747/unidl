@@ -1,8 +1,8 @@
 """Credential model.
 
 Services declare the slots they need; ``unidl.yaml`` fills them. Slots exist
-because one service can need several unrelated logins (Paramount has US, INTL
-and CBS accounts) and because field names differ per service.
+because one service can need several unrelated logins and because field names
+differ per service.
 """
 
 from __future__ import annotations

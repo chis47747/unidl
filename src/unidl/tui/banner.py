@@ -6,7 +6,7 @@ the service screen. A terminal has one font at one size, so "smaller" has to be
 expressed by drawing smaller letters, not by asking for a smaller font.
 
 Latin names use the hand-drawn half-block glyphs below.  Other scripts are
-rasterised into the same three-row ▀▄█ mosaic so 优酷 and Netflix occupy the
+rasterised into the same three-row ▀▄█ mosaic so names in any script occupy the
 same title band.  A framed Unicode tile remains the last resort when no font
 can draw the name, and every renderer falls back to plain text when the window
 is too narrow to hold the art.
@@ -151,10 +151,9 @@ def caption_parts(version_colour: str, note_colour: str) -> tuple[str, str]:
 def title_for(name: str) -> str:
     """The part of a service name worth drawing large.
 
-    Several services carry a qualifier - ``Paramount+ / CBS``, ``Sky Go
-    (DASH)`` - which is useful in a list and noise in block letters three rows
-    tall. The full name stays on the identity row just below, so nothing is
-    lost.
+    Service names may carry a qualifier that is useful in a list and noise in
+    block letters three rows tall. The full name stays on the identity row just
+    below, so nothing is lost.
     """
     head = (name or "").split(" / ")[0].split(" (")[0].strip()
     return head or (name or "").strip()

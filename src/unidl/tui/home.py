@@ -3,7 +3,7 @@
 Deliberately austere. This screen answers one question - which platform - so it
 shows platform names and a number for each. Account state, feature flags and
 helper status belong on the service's own screen, once you have chosen one.
-Keeping them out also means the screen does not probe ~150 services to draw
+Keeping them out also means the screen does not probe every service to draw
 itself.
 
 Three ways to choose, all equal:
@@ -16,7 +16,7 @@ Numbers are assigned once, over the whole list, and do not move when the list is
 filtered. A number is an address, not a position.
 
 Cells are built once too. Filtering hides and shows them rather than rebuilding
-the list, which keeps a keystroke from destroying and recreating 149 widgets.
+the list, which keeps a keystroke from destroying and recreating every widget.
 
 Picking one clears this screen and opens the service, which presents its own
 options. The input sits below the list, where what you type lands.
@@ -804,7 +804,7 @@ class HomeScreen(Screen):
 
         Hiding rather than rebuilding: `display: none` drops a cell out of the
         grid layout entirely, so the remaining ones reflow with no holes, and
-        149 widgets do not get destroyed and recreated on every keystroke.
+        Existing widgets do not get destroyed and recreated on every keystroke.
         """
         needle = needle.strip().lower()
         by_url = self.app.registry.for_url(needle) if needle else None

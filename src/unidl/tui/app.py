@@ -284,7 +284,7 @@ class UnidlApp(App):
         """Login summary for the main screen, without doing any network work.
 
         Cached: the list is rebuilt on every filter keystroke and there are
-        ~150 services, so probing each one every time is not free.
+        the service registry, so probing each one every time is not free.
         """
         cached = self._account_cache.get(service_cls.ID)
         if cached is not None:

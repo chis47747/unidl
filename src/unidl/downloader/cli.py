@@ -394,7 +394,7 @@ def _build_parser(
         "--decryption-engine",
         choices=["auto", "internal", "mp4decrypt", "packager", "MP4DECRYPT", "SHAKA_PACKAGER"],
         default="auto",
-        help="Decryption engine. External names are accepted for old scripts but all decryption uses the internal engine.",
+        help="Decryption engine. Compatibility aliases are accepted, but all decryption uses the internal engine.",
     )
     g_crypt.add_argument("--no-decrypt", action="store_true", help="Skip decryption even if stream is marked encrypted.")
     g_mux.add_argument("--repack", action="store_true", help="Run ffmpeg -c copy after decryption/download.")

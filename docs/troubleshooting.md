@@ -6,15 +6,9 @@ per-task log under `paths.logs`.
 
 ## Only native services appear on the main screen
 
-Not-yet-ported scripts only register when both paths are set:
-
-```yaml
-paths:
-  downloads: ~/unidl_downloads
-  tokens: /path/to/unidl/tokens
-```
-
-Check with `unidl services | wc -l`.
+Only services registered by the installed build appear on the main screen. If a
+service is missing, verify that its package is installed and check the registry
+with `unidl services | wc -l`.
 
 ## A service says "no credentials"
 

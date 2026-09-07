@@ -7,7 +7,7 @@ one more thing to discover:
 * 32 hex characters, or ``kid:key``  -> a key vault lookup
 * an http(s) URL                     -> the service whose pattern matches it
 * anything else                      -> service names, titles in the vault, and
-  an availability lookup that answers "which of these 150 services has it"
+  an availability lookup that answers "which service has it"
 
 Results are grouped into sections. Searching a service hands the term to that
 service's own ``search`` flow, so there is one search implementation, not two.
@@ -39,15 +39,14 @@ from .vault_targets import VaultSearchPicker, VaultServicePicker
 _ACTIONABLE = {"service", "key", "availability", "more", "remote_search"}
 
 #: How many rows a section shows before the rest go behind one "load more" row.
-#: There are 155 services and the vault holds thousands of keys: listing either in
-#: full pushes every other section off the screen, and the answer to "which
-#: service did I mean" is in the first few rows or it is not in the list at all.
+#: The service list and vault can both be large: listing either in full pushes
+#: every other section off the screen, and the answer to "which service did I
+#: mean" is usually in the first few rows.
 SECTION_LIMIT = 5
 
-#: The name column, and the smallest gap after it. Longest service name today is
-#: "Mediaset Infinity Espana" at twenty-four, and one longer than the column
-#: overruns it rather than being run into what follows: "Mediaset Infinity
-#: Espanasearch" would be one word, and the row exists to say two things.
+#: The name column, and the smallest gap after it. A name longer than the column
+#: overruns it rather than being run into what follows: the row exists to say
+#: two things and the gap must remain visible.
 NAME_WIDTH = 28
 NAME_GAP = 2
 
@@ -71,9 +70,9 @@ class _Row:
 def _rank(service: type[Service], needle: str) -> int:
     """How well ``service`` answers ``needle``: 0 is exact, 3 is not at all.
 
-    Every name the service answers to counts, including its tag - "dsnp" is what
-    a shared command calls Disney+, and matching only NAME/ID/ALIASES meant the
-    one service the query named was not the one at the top.
+    Every name the service answers to counts, including its short tag. Matching
+    only NAME/ID/ALIASES meant the service the query named was not the one at the
+    top.
     """
     names = [service.NAME.lower(), service.ID.lower(), service.tag().lower()]
     names.extend(alias.lower() for alias in service.ALIASES)
@@ -337,8 +336,8 @@ class GlobalSearchScreen(Screen):
             return
 
         # First, because before "which service" the question is usually "who has
-        # this at all", and with 155 services that is not something you can answer
-        # by reading a list. Offered rather than run: a lookup is a request per
+        # this at all", and with a large registry that is not something you can
+        # answer by reading a list. Offered rather than run: a lookup is a request per
         # region, so it does not belong on a keystroke.
         self._add_section(option_list, "availability", [_Row("availability")])
         # Then one list of services, best answer first. Two sections - the ones
@@ -531,8 +530,9 @@ class GlobalSearchScreen(Screen):
 
         Normally the first row that does something, which is the availability
         lookup - for a title, "who has this" is the question. But a query that
-        *names* a service exactly is not a title: "dsnp" is Disney+, and running a
-        JustWatch search for the string "dsnp" finds nothing. So an exact match
+        *names* a service exactly is not a title: a short service tag is not a
+        film or series title, and running a JustWatch search for it finds nothing.
+        So an exact match
         wins, wherever it sits in the list.
 
         "Load more" never wins: it is not an answer to what was typed.
