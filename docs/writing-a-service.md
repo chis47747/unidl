@@ -8,12 +8,12 @@ track selection, download, decryption, subtitles and muxing.
 The result is one service that works in the TUI and in headless tests without a
 second menu implementation.
 
-## 1. Create and register the package
+## 1. Create, import and register the package
 
 Create one package under `src/unidl/services/<service_id>/`. The repository
 includes [`src/unidl/services/example/`](../src/unidl/services/example/) as a
 small, import-safe reference scaffold; copy it, rename the class and IDs, and
-replace its provider-specific placeholders before registering the new service:
+replace its provider-specific placeholders before importing the new service:
 
 ~~~text
 src/unidl/services/example/
@@ -31,16 +31,43 @@ names.
 
 The example package is intentionally not registered, so it does not appear as a
 usable platform until its API, authentication and playback contract have been
-implemented. Register a completed package once in
-`src/unidl/services/__init__.py`:
+implemented. A completed package must contain one concrete `Service` subclass.
+For code shipped as part of a build, the conventional code-level registration is
+`@registry.register` (or one `registry.register(...)` call). For a package
+installed by a user, the TUI registration path can register the class after
+import, so the service does not have to import `registry` solely for that
+purpose. UniDL scans the services directory and imports packages at startup;
+editing `src/unidl/services/__init__.py` for every new package is not required:
 
 ~~~python
-from . import bbciplayer
-from . import example
+# Optional code-level registration for a service shipped in the build:
+from ...core.service import Service, registry
+
+@registry.register
+class Example(Service):
+    ...
 ~~~
 
-The registry imports the package, validates its declarations and exposes it to
-the platform list. Do not register a service more than once.
+A package intended for user-level TUI registration can simply import
+`Service`, define the same class, and omit `registry`; the loader performs the
+registration after the user selects the package and restarts.
+
+The decorator is one way to put a class in the runtime registry. The other is
+the user-level TUI registration path: the user copies the package (or a single
+`<service_id>.py` module) into the installed `unidl/services` directory, opens
+**Settings → Services → Register a service**, selects the package, and restarts
+UniDL. The loader then discovers concrete `Service` subclasses and registers
+them automatically. The TUI only reads package metadata while the picker is
+open; it does not execute newly selected code in that interaction. Both routes
+produce the same registered service and the same Home/search behaviour;
+already registered packages are shown dimmed. Do not register a service more
+than once through the same route.
+
+On a minimal distribution with no service packages, Home displays the exact
+directory to use and a link to the Services manager. After copying a completed
+package there, use the same TUI registration flow and restart. This user-level
+gate controls which discovered classes are exposed; it is an alternative to the
+code-level decorator, not a second decorator requirement.
 
 ### What the reference scaffold demonstrates
 

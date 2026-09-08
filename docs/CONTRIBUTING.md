@@ -21,9 +21,15 @@ manifest parsing, track selection, download, decrypt, subtitles and muxing.
   yields Flow asks and returns a `Playback`.
 - Put HTTP clients and response parsing in the service's `api.py`; keep the flow
   in `__init__.py`.
-- Add each provider as one native package under `src/unidl/services/` and
-  register it in `src/unidl/services/__init__.py`; follow
-  [writing-a-service.md](writing-a-service.md).
+- Add each provider as one native package under `src/unidl/services/`. A
+  code-shipped service may use one `@registry.register` decorator; a user
+  imported package may rely on the loader's automatic class registration after
+  TUI registration. In either case, do not add a second manual import to
+  `src/unidl/services/__init__.py`. Follow
+  [writing-a-service.md](writing-a-service.md). For a package delivered to an
+  end user, the user must copy it into the installed services directory, choose
+  **Settings → Services → Register a service**, and restart UniDL before it is
+  available on Home or in global search.
 - Do not duplicate manifest parsing, selection or download logic from the native delivery core.
 - Do not hardcode credentials, local absolute paths or helper locations.
 - Declare settings, credentials, helpers and `DRM_SYSTEMS`; do not make the UI

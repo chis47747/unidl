@@ -887,10 +887,11 @@ Input > .input--cursor {
 /* What is not set up yet, on the screen you land on. Hidden the moment it is
    dealt with, so a working install never sees it. A left bar rather than a full
    border: it is a note beside the list, not a dialog in front of it. */
-#setup-note {
+#setup-note, #service-setup-note {
     display: none;
     width: 1fr;
     height: auto;
+    text-wrap: wrap;
     padding: 0 1;
     margin: 0 0 1 0;
     border-left: solid $warn;
@@ -898,7 +899,7 @@ Input > .input--cursor {
 }
 /* it is a chip, so it inherits the chip hover: the background is the affordance
    here, and bolding two lines of prose is not */
-#setup-note:hover {
+#setup-note:hover, #service-setup-note:hover {
     background: $highlight;
     text-style: none;
 }
@@ -1657,7 +1658,10 @@ ModalScreen.editor {
 /* ------------------------------------------------------- CDM / vault manager */
 #resource-manager-help, #storage-manager-help, #proxy-manager-help, #justwatch-settings-help, #settings-group-help {
     height: auto;
-    max-height: 2;
+    min-height: 1;
+    max-height: 6;
+    overflow-y: auto;
+    text-wrap: wrap;
     padding: 0 2 1 2;
     color: $muted;
 }
@@ -2073,7 +2077,10 @@ ModalScreen.editor {
     padding-bottom: 0;
 }
 .short #resource-manager-help, .short #storage-manager-help, .short #proxy-manager-help, .short #justwatch-settings-help, .short #settings-group-help {
-    display: none;
+    display: block;
+    max-height: 3;
+    padding-left: 1;
+    padding-right: 1;
 }
 .short #storage-manager-body {
     padding-top: 0;

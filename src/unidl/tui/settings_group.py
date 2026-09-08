@@ -50,7 +50,21 @@ class SettingsGroupScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
+        self._fit_help()
         self.query_one("#settings-group-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_help()
+
+    def _fit_help(self) -> None:
+        """Reserve enough rows for wrapped setting help at the current size."""
+
+        found = self.query("#settings-group-help")
+        if not found:
+            return
+        # Keep at least one row for the list; the list itself remains scrollable
+        # when a narrow terminal needs more room for prose.
+        found.first(Static).styles.max_height = max(2, min(12, self.app.size.height - 5))
 
     def relocalize(self) -> None:
         for chrome in self.query(Chrome):

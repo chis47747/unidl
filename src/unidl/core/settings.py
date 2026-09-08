@@ -538,6 +538,18 @@ GLOBAL_SETTINGS: list[Setting] = [
         ),
     ),
     Setting(
+        "services_manager",
+        "Services",
+        "action",
+        default="",
+        picker="services_manager",
+        help=(
+            "Manage which service packages are registered and which registered "
+            "services appear on the home screen. New registrations take effect "
+            "after restarting UniDL."
+        ),
+    ),
+    Setting(
         "fetch_chapters",
         "Fetch chapter metadata",
         "bool",
@@ -549,6 +561,7 @@ GLOBAL_SETTINGS: list[Setting] = [
             "or final muxing. This controls acquisition globally; the per-service "
             "'Embed chapters in the final file' setting controls only container muxing."
         ),
+        visible=False,
     ),
     _choice(
         "after_resolve",

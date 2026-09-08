@@ -430,6 +430,7 @@ class SettingsScreen(Screen):
             "storage",
             "proxy_manager",
             "justwatch",
+            "services_manager",
             "download_behavior",
             "interface",
         }:
@@ -586,6 +587,12 @@ class SettingsScreen(Screen):
             from .proxy_manager import ProxyManagerScreen
 
             self.app.push_screen(ProxyManagerScreen(self.globals), lambda _result: self.rebuild())
+            return
+
+        if spec.picker == "services_manager":
+            from .service_manager import ServicesManagerScreen
+
+            self.app.push_screen(ServicesManagerScreen(self.globals), lambda _result: self.rebuild())
             return
 
         if spec.picker in {"download_behavior", "interface"}:

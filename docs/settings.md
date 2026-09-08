@@ -7,6 +7,25 @@ Changes persist immediately and apply to the next request without a restart.
 ## Where values are kept
 
 `<paths.home>/settings.json`, one object per scope — `@global` and one per service id.
+
+## Services and homepage visibility
+
+Global Settings → **Services** contains the **Fetch chapter metadata** switch,
+**Register a service**, and **Services shown on home**. UniDL discovers service
+packages from `src/unidl/services` and shows already registered packages as
+disabled entries. To add a service, copy its completed service package (or
+single-file service module) into that directory, open **Settings → Services →
+Register a service**, and select it. Registration records the choice and asks
+you to restart UniDL; the restart is required for the package to be imported in
+the new process and for the registration to take effect on the homepage grid or
+global search. Homepage visibility is a separate checkbox list: an unchecked registered service remains available to
+global search but is omitted from the homepage grid.
+
+If you installed a minimal distribution with no service packages, the home
+screen shows the same import path and links to Settings. Copy a service into the
+directory shown there, register it, then restart UniDL. The CDM setup notice is
+independent: a service can be registered without a CDM, but DRM playback still
+needs a matching `.wvd` or `.prd` device.
 Every change is written the moment it is made, and written so that it survives the
 process not coming back:
 

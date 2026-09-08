@@ -1,9 +1,12 @@
 """Reference scaffold for a native UniDL service.
 
-This package is documentation-by-example.  It is deliberately not imported by
-``unidl.services`` and therefore never appears in the platform list until a
-provider has been implemented and explicitly registered.  Replace the
-``example.invalid`` API calls and the placeholder identifiers before using it.
+This package is documentation-by-example. It is deliberately excluded from the
+normal service scan and therefore never appears in the platform list until a
+provider has been implemented and registered. Replace the ``example.invalid``
+API calls and placeholder identifiers before using it. A build may register the
+class with ``@registry.register``; a user-installed copy can instead be enabled
+through **Settings → Services → Register a service**, whose loader discovers
+the class after restart.
 
 The split is intentional:
 
@@ -59,10 +62,10 @@ _LICENSE_PROFILE = Setting(
 class Example(Service):
     """A copyable skeleton for a VOD/search service.
 
-    The class intentionally has no ``@registry.register`` decorator.  Once the
-    provider implementation is complete, add the decorator (or call
-    ``registry.register(Example)``) and import the package from
-    ``unidl.services``.
+    The class intentionally has no ``@registry.register`` decorator. A build
+    may add that decorator (or call ``registry.register(Example)``); a user
+    installation can leave it absent and enable the package from the Services
+    manager after copying it into the services directory.
     """
 
     ID = "example"

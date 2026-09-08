@@ -22,9 +22,15 @@ or a CDM lives in UniDL's service layer. Keep it that way.
 
 ## Where UniDL stops
 
-Every service is a native UniDL service. There is one registration path:
-`registry.register` accepts a `Service` subclass from `unidl.services`, validates
-its declarations and exposes it to the platform list.
+Every service is a native UniDL service. There are two deliberately separate
+registration steps. At code level, `registry.register` accepts a `Service`
+subclass from `unidl.services` and validates its declarations. At user level,
+the Services manager persists which discovered packages may be shown on Home and
+in global search; after restart the loader can register concrete service classes
+automatically. A newly discovered package is selected in **Settings → Services
+→ Register a service** and becomes active after a restart. The two routes are
+equivalent ways to register a service; the TUI route does not require a decorator
+inside the package.
 
 Three things cross it, and only three.
 

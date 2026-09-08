@@ -4,11 +4,27 @@ Turn on `debug` first (`s` -> Interface & diagnostics -> Debug mode). It logs fu
 license exchange, the resolved UniDL command, keeps temp files, and writes a
 per-task log under `paths.logs`.
 
+## Importing and registering a service package
+
+The package must be copied into the installed `unidl/services` directory. Open
+**Settings → Services → Register a service** and select it; registered packages
+are dimmed, while available packages can be selected. Restart UniDL after the
+confirmation. The restart is required because service code is imported at
+startup and the persisted registration choice is applied when the new process
+builds Home and global search. A single-file service module is accepted as well
+as a package directory.
+
+On a minimal distribution with no packages, Home shows the directory path and
+the same Settings route. A CDM warning can appear at the same time; it is
+independent, and only becomes relevant when a service requests DRM keys.
+
 ## Only native services appear on the main screen
 
-Only services registered by the installed build appear on the main screen. If a
-service is missing, verify that its package is installed and check the registry
-with `unidl services | wc -l`.
+Only services that are both loaded and user-registered appear on the main
+screen. To inspect the loaded runtime registry, use `unidl services`; this is a
+diagnostic list and may include packages that were loaded for the current
+process. The TUI Home and global search always apply the persisted registration
+and homepage-visibility choices.
 
 ## A service says "no credentials"
 

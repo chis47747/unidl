@@ -33,7 +33,7 @@ from pathlib import Path
 
 from textual.app import App
 
-from ..core import i18n, playready, vaults
+from ..core import i18n, playready, service_catalog, vaults
 from ..core.config import Config, default_config_path
 from ..core.credentials import mask_in
 from ..core.devreload import ReloadError, ReloadResult, ServiceReloader
@@ -185,8 +185,12 @@ class UnidlApp(App):
         self.config = config or Config.load()
         self.config.paths.ensure()
         self.registry = registry
+        self._registry_identity = id(self.registry)
         self.settings_store = SettingsStore(self.config.paths.home / "settings.json")
         self.globals = global_settings(self.settings_store, config=self.config)
+        self._registered_service_ids, self._home_service_ids = service_catalog.ensure_state(
+            self.settings_store, (service.ID for service in self.registry.all())
+        )
         self.vault = KeyVault(self.config.paths.keys_db)
         self.vaults = vaults.build(self.config, local=self.vault)
         self._helper_cache: dict[str, tuple[str, bool]] = {}
@@ -277,7 +281,37 @@ class UnidlApp(App):
 
     @property
     def services(self) -> list[type[Service]]:
-        return self.registry.all()
+        self._sync_registry_state()
+        return [service for service in self.registry.all() if service.ID in self._registered_service_ids]
+
+    @property
+    def home_services(self) -> list[type[Service]]:
+        """Registered services selected for the homepage grid."""
+
+        return [service for service in self.services if service.ID in self._home_service_ids]
+
+    def set_home_services(self, service_ids) -> None:
+        """Apply a homepage selection immediately for the current process."""
+
+        chosen = {str(value).strip().lower() for value in service_ids if str(value).strip()}
+        self._home_service_ids = chosen & self._registered_service_ids
+
+    def _sync_registry_state(self) -> None:
+        """Keep headless/test registry replacements usable without persistence churn.
+
+        Production keeps one process-wide registry.  Tests and developer tools
+        may replace ``app.registry`` with an isolated registry after app
+        construction; its services should retain the pre-registration default
+        for that ephemeral process rather than being filtered by another
+        install's saved IDs.
+        """
+        identity = id(self.registry)
+        if identity == self._registry_identity:
+            return
+        current = {str(service.ID).strip().lower() for service in self.registry.all()}
+        self._registry_identity = identity
+        self._registered_service_ids = current
+        self._home_service_ids = set(current)
 
     # ------------------------------------------------------------------- hints
     def account_hint(self, service_cls: type[Service]) -> tuple[str, bool]:

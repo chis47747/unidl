@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.0.5"
+version = "2.0.6"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"

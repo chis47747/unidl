@@ -35,6 +35,7 @@ from textual.widgets import Static
 
 from .. import __version__
 from ..core import drm as drm_registry
+from ..core import service_catalog
 from ..core.cdm import WIDEVINE
 from ..core.devreload import ReloadError
 from ..core.i18n import phrase, tr
@@ -141,6 +142,7 @@ class HomeScreen(Screen):
             # what is not set up yet, above the list rather than in it: a new
             # install is not a broken one, and the platforms are still all usable
             yield StatusChip("pick_cdm", id="setup-note")
+            yield StatusChip("app.global_settings", id="service-setup-note")
             with Horizontal(id="service-list-head", classes="section-head"):
                 yield Static("", id="service-list-summary")
                 yield StatusChip(
@@ -191,7 +193,7 @@ class HomeScreen(Screen):
         if found:
             found.first(Input).placeholder = tr("home.filter_placeholder")
         self._render_caption()
-        self._render_services_heading(len(self.app.services))
+        self._render_services_heading(len(self.app.home_services))
         self.refresh_env()
         self._render_setup_note()
 
@@ -359,11 +361,9 @@ class HomeScreen(Screen):
     def _render_setup_note(self) -> None:
         """Say what a new install still needs, where a new install starts.
 
-        Only the CDM. Everything else either has a working default or is optional:
-        the platform list is code, not configuration, so it is never empty and
-        claiming otherwise would be a lie; a config file is offered by its own chip
-        and nothing needs one; and an account is a per-service matter, which is why
-        each service leads its own menu with "Sign in" until it is usable.
+        The CDM and service catalog are separate setup concerns. Most installs
+        include services, but a deliberately minimal distribution may not; that
+        case gets an import/register instruction alongside the CDM note.
 
         A missing CDM is different in kind. Nothing on screen fails until a licence
         is requested, and then it fails deep inside one title's report - by which
@@ -371,18 +371,29 @@ class HomeScreen(Screen):
         here, it costs two rows once, and it goes away the moment a device exists.
         """
         found = self.query("#setup-note")
-        if not found:
+        service_found = self.query("#service-setup-note")
+        if not found or not service_found:
             return
         note = found.first(StatusChip)
+        service_note = service_found.first(StatusChip)
+        if not self.app.registry.all():
+            folder = service_catalog.source_root()
+            service_note.update(
+                f"[$warn]{tr('home.setup_services')}[/]\n"
+                f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"
+            )
+            service_note.display = True
+        else:
+            service_note.display = False
         if self.app.devices():
             note.display = False
-            return
-        folder = self.app.config.paths.cdm
-        note.update(
-            f"[$warn]{tr('home.setup_cdm')}[/] [$muted]· {tr('home.setup_cdm_detail')}[/]\n"
-            f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"
-        )
-        note.display = True
+        else:
+            folder = self.app.config.paths.cdm
+            note.update(
+                f"[$warn]{tr('home.setup_cdm')}[/] [$muted]· {tr('home.setup_cdm_detail')}[/]\n"
+                f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"
+            )
+            note.display = True
 
     def _set_chip(self, chip_id: str, markup: str, plain: str) -> None:
         """Update a chip, remembering how wide its text really is.
@@ -654,7 +665,7 @@ class HomeScreen(Screen):
         self._numbered = {}
         self._columns = self._column_count()
 
-        services = list(self.app.services)
+        services = list(self.app.home_services)
         self._render_services_heading(len(services))
         groups = self._groups_for_view(services)
         show_group_heading = self._service_view() != "alphabetical"
