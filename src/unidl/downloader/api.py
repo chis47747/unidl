@@ -443,6 +443,9 @@ def download(
     args = _namespace(argv)
     args.embedding_hooks = hooks or DownloadHooks()
     args.service_context = dict(options.service_context)
+    # Stateful service-owned HLS decryptors cannot be represented in argv. The
+    # typed embedding API carries the live object alongside serializable options.
+    args.hls_decryptor = options.hls_decryptor
     cancel_requested = args.embedding_hooks.cancel_requested
     if cancel_requested is not None and cancel_requested():
         raise DownloadCancelled("download cancelled before it started")

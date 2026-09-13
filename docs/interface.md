@@ -89,6 +89,25 @@ controls only whether those chapters are written into the final MKV/MP4 containe
 it does not hide or discard the metadata shown here or stored in exports.
 A multi-title selection adds the queue described in [batch.md](batch.md).
 
+A portable export import enters the same delivery screen and queue. Import first
+matches the service ID (including declared legacy IDs). A match uses the installed
+Service context so custom download preparation, key formatting, sidecars and
+playback lifecycle actions continue to work. No match uses generic delivery, so
+the source-service package is not mandatory for standard manifests. The export
+still supplies its manifest, request headers and content keys; the generic path
+never falls back to a new licence request when a key is missing.
+
+An empty export `keys` list is not itself an error. Clear DASH/HLS and direct
+media have nothing to decrypt. Standard HLS `AES-128` is handled by the native
+downloader from the playlist's key URI (using the exported request headers), and
+a service-resolved raw AES-128 key is retained in the export's DRM fields. A
+wholly absent exported `KID:key` is fatal only when the playback declares
+licence-bound DRM such as Widevine or PlayReady and the parsed ladder contains
+encrypted tracks. If a file carries only some KIDs, Core reports the uncovered
+inventory and only selected encrypted tracks whose KIDs are covered can complete.
+With an installed service, its existing custom path remains authoritative;
+generic fallback never attempts to reacquire a missing licence key.
+
 ### Native delivery progress
 
 While a download or a recording is running, the structured delivery progress is

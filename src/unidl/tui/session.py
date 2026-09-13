@@ -1600,6 +1600,10 @@ class SessionController:
         document = extras.pop("initial_import", None)
 
         if document is not None:
+            # An export is already an explicit batch. Seed the expected count
+            # before the first playback so queue completion cannot unwind replay
+            # after only the first title.
+            self.batch_total = len(document.entries)
             flow = self._replay(ctx, document)
         elif target:
             flow = self._deep_link(ctx, self.service.open_url, str(target))
@@ -1670,11 +1674,24 @@ class SessionController:
             f"{f' made by {document.app}' if document.app else ''}"
             f"{f', {document.created}' if document.created else ''}"
         )
-        ctx.log("no sign-in, no licence request: the keys came with the file")
+        if getattr(self.service, "_PORTABLE_IMPORT_FALLBACK", False):
+            ctx.log(
+                "portable import: source service is not installed; using generic delivery "
+                "with the manifest, headers and any content keys from the file"
+            )
+        else:
+            ctx.log(
+                "portable import: matched the installed service for custom delivery hooks; "
+                "the file supplies the manifest, headers and content keys"
+            )
         for entry in document.entries:
             if entry.summary:
                 ctx.log(f"exported as: {entry.summary}")
-            yield ctx.emit(entry.playback())
+            playback = entry.playback()
+            # Legacy export IDs are only a lookup key. Use the matched service's
+            # canonical namespace for settings, output paths and sidecars.
+            playback.title.service = self.service.ID
+            yield ctx.emit(playback)
 
     def _deep_link(self, ctx: FlowContext, entry, argument: str):
         """Run a URL or search straight away, then fall into the service's menu.

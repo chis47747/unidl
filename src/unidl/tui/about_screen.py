@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from ..core.i18n import tr
+from .chrome import CloseMark
 
 OPEN_SOURCE_PROJECTS = (
     ("Python", "runtime", "PSF-2.0", "https://www.python.org/"),
@@ -49,14 +50,6 @@ OPEN_SOURCE_PROJECTS = (
 )
 
 
-class _CloseMark(Static):
-    def on_click(self, event) -> None:
-        event.stop()
-        closer = getattr(self.screen, "action_close", None)
-        if callable(closer):
-            closer()
-
-
 class AboutScreen(ModalScreen[None]):
     """Show attribution without leaving the Home screen."""
 
@@ -75,7 +68,7 @@ class AboutScreen(ModalScreen[None]):
         with Vertical(id="about-modal"):
             with Horizontal(id="about-modal-head"):
                 yield Static(tr("about.title"), id="about-modal-title")
-                yield _CloseMark("✕", id="about-modal-close")
+                yield CloseMark(id="about-modal-close")
             yield Static(tr("about.intro"), id="about-intro")
             with VerticalScroll(id="about-list"):
                 for name, purpose, license_name, url in OPEN_SOURCE_PROJECTS:

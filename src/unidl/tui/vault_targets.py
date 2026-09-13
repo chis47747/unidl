@@ -16,6 +16,7 @@ from textual.widgets.option_list import Option
 from ..core import vaults
 from ..core.i18n import phrase, tr
 from .bidi import visual_markup
+from .chrome import CloseMark
 
 
 class VaultCheckbox(Checkbox):
@@ -83,7 +84,9 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
         has_remote = any(descriptor.remote for descriptor in self.descriptors)
         remote_note = tr("targets.help_remote") if has_remote else ""
         with Vertical(id="vault-target-card"):
-            yield Label(self.title, id="vault-target-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(self.title, id="vault-target-title")
+                yield CloseMark(id="vault-target-close")
             yield Label(
                 f"{tr('targets.help')}{remote_note}",
                 id="vault-target-help",
@@ -205,6 +208,10 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
+
     def action_apply(self) -> None:
         if self._all is not None and self._all.value:
             self.dismiss(VaultTargetResult(None))
@@ -238,7 +245,9 @@ class VaultSearchPicker(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="vault-target-card"):
-            yield Label(tr("targets.search_title"), id="vault-target-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("targets.search_title"), id="vault-target-title")
+                yield CloseMark(id="vault-target-close")
             yield Label(tr("targets.search_help"), id="vault-target-help")
             yield OptionList(
                 *[
@@ -269,6 +278,10 @@ class VaultSearchPicker(ModalScreen[str | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         self.action_cancel()
@@ -294,10 +307,12 @@ class VaultServicePicker(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         count = len(self.services)
         with Vertical(id="vault-target-card"):
-            yield Label(
-                tr("targets.platform_title", vault=visual_markup(self.vault_name)),
-                id="vault-target-title",
-            )
+            with Horizontal(classes="modal-head"):
+                yield Label(
+                    tr("targets.platform_title", vault=visual_markup(self.vault_name)),
+                    id="vault-target-title",
+                )
+                yield CloseMark(id="vault-target-close")
             yield Label(
                 tr("targets.platform_help", count=count),
                 id="vault-target-help",
@@ -335,6 +350,10 @@ class VaultServicePicker(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()

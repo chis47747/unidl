@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -37,11 +38,12 @@ from ..core import i18n, playready, service_catalog, vaults
 from ..core.config import Config, default_config_path
 from ..core.credentials import mask_in
 from ..core.devreload import ReloadError, ReloadResult, ServiceReloader
+from ..core.drm import CdmError
 from ..core.engine import Engine
 from ..core.helpers import HelperResolver
 from ..core.i18n import tr
 from ..core.secureio import atomic_write_text, private_file
-from ..core.service import Service, registry
+from ..core.service import Capabilities, Service, registry
 from ..core.settings import SettingsStore, global_settings
 from ..core.vault import KeyVault
 from .home import HomeScreen
@@ -62,6 +64,47 @@ SESSION_SHUTDOWN_TIMEOUT = 5.0
 #: air is what has to go, because the list is the screen and the space around it
 #: is not.
 ROOMY_ROWS = 28
+
+_SERVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+def _portable_import_service_class(document) -> type[Service]:
+    """Build a network-free Service-shaped context for one portable export."""
+    raw_id = str(getattr(document, "service", "") or "").strip().lower()
+    source_id = raw_id if _SERVICE_ID.fullmatch(raw_id) else "portable-import"
+    source_name = str(getattr(document, "service_name", "") or raw_id or "Portable import")
+    has_live = any(bool(getattr(entry, "is_live", False)) for entry in document.entries)
+
+    def missing_keys(self, playback):
+        del self
+        drm = getattr(playback, "drm", None)
+        inventory = getattr(drm, "context", {}).get("license_tracks") if drm is not None else None
+        if inventory is not None and not inventory:
+            # Version-1 exports originally did not persist DrmInfo.clear. The
+            # parsed ladder remains authoritative when it has no encrypted track.
+            return []
+        raise CdmError(
+            "This import declares licence-bound DRM but contains no usable KID:key. "
+            "Clear DASH/HLS, direct media and playlist AES-128 do not need an exported "
+            "content key; Widevine, PlayReady and similar CENC streams do. No service "
+            "or licence request was attempted; create a complete export again."
+        )
+
+    return type(
+        "PortableImportService",
+        (Service,),
+        {
+            "__module__": __name__,
+            "ID": source_id,
+            "NAME": source_name,
+            "USES": Capabilities().with_self("drm"),
+            "SUPPORTS_URL": False,
+            "SUPPORTS_SEARCH": False,
+            "SUPPORTS_LIVE": has_live,
+            "_PORTABLE_IMPORT_FALLBACK": True,
+            "get_keys": missing_keys,
+        },
+    )
 
 # Textual's Linux driver emits these modes while it owns the terminal.  Its
 # normal shutdown path turns them off, but an SSH hangup or a process signal can
@@ -417,35 +460,24 @@ class UnidlApp(App):
     def open_import(self, document) -> bool:
         """Finish what an export file already resolved. Returns whether it started.
 
-        Runs as the service the file came from, deliberately: the naming, the
-        settings and the command file all belong to that service, and the file
-        would land somewhere else under a stand-in. Nothing is asked of the service
-        itself - no sign-in, no catalogue call, no licence - so a service you have
-        no account for still imports.
+        Prefer the installed service so its custom preparation, key formatting,
+        sidecars and lifecycle hooks remain active. If no service ID matches, use
+        a generic context for ordinary portable delivery without source code.
         """
         from .session import SessionController
 
-        service_cls = next(
-            (cls for cls in self.registry.all() if cls.ID == document.service), None
-        )
-        if service_cls is None:
-            self.notify(
-                f"This export came from '{document.service}', which this build does "
-                "not have a service for.",
-                title="Cannot import",
-                severity="error",
-                timeout=10,
-            )
-            return False
+        installed = self.registry.for_id(document.service)
+        service_cls = installed or _portable_import_service_class(document)
         service = self.registry.build(
             service_cls, self.config, self.settings_store, globals_scope=self.globals
         )
-        report = service.ctx.helpers
-        if not report.ready:
-            # the same gate as opening the service: an import ends in a download,
-            # and a download needs the same tools
-            self.notify(report.blocking_message(), title=tr("notify.needs_setup", name=service_cls.NAME),
-                        severity="error", timeout=10)
+        if installed is not None and not service.ctx.helpers.ready:
+            self.notify(
+                service.ctx.helpers.blocking_message(),
+                title=tr("notify.needs_setup", name=service_cls.NAME),
+                severity="error",
+                timeout=10,
+            )
             return False
         service.ctx.extras["initial_import"] = document
         controller = SessionController(

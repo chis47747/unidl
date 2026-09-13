@@ -203,6 +203,9 @@ class Playback:
 
     # Exactly one of these is the input UniDL consumes.
     manifest_url: str | None = None
+    #: Authorized remote URL used to resolve relative media URLs when
+    #: ``manifest_url`` points at a local manifest snapshot.
+    manifest_base_url: str | None = None
     #: A service may receive an authorized manifest document instead of a URL.
     #: The downloader materializes it in its private manifest cache and parses it
     #: through the same native path as a remote DASH/HLS reference.

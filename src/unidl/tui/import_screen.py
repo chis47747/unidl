@@ -4,7 +4,10 @@ Reached by clicking ``import`` on the main screen. Every file in the exports
 folder is listed with what is in it - which service, which titles, how many keys -
 and Enter on one runs the ordinary delivery path against it: the manifest is read
 again, the tracks are chosen by your own settings, the keys come out of the file.
-No sign-in, no CDM, no licence request.
+The source service is matched when installed so its custom download preparation
+and lifecycle actions still run. It is not mandatory: without a match, the TUI
+uses an inert generic context for the shared delivery screen. That fallback needs
+no source-service installation, sign-in, helper, CDM or licence request.
 
 That is also why this is a list of a folder rather than a box to type a path into.
 A file arrives here the way any file arrives anywhere - it is put in the folder -

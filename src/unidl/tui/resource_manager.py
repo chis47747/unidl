@@ -42,7 +42,7 @@ from ..core.drm import all_systems
 from ..core.i18n import phrase, tr
 from ..core.settings import Settings
 from .bidi import visual_markup
-from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .vault_targets import VaultCheckbox, VaultTargetResult, VaultTargetScreen
 
@@ -143,7 +143,9 @@ class _DeleteConfirm(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-confirm-card"):
-            yield Label(tr("resource.delete_title", noun=self.noun), id="resource-confirm-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("resource.delete_title", noun=self.noun), id="resource-confirm-title")
+                yield CloseMark(id="resource-confirm-close")
             yield Static(
                 tr("resource.delete_help", name=f"[$warn]{visual_markup(self.name)}[/]"),
                 id="resource-confirm-help",
@@ -157,6 +159,10 @@ class _DeleteConfirm(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -189,7 +195,9 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
             systems.append((tr("resource.configured", system=default_system), default_system))
         title = tr("resource.edit_cdm") if self.editing else tr("resource.add_cdm")
         with Vertical(id="resource-editor-card"):
-            yield Label(title, id="resource-editor-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(title, id="resource-editor-title")
+                yield CloseMark(id="resource-editor-close")
             yield Label(tr("resource.cdm_help"), id="resource-editor-help")
             with VerticalScroll(id="resource-editor-fields"):
                 yield Label(tr("resource.field.name"), classes="resource-field-label")
@@ -304,6 +312,10 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         if event.button.id == "resource-editor-save":
@@ -339,7 +351,9 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
         services = self.existing.get("supported_services") or []
         services_text = ", ".join(str(value) for value in services) if isinstance(services, list) else _text(services)
         with Vertical(id="resource-editor-card"):
-            yield Label(title, id="resource-editor-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(title, id="resource-editor-title")
+                yield CloseMark(id="resource-editor-close")
             yield Label(tr("resource.vault_help"), id="resource-editor-help")
             with VerticalScroll(id="resource-editor-fields"):
                 yield Label(tr("resource.field.name"), classes="resource-field-label")
@@ -482,6 +496,10 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         if event.button.id == "resource-editor-save":
@@ -512,7 +530,9 @@ class VaultPolicyScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-policy-card"):
-            yield Label(tr("resource.policy.title"), id="resource-policy-title")
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("resource.policy.title"), id="resource-policy-title")
+                yield CloseMark(id="resource-policy-close")
             yield Label(tr("resource.policy.help"), id="resource-policy-help")
             yield Static(tr("resource.policy.gates"), classes="resource-policy-section")
             with Horizontal(id="resource-policy-gates"):
@@ -607,6 +627,10 @@ class VaultPolicyScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()

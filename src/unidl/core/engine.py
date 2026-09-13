@@ -22,6 +22,7 @@ import requests
 from unidl.downloader import NativeDownloaderBackend, NativeManifestError, api
 from unidl.downloader.models import StreamInfo
 from unidl.downloader.selection import SelectionOptions, select_streams
+from unidl.downloader.utils import is_url, source_path
 
 from . import cdmrules, exports, vaults
 from . import drm as drm_registry
@@ -530,6 +531,8 @@ class Engine:
             return str(playback.inline_manifest).encode("utf-8")
         if not playback.manifest_url:
             return None
+        if not is_url(str(playback.manifest_url)):
+            return source_path(str(playback.manifest_url)).read_bytes()
         proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
         response = requests.get(playback.manifest_url, headers=playback.headers, proxies=proxies, timeout=30)
         response.raise_for_status()
@@ -673,8 +676,9 @@ class Engine:
         drm = playback.drm
         if drm is None or not drm.needs_license:
             return
+        video_only = bool((drm.context or {}).get("drm_hint_video_only"))
         for stream in streams:
-            if stream.media_type not in {"video", "audio"}:
+            if stream.media_type not in ({"video"} if video_only else {"video", "audio"}):
                 continue
             stream.encrypted = True
             stream.encryption_scheme = stream.encryption_scheme or "CENC"
@@ -722,6 +726,7 @@ class Engine:
         text = self._fetch_text(playback, playback.manifest_url)
         if not text:
             return None
+        manifest_base = playback.manifest_base_url or playback.manifest_url
         resolved: str | None = None
         for url in self._license_playlists(playback, system, tracks):
             media = self._fetch_text(playback, url)
@@ -733,7 +738,7 @@ class Engine:
         if resolved or "#EXT-X-STREAM-INF" not in text:
             return resolved
         append_query = "--append-url-params" in playback.extra_args
-        for variant in _hls_variants(text, playback.manifest_url, append_query=append_query)[:2]:
+        for variant in _hls_variants(text, manifest_base, append_query=append_query)[:2]:
             media = self._fetch_text(playback, variant)
             if not media:
                 continue
@@ -754,13 +759,14 @@ class Engine:
         if not system.collect_init_segments or tracks is None:
             return []
         inventory = [stream for stream in tracks.streams if stream.encrypted]
+        manifest_base = playback.manifest_base_url or playback.manifest_url
         urls: list[str] = []
         for stream in inventory:
             target = str(stream.url or stream.original_url or "").strip()
             if not target:
                 continue
             absolute = _hls_url(
-                playback.manifest_url,
+                manifest_base,
                 target,
                 append_query="--append-url-params" in playback.extra_args,
             )
@@ -773,6 +779,14 @@ class Engine:
         return urls
 
     def _fetch_text(self, playback: Playback, url: str) -> str:
+        # A service may snapshot the authorized master locally. Keep DRM
+        # inspection on that snapshot too; child playlists use its remote base.
+        if str(url) == str(playback.manifest_url) and (
+            playback.inline_manifest
+            or not is_url(str(playback.manifest_url or ""))
+        ):
+            payload = self.fetch_manifest(playback) or b""
+            return payload.decode("utf-8-sig", errors="replace")
         proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
         try:
             response = requests.get(url, headers=playback.headers, proxies=proxies, timeout=30)
@@ -1686,6 +1700,7 @@ class Engine:
                 drop_video=normalize_drop_video_pattern(
                     settings.get("drop_video", "")
                 ),
+                base_url=playback.manifest_base_url,
             ),
             scratch_dir=self.config.paths.temp / "manifests",
         )
@@ -1698,6 +1713,7 @@ class Engine:
             headers=dict(playback.headers),
             proxy=playback.proxy,
             details=bool(settings.get("hls_details", False)),
+            base_url=playback.manifest_base_url,
             append_url_params=overrides.append_url_params,
             ad_keywords=list(overrides.ad_keywords),
             # trick-play and thumbnail ladders otherwise win "best video" on
@@ -2340,6 +2356,7 @@ class Engine:
                 proxy=download_proxy,
                 details=bool(settings.get("hls_details", False)),
                 no_probe=direct_audio_no_probe,
+                base_url=playback.manifest_base_url,
                 append_url_params=overrides.append_url_params,
                 ad_keywords=tuple(overrides.ad_keywords),
                 drop_video=normalize_drop_video_pattern(
@@ -2534,6 +2551,7 @@ class Engine:
             input=self.playback_input(playback),
             headers=dict(playback.headers),
             proxy=download_proxy,
+            base_url=playback.manifest_base_url,
             save_name=playback.save_name,
             save_dir=str(self.save_dir(settings, playback.title.service)),
             keys=list(playback.keys),

@@ -1324,6 +1324,29 @@ ModalScreen {
     background: $base 70%;
     align: center middle;
 }
+/* See-through overlay cards hide the parent chrome. The ✕ in the card
+   header is the live dismiss control; the Back/Quit labels behind it are not. */
+.modal-head {
+    width: 100%;
+    height: 1;
+    margin: 0 0 1 0;
+}
+.modal-head > Label, .modal-head > Static {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+}
+.modal-close {
+    width: 5;
+    height: 1;
+    content-align: right middle;
+    color: $accent;
+    text-style: bold;
+}
+.modal-close:hover {
+    background: $highlight;
+    color: $foreground;
+}
 /* carries its own chrome, so it must not show the screen below's as well */
 ModalScreen.editor {
     background: $base;
@@ -1481,9 +1504,9 @@ ModalScreen.editor {
     border: round $rule;
 }
 #vault-target-title {
-    width: 100%;
-    height: auto;
-    padding: 0 0 1 0;
+    width: 1fr;
+    height: 1;
+    padding: 0;
     color: $accent;
     text-style: bold;
 }
@@ -1803,7 +1826,16 @@ ModalScreen.editor {
 /* Resource forms intentionally resemble a compact settings card rather than a
    browser form. The cards are modal because a token/password must not remain in
    view behind another screen while the user chooses a resource. */
-#resource-editor-card, #resource-policy-card, #resource-confirm-card {
+#resource-editor-card {
+    width: 86;
+    max-width: 94%;
+    height: 90%;
+    max-height: 90%;
+    padding: 1 2;
+    background: $recessed;
+    border: round $rule;
+}
+#resource-policy-card, #resource-confirm-card {
     width: 86;
     max-width: 94%;
     height: auto;
@@ -1813,9 +1845,9 @@ ModalScreen.editor {
     border: round $rule;
 }
 #resource-editor-title, #resource-policy-title, #resource-confirm-title {
-    width: 100%;
-    height: auto;
-    padding: 0 0 1 0;
+    width: 1fr;
+    height: 1;
+    padding: 0;
     color: $accent;
     text-style: bold;
 }
@@ -1828,8 +1860,7 @@ ModalScreen.editor {
 }
 #resource-editor-fields {
     width: 100%;
-    height: auto;
-    max-height: 25;
+    height: 1fr;
     padding: 0 1;
     background: $base;
     border: round $rule;
@@ -2105,8 +2136,11 @@ ModalScreen.editor {
     padding-left: 1;
     padding-right: 1;
 }
+.short #resource-editor-card {
+    height: 94%;
+}
 .short #resource-editor-fields {
-    max-height: 14;
+    height: 1fr;
 }
 .short #resource-policy-card {
     padding-top: 0;

@@ -11,14 +11,7 @@ from textual.widgets import Static
 from ..core.i18n import tr
 from ..core.lyrics import Lyrics, timestamp
 from .bidi import visual_markup
-
-
-class _CloseMark(Static):
-    def on_click(self, event) -> None:
-        event.stop()
-        closer = getattr(self.screen, "action_close", None)
-        if callable(closer):
-            closer()
+from .chrome import CloseMark
 
 
 class LyricsScreen(ModalScreen[None]):
@@ -54,7 +47,7 @@ class LyricsScreen(ModalScreen[None]):
                     f"{tr('lyrics.title')}  [$dim]{visual_markup(self.save_name)}[/]",
                     id="lyrics-modal-title",
                 )
-                yield _CloseMark("x", id="lyrics-modal-close")
+                yield CloseMark(id="lyrics-modal-close")
             yield Static(f"[$muted]{visual_markup(summary)}[/]", id="lyrics-summary")
             with VerticalScroll(id="lyrics-list"):
                 for index, line in enumerate(self.lyrics.lines, start=1):

@@ -14,7 +14,7 @@ from textual.widgets import Static
 from .. import __version__
 from ..core.i18n import tr
 from ..core.update import UpdateInfo
-from .chrome import StatusChip
+from .chrome import CloseMark, StatusChip
 
 RELEASE_NOTES = (
     "update.note.downloader",
@@ -24,14 +24,6 @@ RELEASE_NOTES = (
     "update.note.clipboard",
     "update.note.update_checker",
 )
-
-
-class _CloseMark(Static):
-    def on_click(self, event) -> None:
-        event.stop()
-        closer = getattr(self.screen, "action_close", None)
-        if callable(closer):
-            closer()
 
 
 class UpdateScreen(ModalScreen[None]):
@@ -52,7 +44,7 @@ class UpdateScreen(ModalScreen[None]):
         with Vertical(id="update-modal"):
             with Horizontal(id="update-modal-head"):
                 yield Static(tr("update.title"), id="update-modal-title")
-                yield _CloseMark("✕", id="update-modal-close")
+                yield CloseMark(id="update-modal-close")
             yield Static(
                 f"[$muted]{tr('update.current')}[/] [$accent]v{__version__}[/]",
                 id="update-current",

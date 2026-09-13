@@ -1510,19 +1510,42 @@ class ServiceRegistry:
             services = list(self._services.values())
         return sorted(services, key=lambda s: s.NAME.lower())
 
-    def get(self, key: str) -> type[Service] | None:
-        """Resolve an id, an alias or a service tag.
+    def for_id(self, key: str, *, include_legacy: bool = True) -> type[Service] | None:
+        """Resolve only a service ID, optionally including declared old IDs.
 
-        In that order, because a derived tag can collide with another service's
-        and must never shadow an exact name. Among tags, a declared one wins over
-        a derived one for the same reason.
+        Portable state uses identifiers rather than human-facing search aliases
+        or tags. Keeping this lookup narrow lets an old export survive a rename
+        without allowing an arbitrary display alias to stand in for its owner.
+        """
+        wanted = str(key or "").strip().lower()
+        if not wanted:
+            return None
+        with self._lock:
+            exact = self._services.get(wanted)
+            services = list(self._services.values()) if exact is None and include_legacy else []
+        if exact is not None:
+            return exact
+        legacy = [
+            service
+            for service in services
+            if wanted in {legacy_id.strip().lower() for legacy_id in service.LEGACY_IDS}
+        ]
+        return legacy[0] if len(legacy) == 1 else None
+
+    def get(self, key: str) -> type[Service] | None:
+        """Resolve a current/legacy id, a name, an alias or a service tag.
+
+        In that order, because a current ID must win even when an older service
+        happened to use it as a legacy namespace, and a derived tag can collide
+        with another service's and must never shadow an exact name. Among tags,
+        a declared one wins over a derived one for the same reason.
         """
         key = key.strip().lower()
         if not key:
             return None
+        if by_id := self.for_id(key):
+            return by_id
         with self._lock:
-            if key in self._services:
-                return self._services[key]
             services = list(self._services.values())
         named = [service for service in services if service.NAME.strip().lower() == key]
         if len(named) == 1:

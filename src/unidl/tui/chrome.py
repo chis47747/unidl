@@ -16,7 +16,14 @@ from textual.widgets import Static
 
 from ..core.i18n import cell_width, phrase
 
-__all__ = ["Chrome", "ChromeButton", "KeyBar", "StatusChip", "refresh_locale_widgets"]
+__all__ = [
+    "Chrome",
+    "ChromeButton",
+    "CloseMark",
+    "KeyBar",
+    "StatusChip",
+    "refresh_locale_widgets",
+]
 
 
 class ChromeButton(Static):
@@ -72,6 +79,28 @@ class ChromeButton(Static):
     async def on_click(self) -> None:
         if self.enabled:
             await self.app.run_action(self._action)
+
+
+class CloseMark(Static):
+    """Visible ✕ on a see-through overlay card.
+
+    Overlay modals sit on top of another screen's chrome, so the Back / Quit
+    labels behind them are not live controls. A control you cannot use is not a
+    control; this mark is the click target that actually dismisses the card.
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__("✕", id=id)
+        self.add_class("modal-close")
+
+    def on_click(self, event) -> None:
+        event.stop()
+        screen = self.screen
+        for name in ("action_close", "action_cancel"):
+            closer = getattr(screen, name, None)
+            if callable(closer):
+                closer()
+                return
 
 
 class StatusChip(Static):

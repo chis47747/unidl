@@ -3658,6 +3658,25 @@ def _apply_hls_crypto(
         raise DownloadError(f"Unsupported custom HLS method: {hls_crypto.method if hls_crypto else segment.encryption_scheme}", url=segment.url)
     if not segment.encrypted and not forced_custom:
         return data
+    # A non-HTTP KEY URI can be a service ticket rather than key bytes. Preserve
+    # the live service decryptor instead of sending such a URI to the generic
+    # key loader. Ordinary HTTP/data/file AES-128 remains on the normal path.
+    key_uri = str(getattr(segment, "key_uri", "") or "").strip()
+    key_scheme = urlparse(key_uri).scheme.lower() if key_uri else ""
+    if (
+        hls_crypto
+        and hls_crypto.decryptor is not None
+        and key_scheme
+        and key_scheme not in {"http", "https", "data", "file"}
+        and method in {"AES_128", "AES_128_ECB"}
+    ):
+        decryptor = hls_crypto.decryptor
+        if not callable(getattr(decryptor, "decrypt", None)):
+            raise DownloadError("Service HLS decryption helper is unavailable.", url=segment.url)
+        try:
+            return decryptor.decrypt(data, segment)
+        except Exception as exc:
+            raise DownloadError(f"Service HLS decryption failed: {_error_text(exc)}", url=segment.url) from exc
     if method == "YOUKU_ECB":
         key = hls_crypto.key if hls_crypto and hls_crypto.key else None
         if not key:

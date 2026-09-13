@@ -3,11 +3,14 @@
 The expensive half of a download is not the bytes. It is the account, the CDM and
 the one licence request the service will count - and all of that is spent before a
 single segment is fetched. Once it is spent, everything needed to fetch the file
-is knowable: where the manifest is, what is in it, and which key opens it.
+is knowable: where the manifest is, what is in it, and, when protected, which key
+opens it.
 
-An export is that knowledge, written down. It is what lets a title be finished on
-a machine with no account and no CDM, handed to someone who has neither, or picked
-up again in a month without asking the service for anything a second time.
+An export is that knowledge, written down. It is what lets a standard title be
+finished on a machine with no account, CDM or source-service package, handed to
+someone who has none of them, or picked up again without asking the service for
+anything a second time. When the source service is installed, Import may retain
+its custom download preparation and lifecycle hooks.
 
 What it carries
     The manifest input, the request headers that go with it, the title as core
@@ -166,6 +169,7 @@ class Entry:
     save_name: str = ""
     title: Title | None = None
     manifest_url: str = ""
+    manifest_base_url: str = ""
     json_manifest: dict[str, Any] | None = None
     headers: dict[str, str] = field(default_factory=dict)
     proxy: str = ""
@@ -174,6 +178,14 @@ class Entry:
     drm_system: str = ""
     pssh: str = ""
     wrm_header: str = ""
+    #: Non-licence DRM states must survive the round trip too. ``clear`` prevents
+    #: an explicit clear playback from becoming a licence request, while a raw
+    #: HLS key covers services that resolved AES-128 before exporting. Ordinary
+    #: playlist AES-128 needs neither field: the downloader follows its key URI.
+    drm_clear: bool = False
+    hls_key: str = ""
+    hls_iv: str = ""
+    hls_method: str = ""
     #: "kid:key", exactly the strings the vault and UniDL use
     keys: list[str] = field(default_factory=list)
     #: the ladder as it stood, each row marked taken or left
@@ -208,16 +220,31 @@ class Entry:
         """
         title = self.title if self.title is not None else Title(id="", kind=TitleKind.MOVIE, name="")
         drm = None
-        if self.drm_system or self.pssh or self.wrm_header:
+        if any(
+            (
+                self.drm_system,
+                self.pssh,
+                self.wrm_header,
+                self.drm_clear,
+                self.hls_key,
+                self.hls_iv,
+                self.hls_method,
+            )
+        ):
             drm = DrmInfo(
                 system=self.drm_system or None,
                 pssh=self.pssh or None,
                 wrm_header=self.wrm_header or None,
+                clear=self.drm_clear,
+                hls_key=self.hls_key or None,
+                hls_iv=self.hls_iv or None,
+                hls_method=self.hls_method or None,
             )
         return Playback(
             title=title,
             save_name=self.save_name,
             manifest_url=self.manifest_url or None,
+            manifest_base_url=self.manifest_base_url or None,
             json_manifest=self.json_manifest,
             headers=dict(self.headers),
             proxy=self.proxy or None,
@@ -238,6 +265,8 @@ class Entry:
         }
         if self.manifest_url:
             document["manifest_url"] = self.manifest_url
+        if self.manifest_base_url:
+            document["manifest_base_url"] = self.manifest_base_url
         if self.json_manifest is not None and _json_safe(self.json_manifest):
             document["json_manifest"] = self.json_manifest
         if self.headers:
@@ -248,13 +277,21 @@ class Entry:
             document["is_live"] = True
         if self.note:
             document["note"] = self.note
-        drm: dict[str, str] = {}
+        drm: dict[str, Any] = {}
         if self.drm_system:
             drm["system"] = self.drm_system
         if self.pssh:
             drm["pssh"] = self.pssh
         if self.wrm_header:
             drm["wrm_header"] = self.wrm_header
+        if self.drm_clear:
+            drm["clear"] = True
+        if self.hls_key:
+            drm["hls_key"] = self.hls_key
+        if self.hls_iv:
+            drm["hls_iv"] = self.hls_iv
+        if self.hls_method:
+            drm["hls_method"] = self.hls_method
         if drm:
             document["drm"] = drm
         if self.tracks:
@@ -295,6 +332,7 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         save_name=_text(document.get("save_name")),
         title=_title_from(document.get("title") or {}),
         manifest_url=manifest,
+        manifest_base_url=_text(document.get("manifest_base_url")),
         json_manifest=json_manifest if isinstance(json_manifest, dict) else None,
         headers={str(k): str(v) for k, v in (document.get("headers") or {}).items()},
         proxy=_text(document.get("proxy")),
@@ -303,6 +341,10 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         drm_system=_text(drm.get("system")),
         pssh=_text(drm.get("pssh")),
         wrm_header=_text(drm.get("wrm_header")),
+        drm_clear=bool(drm.get("clear")),
+        hls_key=_text(drm.get("hls_key")),
+        hls_iv=_text(drm.get("hls_iv")),
+        hls_method=_text(drm.get("hls_method")),
         keys=[str(key) for key in (document.get("keys") or [])],
         tracks=[str(row) for row in (document.get("tracks") or [])],
         summary=_text(document.get("summary")),
@@ -394,6 +436,7 @@ def entry_for(playback: Playback, tracks: Any = None) -> Entry:
         save_name=playback.save_name,
         title=playback.title,
         manifest_url=manifest_url,
+        manifest_base_url=_text(playback.manifest_base_url),
         json_manifest=json_manifest,
         headers=dict(playback.headers),
         proxy=_text(playback.proxy),
@@ -402,6 +445,10 @@ def entry_for(playback: Playback, tracks: Any = None) -> Entry:
         drm_system=_text(drm.system) if drm is not None else "",
         pssh=_text(drm.pssh) if drm is not None else "",
         wrm_header=_text(drm.wrm_header) if drm is not None else "",
+        drm_clear=bool(drm.clear) if drm is not None else False,
+        hls_key=_text(drm.hls_key) if drm is not None else "",
+        hls_iv=_text(drm.hls_iv) if drm is not None else "",
+        hls_method=_text(drm.hls_method) if drm is not None else "",
         keys=list(playback.keys),
         tracks=rows,
         summary=summary,

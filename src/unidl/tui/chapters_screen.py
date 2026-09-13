@@ -13,16 +13,7 @@ from textual.widgets import Static
 from ..core.chapters import Chapter, count_label, length, summary, timestamp
 from ..core.i18n import tr
 from .bidi import visual_markup
-
-
-class _CloseMark(Static):
-    """The visible X on the popup; click dismisses without touching the job."""
-
-    def on_click(self, event) -> None:
-        event.stop()
-        closer = getattr(self.screen, "action_close", None)
-        if callable(closer):
-            closer()
+from .chrome import CloseMark
 
 
 class ChaptersScreen(ModalScreen[None]):
@@ -53,7 +44,7 @@ class ChaptersScreen(ModalScreen[None]):
                     f"{tr('chapters.title')}  [$dim]{visual_markup(self.save_name)}[/]",
                     id="chapter-modal-title",
                 )
-                yield _CloseMark("✕", id="chapter-modal-close")
+                yield CloseMark(id="chapter-modal-close")
             yield Static(
                 f"[$muted]{visual_markup(summary(self.chapters))}  ·  "
                 f"{tr('chapters.meta')}[/]",
