@@ -1822,7 +1822,10 @@ def _resume_temp_dir(
     identity = _stream_resume_identity(stream)
     candidate: tuple[float, Path] | None = None
     try:
-        entries = root.iterdir()
+        # Python 3.11/3.12 defer directory access until iteration. Consume it
+        # here so a missing first-download cache is handled on every version.
+        # The caller creates the returned target with parents=True.
+        entries = list(root.iterdir())
     except OSError:
         return target
     for entry in entries:

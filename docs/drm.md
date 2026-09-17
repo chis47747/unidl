@@ -56,11 +56,11 @@ must not alter the tracks the user finally downloads. This distinction is
 especially important when a service offers several ladders with similar
 resolution labels.
 
-The app-wide **License after final track selection** compatibility mode exists
-only for inputs whose init data is present in selected media playlists rather
-than in the master manifest. It scopes discovery to the final encrypted track
-objects; it does not let service code read shared output settings to choose an
-API or endpoint.
+The per-service **License after final track selection** mode waits for the final
+selection and scopes vault lookup and licensing to those encrypted tracks'
+KIDs/PSSH, including init data discovered in media playlists. Unselected
+renditions do not expand that inventory. It does not let service code read shared
+output settings to choose an API or endpoint.
 
 ## PlayReady PSSH and KID handling
 

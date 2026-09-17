@@ -1687,12 +1687,16 @@ ModalScreen.editor {
 
 /* ------------------------------------------------------- CDM / vault manager */
 #resource-manager-help, #storage-manager-help, #proxy-manager-help, #justwatch-settings-help, #settings-group-help {
+    width: 1fr;
+    max-width: 100%;
+    box-sizing: border-box;
     height: auto;
     min-height: 1;
     max-height: 6;
     overflow-y: auto;
     text-wrap: wrap;
-    padding: 0 2 1 2;
+    overflow-x: hidden;
+    padding: 0 3 1 3;
     color: $muted;
 }
 #resource-tabs, #storage-tabs, #proxy-tabs {
@@ -2150,8 +2154,9 @@ ModalScreen.editor {
 .short #resource-manager-help, .short #storage-manager-help, .short #proxy-manager-help, .short #justwatch-settings-help, .short #settings-group-help {
     display: block;
     max-height: 3;
-    padding-left: 1;
-    padding-right: 1;
+    /* Height may shrink, but the masthead's horizontal inset remains 3. */
+    padding-left: 3;
+    padding-right: 3;
 }
 .short #storage-manager-body {
     padding-top: 0;

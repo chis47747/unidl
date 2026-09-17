@@ -930,9 +930,10 @@ class Engine:
         """
         if settings is None:
             return True, False
+        getter = getattr(settings, "scoped", settings.get)
         return (
-            bool(settings.get("local_vault", True)),
-            bool(settings.get("remote_vault", False)),
+            bool(getter("local_vault", True)),
+            bool(getter("remote_vault", False)),
         )
 
     @staticmethod
@@ -953,9 +954,10 @@ class Engine:
         # historically remained available when the automatic playback/write
         # master gate was off. Its own switch is the permission boundary; the
         # other operations remain behind ``remote_vault``.
+        getter = getattr(settings, "scoped", settings.get)
         if operation == "search":
-            return bool(settings.get("remote_vault_home_search", True))
-        if not bool(settings.get("remote_vault", False)):
+            return bool(getter("remote_vault_home_search", True))
+        if not bool(getter("remote_vault", False)):
             return False
         key = {
             "lookup": "remote_vault_auto_lookup",
@@ -965,7 +967,7 @@ class Engine:
         }.get(operation)
         if key is None:
             raise ValueError(f"unknown remote vault operation: {operation!r}")
-        return bool(settings.get(key, True))
+        return bool(getter(key, True))
 
     @staticmethod
     def vault_targets(
@@ -984,12 +986,13 @@ class Engine:
         settings narrow those gates to named vaults; ``None`` means every vault
         in that category and ``()`` means none.
         """
-        use_local = bool(settings.get("local_vault", True)) if settings is not None else True
+        getter = getattr(settings, "scoped", settings.get) if settings is not None else None
+        use_local = bool(getter("local_vault", True)) if getter is not None else True
         use_remote = Engine.remote_vault_operation_enabled(settings, "lookup")
         if settings is None:
             return use_local, use_remote, None, None, None, None
-        read = vaults.parse_targets(settings.get("vault_read_targets", ""))
-        write = vaults.parse_targets(settings.get("vault_write_targets", ""))
+        read = vaults.parse_targets(getter("vault_read_targets", ""))
+        write = vaults.parse_targets(getter("vault_write_targets", ""))
         write_remote = Engine.remote_vault_operation_enabled(settings, "store")
         return use_local, use_remote, read, read, write, write if write_remote else ()
 
@@ -1089,10 +1092,16 @@ class Engine:
         # fragment GUID while its WRM header, licence response and stored vault
         # row use the canonical UUID. Looking up the stream spelling made every
         # repeat download miss keys that were already in the vault.
+        selected_only = playback.drm.context.get("license_inventory_mode") == "selected"
         declared = list(playback.drm.context.get("license_track_kids") or [])
         inventory_kids = declared or self.downloader.key_ids(encrypted)
         kids: list[str] = []
-        for value in [*inventory_kids, *self._drm_key_ids(playback)]:
+        # Full-manifest mode supplements stream metadata with every PSSH/WRM
+        # object discovered while scanning the manifest. In selected-only mode
+        # that context may still contain the complete ladder's init data; using
+        # it would defeat deferred licensing by querying unrelated KIDs.
+        extra_kids = [] if selected_only else self._drm_key_ids(playback)
+        for value in [*inventory_kids, *extra_kids]:
             kid = normalize_hex(value)
             if kid and kid not in kids:
                 kids.append(kid)
@@ -1579,7 +1588,9 @@ class Engine:
         # with its own service-level ``license_*`` policy.
         if inventory_tracks is not None:
             inventory = list(inventory_tracks.selected)
-            known_kids = list(drm.context.get("license_track_kids") or [])
+            known_kids = [] if license_tracks is not None else list(
+                drm.context.get("license_track_kids") or []
+            )
             drm.context["license_tracks"] = inventory
             drm.context["license_inventory_mode"] = (
                 "selected" if license_tracks is not None else "full"
@@ -1597,14 +1608,11 @@ class Engine:
             # been built) so a service's auth/session code is not bypassed at
             # title-resolution time.
             cached: list[str] = []
-            # ``drm=self`` services historically own their local key handling.
-            # Keep that compatibility path intact when the remote switch is
-            # off; the opt-in remote lookup below is the new cross-service
-            # behavior requested by the user. When remote is enabled,
-            # ``vault_lookup`` still checks selected local vaults first and only
-            # sends local misses over the network.
-            use_remote = self.remote_vault_operation_enabled(settings, "lookup")
-            if inventory_tracks is not None and use_remote:
+            # Self-owned DRM still participates in the common vault read path.
+            # The service keeps ownership of its challenge/licence endpoint; the
+            # core vault is only a source of already-known KID:key pairs. This
+            # applies to local-only policies as well as remote-enabled ones.
+            if inventory_tracks is not None and settings is not None and self.vault_reads(settings):
                 # A self-owned service may leave init data empty until the
                 # manifest is read (Apple/Sling HLS is a common example). Give
                 # the registry extractor one chance to populate KIDs before

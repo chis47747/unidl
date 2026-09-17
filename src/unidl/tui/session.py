@@ -2087,14 +2087,14 @@ class SessionController:
             return DONE, "tracks listed"
 
         # The normal path licenses the complete parsed inventory before output
-        # selection.  A deliberately opt-in compatibility setting defers it to
+        # selection.  A deliberately opt-in per-service compatibility setting defers it to
         # the confirmed output tracks; this is useful for HLS services whose PSSH
         # only appears in selected media playlists.  It is not the meaning of
         # Track output selection and never changes the default behavior.
-        inherited = getattr(self.settings, "inherited", None)
+        scoped = getattr(self.settings, "scoped", None)
         defer_license = bool(
-            inherited("license_after_tracks", False)
-            if callable(inherited)
+            scoped("license_after_tracks", False)
+            if callable(scoped)
             else self.settings.get("license_after_tracks", False)
         )
         if not defer_license:

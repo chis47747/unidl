@@ -28,6 +28,7 @@ from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
+from .settings_layout import SettingRow, label_width, setting_row
 
 
 @dataclass(frozen=True)
@@ -259,7 +260,7 @@ class StorageManagerScreen(Screen[None]):
         target = next((index for index, row in enumerate(rows) if row.key == wanted), 0)
         option_list.highlighted = target
 
-    def _row_markup(self, row: StorageRow) -> str:
+    def _row_markup(self, row: StorageRow) -> SettingRow:
         value, source = self._display_value(row)
         compact = self.app.has_class("short") or self.size.width < 96
         state_text = tr("storage.read_only") if not row.editable else source
@@ -276,9 +277,11 @@ class StorageManagerScreen(Screen[None]):
             - (len(state_text) if show_state else 0)
             - 12,
         )
-        return (
-            f"    [$foreground]{visual_markup(label)}[/]  "
-            f"[$accent]{visual_markup(self._short(value, available))}[/]{state}"
+        return setting_row(
+            self.query_one("#storage-list", OptionList), label,
+            f"[$accent]{visual_markup(self._short(value, available))}[/]{state}",
+            label_width(tr(f"storage.row.{item.key}", default=item.label) for item in self._rows),
+            indent=4,
         )
 
     @staticmethod

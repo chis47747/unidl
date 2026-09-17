@@ -2,10 +2,14 @@
 
 Chapters are optional service metadata. A service that has no chapter endpoint
 does nothing; there is no capability flag and no empty method to implement. The
-app-wide **Fetch chapter metadata** setting (on by default) decides whether
+per-service **Fetch chapter metadata** setting (on by default) decides whether
 chapter requests and optional response fields are made at all. The per-service
 **Embed chapters in the final file** setting is independent: it only controls
 container muxing after metadata has been acquired.
+Use **Settings → Services → Chapter metadata by service**, or the service's own
+settings, to change acquisition. Both edit the same persisted service value.
+Until a service is explicitly configured, the old global chapter preference is
+inherited for compatibility; changing one service never changes another.
 When a provider bundles transition/break metadata into its mandatory playback
 response, the off mode leaves that provider request intact but does not parse or
 attach the optional chapter field; this keeps the provider's primary response
@@ -81,7 +85,7 @@ static chapter file.
 
 - API timestamps are converted to milliseconds and remain monotonic;
 - an empty or absent chapter response leaves ordinary playback unchanged;
-- global `fetch_chapters=off` does not call the optional endpoint or consume its
+- service `fetch_chapters=off` (or an inherited legacy global off) does not call the optional endpoint or consume its
   optional response field;
 - a provider error or malformed optional chapter entry still emits the normal
   playback and reaches DRM/download/mux;

@@ -385,12 +385,20 @@ and offline; it should inspect local state and never make a network call.
 
 ## 8. Helpers, chapters, audio and live
 
+The per-service **License after final track selection** switch changes the
+inventory Core passes to DRM hooks: only the final selected encrypted tracks'
+KIDs/PSSH are queried in vaults or licensed. It never authorizes service code to
+use shared output preferences to select a provider API or manifest profile.
+The service's **License and vaults** section configures automatic local/remote
+lookup, storage and destinations; Home search and manual key entry remain global.
+
 Declare every binary, module or asset through the helper contract. Resolve it with
 self.ctx.helper("name"); never hardcode a developer path or scan the filesystem.
 See external-helpers.md.
 
 Optional provider chapters are converted to Core Chapter values in milliseconds
-and attached to Playback.chapters. Honor the global chapter policy and treat a
+and attached to Playback.chapters. Honor the per-service chapter policy through
+`self.fetch_chapters_enabled()` (with legacy global fallback), and treat a
 chapter endpoint failure as a warning: return the normal playback and continue
 to DRM/download.
 

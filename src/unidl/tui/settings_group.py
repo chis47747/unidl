@@ -15,6 +15,7 @@ from ..core.i18n import setting_help, setting_label, setting_value, tr
 from ..core.settings import Setting, Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar
+from .settings_layout import SettingRow, label_width, setting_row
 
 
 class SettingsGroupScreen(Screen[None]):
@@ -39,6 +40,7 @@ class SettingsGroupScreen(Screen[None]):
         self.title = title
         self.description = description
         self.specs = [scope.spec_by_key[key] for key in keys if key in scope.spec_by_key]
+        self._label_width = 30
 
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
@@ -77,6 +79,7 @@ class SettingsGroupScreen(Screen[None]):
         options = self.query_one("#settings-group-list", OptionList)
         previous = options.highlighted
         options.clear_options()
+        self._label_width = label_width(setting_label(spec) for spec in self.specs)
         for spec in self.specs:
             options.add_option(Option(self._row_markup(spec)))
         if self.specs:
@@ -90,11 +93,12 @@ class SettingsGroupScreen(Screen[None]):
         if masthead:
             masthead.first(Static).update(tr(self.title, default=self.title))
 
-    def _row_markup(self, spec: Setting) -> str:
+    def _row_markup(self, spec: Setting) -> SettingRow:
         value = setting_value(spec, self.scope)
-        return (
-            f"  [$foreground]{visual_markup(setting_label(spec))}[/]  "
-            f"[$accent]{visual_markup(value)}[/]"
+        label = setting_label(spec)
+        return setting_row(
+            self.query_one("#settings-group-list", OptionList),
+            label, f"[$accent]{visual_markup(value)}[/]", self._label_width,
         )
 
     def _selected(self) -> Setting | None:

@@ -15,6 +15,7 @@ from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .justwatch_screen import RegionScreen, SearchRegionScreen, regions_from, search_region_from
+from .settings_layout import label_width, setting_row
 
 
 class JustWatchSettingsScreen(Screen[None]):
@@ -76,11 +77,15 @@ class JustWatchSettingsScreen(Screen[None]):
         options = self.query_one("#justwatch-settings-list", OptionList)
         highlighted = options.highlighted
         options.clear_options()
+        longest = label_width(label for label, _, _ in rows)
         for label, value, help_text in rows:
             options.add_option(
                 Option(
-                    f"  [$foreground]{label}[/]  [$accent]{visual_markup(value)}[/]\n"
-                    f"     [$dim]{help_text}[/]"
+                    setting_row(
+                        options, label,
+                        f"[$accent]{visual_markup(value)}[/]\n[$dim]{visual_markup(help_text)}[/]",
+                        longest,
+                    )
                 )
             )
         options.highlighted = min(highlighted or 0, len(rows) - 1)

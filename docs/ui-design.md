@@ -312,9 +312,21 @@ each screen keeps to one question.
 | | Screen 1 | Screens 2 to 4 |
 |---|----------|----------------|
 | Search | services, titles, whole key vault | that service's keys |
-| Settings | six concise global managers: Download behavior, DRM & vaults, Files & naming, Proxy & VPN, JustWatch search, and Interface & diagnostics | that service's own options and its track preferences |
+| Settings | six concise global managers: Download behavior, DRM & vaults, Files & naming, Proxy & VPN, JustWatch search, and Interface & diagnostics | that service's own options, License and vaults policy, and track preferences |
 
 Service settings apply to that service alone.
+
+Settings label/value lists use `tui/settings_layout.py`: measure translated
+labels in terminal cells, share one value-column start across the whole list,
+and wrap labels and values independently when space is limited. Reserve the
+vertical scrollbar before wrapping. Reflow after a resize without changing the
+highlighted setting. Rows are width-aware Textual visuals: wrap during rendering,
+not during mount when the list still has zero width. Do not rely on an
+after-refresh rebuild to repair a malformed first frame, or rebuild inactive
+settings screens merely to rewrap their columns.
+Do not pad each row independently or use character counts
+for CJK text. Manager help panels wrap inside the window and keep the masthead's
+three-cell horizontal inset, even in short windows; only vertical spacing shrinks.
 
 ## Naming
 

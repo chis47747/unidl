@@ -10,7 +10,7 @@ Changes persist immediately and apply to the next request without a restart.
 
 ## Services and homepage visibility
 
-Global Settings → **Services** contains the **Fetch chapter metadata** switch,
+Global Settings → **Services** contains **Chapter metadata by service**,
 **Register a service**, **Services shown on home**, and **Export manifest type**.
 UniDL discovers service
 packages from `src/unidl/services` and shows already registered packages as
@@ -130,7 +130,7 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 
 | Setting | Values | Default | Notes |
 |---------|--------|---------|-------|
-| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, the live defaults, selected-track licence compatibility, batch confirmation, and native transfer options that are not in a service's **Tracks and output** list (`workers`, `concurrent_tracks`, `mux_format` and so on stay per-service). The individual compatibility keys remain in settings storage. |
+| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, live defaults, batch confirmation and native transfer options. Licence timing is configured per service. |
 | `resource_manager` | manager screen | — | Opens **DRM & vaults**, the single place to choose the app-wide DRM/CDM, edit CDM rules, add/edit/delete remote CDMs and vaults, enable/disable backends, choose local vaults, and open vault policy. |
 | `storage_manager` | manager screen | — | Opens **Files & naming**, the single place to edit ordinary output folders and file-name templates, preview a sample release name, and inspect sensitive runtime paths without moving them. |
 | `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints and HTTPS proxy providers are managed together. |
@@ -141,17 +141,17 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 | `cdm_rules` | resolution-to-device rules | empty | Compatibility key controlled by **DRM & vaults → CDM rules**. Rules choose the app-wide CDM by output resolution and never replace a service's own CDM setting. |
 | `theme` | `dark` / `light` | `dark` | Compatibility key controlled by **Interface & diagnostics**. Also switch with `ctrl+t`; changes repaint the current screen immediately. |
 | `interface_locale` | `system` / `en` / `zh-Hans` / `zh-Hant` / `es` / `fr` / `pt` | `system` | Compatibility key controlled by **Interface & diagnostics**. Language of UniDL's own labels and settings. Service names, titles, URLs and API locales are not translated. |
-| `local_vault` | on / off | on | Compatibility key controlled by **DRM & vaults → Vault policy**. It governs automatic local lookup; it is not a duplicate backend-enable switch. |
-| `remote_vault` | on / off | off | Compatibility key controlled by **DRM & vaults → Vault policy**. It remains the master network/write safety gate for automatic playback lookup and writes. The explicit Home search has its own permission below. |
+| `local_vault` | on / off | on | Service setting under **License and vaults**. It governs this service's automatic local lookup; it is not a duplicate backend-enable switch. |
+| `remote_vault` | on / off | off | Service setting under **License and vaults**. It remains this service's master network/write safety gate for remote-vault operations. |
 | `remote_vault_home_search` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Offers an explicit remote KID search row on the Home/search screen; it never searches while typing and requires a selected searchable backend. This explicit search permission is independent from `remote_vault`. |
 | `remote_vault_manual_add` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Allows the Home/search **Add keys** editor to send manually entered pairs to selected remote writable vaults. Local manual writes are unaffected. |
-| `remote_vault_auto_store` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. After a service licence succeeds, writes acquired pairs to selected remote writable vaults. A failed destination warns and does not fail the download. |
-| `remote_vault_auto_lookup` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Queries selected remote vaults immediately before a service licence request; complete hits skip that request and partial hits are merged with the service response. |
-| `vault_read_targets` | multi-select configured vaults | all | Compatibility key controlled by **Vault policy → Automatic playback lookup**. |
+| `remote_vault_auto_store` | on / off | on | Service setting under **License and vaults**. After this service's licence succeeds, writes acquired pairs to selected remote writable vaults. A failed destination warns and does not fail the download. |
+| `remote_vault_auto_lookup` | on / off | on | Service setting under **License and vaults**. Queries selected remote vaults immediately before this service's licence request; complete hits skip that request and partial hits are merged with the service response. |
+| `vault_read_targets` | multi-select configured vaults | all | Service setting under **License and vaults** for automatic playback lookup. |
 | `vault_search_targets` | multi-select search-capable vaults | local vaults | Compatibility key controlled by **Vault policy → Home-screen key search**. Remote search remains explicit from the search result. |
-| `vault_write_targets` | multi-select writable vaults | all writable | Compatibility key controlled by **Vault policy → Store acquired keys**. `no_push` backends are omitted. |
+| `vault_write_targets` | multi-select writable vaults | all writable | Service setting under **License and vaults** for storing acquired keys. `no_push` backends are omitted. |
 | `live_record` | on / off | **off** | Compatibility key controlled by **Download behavior**. In the TUI this preselects the record-vs-command question asked after final track selection; headless runs use it directly. A recording then uses the service's `live_record_limit` default unless the user changes it for that run; `00:00:00` means unlimited until stopped. See [live.md](live.md). |
-| `license_after_tracks` | on / off | **off** | Compatibility key controlled by **Download behavior**. Off uses the complete encrypted parsed inventory before output selection. On waits for the final track choice, then resolves only those tracks' KIDs/init data. This is for HLS/per-track init-data compatibility, not a service API/profile selector. |
+| `license_after_tracks` | on / off | **off** | Service setting under **License and vaults**. When enabled, this service waits for the final track choice and resolves only those encrypted tracks' KIDs/PSSH values. It is independent for every service and is not a service API/profile selector. |
 | `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty means `paths.downloads` from `unidl.yaml`; `~` is expanded and the folder is created if it does not exist. |
 | `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
@@ -168,7 +168,7 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 | `live_real_time_merge` | on / off | on | Compatibility key controlled by **Download behavior**. Append live segments while recording. |
 | `live_keep_segments` | on / off | off | Compatibility key controlled by **Download behavior**. Keep per-segment live files. |
 | `live_pipe_mux` | on / off | on | Compatibility key controlled by **Download behavior**. Mux live audio/video after recording; ignored for audio-only titles. |
-| `fetch_chapters` | on / off | on | Whether services may request/parse optional chapter metadata. A failed optional chapter response never blocks playback or muxing; **Embed chapters in the final file** remains a per-service Track/output choice. |
+| `fetch_chapters` | on / off | on | Legacy global default for services without an explicit chapter policy. Edit each service under **Services → Chapter metadata by service**, or in its own settings. Acquisition and **Embed chapters in the final file** are independent. |
 | `justwatch_search_region` | one ISO country code | first built-in region | Compatibility key controlled by **JustWatch search → Title catalogue**. The JustWatch search screen can edit it directly. |
 | `justwatch_regions` | comma-separated ISO country codes | built-in region list | Availability lookup order. Each region is a separate request; edit it from Settings or the region picker. See [availability.md](availability.md). |
 
@@ -242,6 +242,15 @@ Two things happen on **every** run regardless of these settings:
 
 ## Tracks and output
 
+Each service page places a **License and vaults** section immediately before
+this shared section. It controls licence timing and that service's local/remote
+vault lookup, storage, and target lists. These settings are independent per
+service; Home-screen remote search and manual key-add permissions remain global.
+
+With **License after final track selection** enabled, only the final selected
+encrypted tracks contribute KIDs/PSSH values to vault lookup and licensing.
+Unselected manifest renditions are not queried or licensed.
+
 This section is **Track output selection**. Its settings answer which parsed
 tracks native delivery core will download, keep and mux into the result. By
 themselves they are not a licence-track picker and must never silently decide a
@@ -261,7 +270,7 @@ when their defaults happen to match. By default licence acquisition finishes
 before the interactive output picker, so the later output representation is not
 runtime input to a licence request.
 
-The app-wide **License after final track selection** compatibility mode is a
+The per-service **License after final track selection** compatibility mode is a
 deliberate Core-level exception for inputs whose master manifest does not carry
 the selected media playlists' KIDs/PSSH. It waits for the final checkboxes, then
 uses only those encrypted track objects for vault/licence resolution. It still
@@ -310,8 +319,11 @@ choice for the same reason.
 
 ## Chapter metadata
 
-The global **Fetch chapter metadata** setting controls whether a service may
-request and parse optional chapter data. It is enabled by default. Turning it
+**Fetch chapter metadata** is independently configurable for each service, either
+in its own settings or under **Settings → Services → Chapter metadata by service**.
+Both editors save the same service-scoped value. Services without an explicit
+choice inherit the legacy global value (on for a new install), so upgrading does
+not silently re-enable previously disabled chapter requests. Turning it
 off skips chapter endpoints and optional chapter fields before playback is
 created; `embed_chapters` remains a separate per-service output choice that
 controls only container muxing. Chapter metadata is best effort: a missing,

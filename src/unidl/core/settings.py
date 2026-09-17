@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from dataclasses import replace as field_replace
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,8 @@ class Setting:
     #: switches and target lists are one coherent decision rather than unrelated
     #: rows scattered through the settings screen.
     visible: bool = True
+    #: Until explicitly saved, use the parent value instead of the local default.
+    inherit_global: bool = False
 
     def option_labels(self) -> list[str]:
         return [o.display() for o in self.options]
@@ -523,6 +526,40 @@ def _vault_target_settings(config: Any = None) -> list[Setting]:
     ]
 
 
+def service_license_settings(config: Any = None) -> list[Setting]:
+    """Per-service licensing and vault policy settings."""
+    targets = _vault_target_settings(config)
+    by_key = {spec.key: spec for spec in targets}
+    read_targets = field_replace(by_key["vault_read_targets"], visible=True)
+    write_targets = field_replace(by_key["vault_write_targets"], visible=True)
+    return [
+        Setting(
+            "fetch_chapters",
+            "Fetch chapter metadata",
+            "bool",
+            default=True,
+            inherit_global=True,
+            help=(
+                "When enabled, this service may request optional chapter metadata. "
+                "When disabled, its optional chapter endpoints and fields are skipped; "
+                "a chapter failure never stops playback or downloading."
+            ),
+        ),
+        Setting("license_after_tracks", "License after final track selection", "bool", default=False,
+                help="Wait for this service's final tracks, then query/license only their KIDs and PSSH values."),
+        Setting("local_vault", "Use the local key vault", "bool", default=True,
+                help="Allow this service to read and write local key vaults."),
+        Setting("remote_vault", "Use remote key vaults", "bool", default=False,
+                help="Allow this service's automatic remote vault reads and writes."),
+        Setting("remote_vault_auto_lookup", "Check remote vaults before licensing", "bool", default=True,
+                help="Query selected remote vaults for this service's KIDs before licensing."),
+        Setting("remote_vault_auto_store", "Store licensed keys in remote vaults", "bool", default=True,
+                help="Store this service's acquired keys in selected remote writable vaults."),
+        read_targets,
+        write_targets,
+    ]
+
+
 #: App-wide settings, editable from the main screen and inside any service.
 GLOBAL_SETTINGS: list[Setting] = [
     Setting(
@@ -534,7 +571,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         help=(
             "Choose what happens after a title is resolved, native transfer options "
             "that are not per-service track settings, whether live streams are "
-            "recorded, whether DRM waits for the final selected tracks, and whether "
+            "recorded, and whether "
             "batch downloads ask for confirmation."
         ),
     ),
@@ -559,8 +596,8 @@ GLOBAL_SETTINGS: list[Setting] = [
             "When enabled, services may request and parse optional chapter metadata. "
             "When disabled, chapter endpoints and optional chapter fields are skipped. "
             "A chapter failure is auxiliary and never stops playback, DRM, downloading "
-            "or final muxing. This controls acquisition globally; the per-service "
-            "'Embed chapters in the final file' setting controls only container muxing."
+            "or final muxing. This legacy default is inherited until a service saves "
+            "its own chapter policy. 'Embed chapters in the final file' controls only muxing."
         ),
         visible=False,
     ),
@@ -596,22 +633,6 @@ GLOBAL_SETTINGS: list[Setting] = [
         "the TUI both choices are confirmed after tracks are selected; these values "
         "are the preselected defaults and remain authoritative for headless runs. Off "
         "by default because a recording does not end on its own.",
-        visible=False,
-    ),
-    Setting(
-        "license_after_tracks",
-        "License after final track selection",
-        "bool",
-        default=False,
-        help=(
-            "Compatibility mode for services whose licence init data is only "
-            "available only on selected media playlists. Off keeps UniDL's default "
-            "full-manifest inventory licensing; "
-            "on waits until you confirm the output tracks, then asks for keys only "
-            "from those encrypted tracks. It uses the final selection only as the "
-            "source of KIDs/init data; it never turns a shared output preference into "
-            "a service API profile or changes which tracks are downloaded."
-        ),
         visible=False,
     ),
     _drm_system_setting(visible=False),
@@ -1383,6 +1404,8 @@ class Settings:
             return spec.coerce(stored[key]) if spec else stored[key]
         spec = self.spec_by_key.get(key)
         if spec is not None:
+            if spec.inherit_global and self.parent is not None:
+                return self.parent.get(key, spec.default)
             return spec.default
         if self.parent is not None and (key in self.parent.spec_by_key or key in self.parent._overrides):
             return self.parent.get(key, fallback)
@@ -1442,6 +1465,24 @@ class Settings:
         if self.parent is not None:
             return self.parent.get(key, fallback)
         return fallback
+
+    def scoped(self, key: str, fallback: Any = None) -> Any:
+        """Return an explicit value in this scope, otherwise its parent.
+
+        Unlike :meth:`inherited`, this distinguishes a missing persisted value
+        from a setting's default.  It is used by newly per-service policies so
+        existing app-wide values remain compatible until a service is saved.
+        """
+        if key in self._overrides:
+            return self._overrides[key]
+        stored = self._store.values_for(self.service_id)
+        if key in stored:
+            spec = self.spec_by_key.get(key)
+            return spec.coerce(stored[key]) if spec else stored[key]
+        if self.parent is not None:
+            return self.parent.get(key, fallback)
+        spec = self.spec_by_key.get(key)
+        return spec.default if spec is not None else fallback
 
     # ------------------------------------------------------------- grouping
     def service_specs(self) -> list[Setting]:

@@ -27,7 +27,6 @@ from textual.widgets.option_list import Option
 
 from ..core import cdmrules, naming, template, vaults
 from ..core.i18n import (
-    cell_width,
     option_label,
     phrase,
     setting_help,
@@ -41,6 +40,7 @@ from ..core.settings import Setting, Settings, cookie_profile_setting
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
 from .input import ClipboardInput as Input
+from .settings_layout import SettingRow, label_width, setting_row
 
 
 class _Editor(ModalScreen[Any]):
@@ -241,18 +241,6 @@ TEMPLATE_FIELDS = {
 }
 
 
-#: The label column. Wide enough for the longest label the app declares - "Send
-#: downloads through the proxy" is thirty-two characters - because the value
-#: starting at the same column on every row is what makes the list readable as two
-#: columns rather than as sentences.
-LABEL_WIDTH = 34
-
-#: Never fewer than this many spaces between a label and its value. A label longer
-#: than the column overruns it rather than being cut, and without a floor the two
-#: ran together: "Send downloads through the proxyoff" was one word.
-LABEL_GAP = 2
-
-
 def _template_problems(spec: Setting, value: Any) -> list[str]:
     """What is wrong with this value, if the setting is a name template."""
     allowed = TEMPLATE_FIELDS.get(spec.key)
@@ -284,6 +272,7 @@ class SettingsScreen(Screen):
         self._rows: list[tuple[Setting, Settings] | None] = []
         #: whether the list was last built with the blank rows between settings
         self._roomy = True
+        self._label_width = 0
 
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
@@ -340,15 +329,15 @@ class SettingsScreen(Screen):
         spec.help = fresh.help
 
     def on_resize(self) -> None:
-        """Rebuild when the window crosses into or out of the roomy size.
+        # Columns reflow at render time. Only rebuild when row spacing changes.
+        if self.is_active:
+            self.call_later(self._resize_spacing)
 
-        The blank rows between settings are options, not padding, so they cannot be
-        turned off by the stylesheet the way the rest of the spacing is - which
-        means this screen has to be told the window changed.
-        """
-        roomy = not self.app.has_class("short")
-        if roomy is not self._roomy:
-            self._roomy = roomy
+    def on_screen_resume(self) -> None:
+        self.call_later(self._resize_spacing)
+
+    def _resize_spacing(self) -> None:
+        if self.is_active and self._roomy != (not self.app.has_class("short")):
             self.rebuild()
 
     # ------------------------------------------------------------------ render
@@ -365,6 +354,17 @@ class SettingsScreen(Screen):
 
         roomy = not self.app.has_class("short")
         self._roomy = roomy
+
+        # Keep the value column aligned even when a service declares a label
+        # longer than the historical 34-cell baseline (for example, the remote
+        # vault policy rows).  Rich markup does not participate in terminal
+        # width, so measure the translated plain labels explicitly.
+        visible_labels = [
+            setting_label(spec)
+            for spec in self.scope.specs
+            if spec.visible
+        ]
+        self._label_width = label_width(visible_labels)
 
         def add_spacer() -> None:
             """A blank row between settings, when there is room for one.
@@ -400,7 +400,34 @@ class SettingsScreen(Screen):
             # opened inside a service: only what applies to that service
             scope = self.service.settings
             service_note = tr("settings.note.this_service")
-            add_section(self.service.NAME, scope.service_specs(), scope, note=service_note)
+            policy_keys = {
+                "license_after_tracks", "local_vault", "remote_vault",
+                "remote_vault_auto_lookup", "remote_vault_auto_store",
+                "vault_read_targets", "vault_write_targets",
+            }
+            add_section(
+                self.service.NAME,
+                [spec for spec in scope.service_specs() if spec.key not in policy_keys],
+                scope,
+                note=service_note,
+            )
+            add_section(
+                tr("settings.section.license_vaults"),
+                [
+                    spec for spec in scope.specs
+                    if spec.key in {
+                        "license_after_tracks",
+                        "local_vault",
+                        "remote_vault",
+                        "remote_vault_auto_lookup",
+                        "remote_vault_auto_store",
+                        "vault_read_targets",
+                        "vault_write_targets",
+                    }
+                ],
+                scope,
+                note=service_note,
+            )
             add_section(
                 tr("settings.section.tracks"),
                 scope.track_specs(),
@@ -424,7 +451,7 @@ class SettingsScreen(Screen):
         elif settings_rows:
             option_list.highlighted = settings_rows[0]
 
-    def _row_markup(self, spec: Setting, scope: Settings) -> str:
+    def _row_markup(self, spec: Setting, scope: Settings) -> SettingRow:
         if spec.picker in {
             "resources",
             "storage",
@@ -463,15 +490,13 @@ class SettingsScreen(Screen):
         # unidl.yaml. A folder called "TV [new]" rendered as "TV " - and the editor
         # one keypress away showed the truth, so the row was the only thing lying.
         #
-        # Padded to a column, but never joined to the next one: a label longer than
-        # the column gets the minimum gap instead of being run into its own value.
-        label_text = setting_label(spec)
-        label = visual_markup(label_text)
-        gap = " " * max(LABEL_GAP, LABEL_WIDTH - cell_width(label_text))
-        row = f"    {label}{gap}[$accent]{visual_markup(value)}[/]"
+        row = f"[$accent]{visual_markup(value)}[/]"
         if spec.resets_session:
             row += f"  [$dim]{tr('settings.signs_out')}[/]"
-        return row
+        return setting_row(
+            self.query_one("#settings-list", OptionList),
+            setting_label(spec), row, self._label_width, indent=4,
+        )
 
     def _cdm_label(self, selected: Any) -> str:
         """Name a selected device and whether the exchange is local or remote."""
@@ -605,7 +630,6 @@ class SettingsScreen(Screen):
                     (
                         "after_resolve",
                         "live_record",
-                        "license_after_tracks",
                         "confirm_batch",
                         "retries",
                         "http_timeout",

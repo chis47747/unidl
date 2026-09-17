@@ -45,6 +45,7 @@ from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
+from .settings_layout import SettingRow, label_width, setting_row
 from .vault_targets import VaultCheckbox, VaultTargetResult, VaultTargetScreen
 
 _NAME_RE = re.compile(r"^[^\s][^\n\r]*$")
@@ -950,7 +951,7 @@ class ResourceManagerScreen(Screen[None]):
         self._highlight(wanted)
         self._refresh_actions()
 
-    def _row_markup(self, row: ResourceRow) -> str:
+    def _row_markup(self, row: ResourceRow) -> SettingRow:
         if row.kind == "vault-discovered":
             enabled = f"[$accent]{tr('resource.discovered')}[/]"
         elif row.kind in {"drm-system", "cdm-rules"}:
@@ -958,9 +959,11 @@ class ResourceManagerScreen(Screen[None]):
         else:
             enabled = f"[$ok]{tr('resource.enabled')}[/]" if row.enabled else f"[$warn]{tr('resource.disabled')}[/]"
         active = f"  [$accent]{tr('resource.active')}[/]" if row.kind == "cdm-choice" else ""
-        return (
-            f"    [$foreground]{visual_markup(row.name)}[/]  "
-            f"[$dim]{visual_markup(row.detail)}[/]  {enabled}{active}"
+        return setting_row(
+            self.query_one("#resource-list", OptionList), row.name,
+            f"[$dim]{visual_markup(row.detail)}[/]  {enabled}{active}",
+            label_width(item.name for item in self._rows if item is not None),
+            indent=4,
         )
 
     def _highlight(self, wanted: tuple[str, str] | None) -> None:

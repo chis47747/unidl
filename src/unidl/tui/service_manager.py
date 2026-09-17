@@ -14,9 +14,70 @@ from textual.widgets.option_list import Option
 from ..core import exports, service_catalog
 from ..core.i18n import setting_value, tr
 from ..core.settings import Option as SettingOption
-from ..core.settings import Setting, Settings
+from ..core.settings import Setting, Settings, service_license_settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar
+from .settings_layout import label_width, setting_row
+
+
+class _ChapterPolicyScreen(ModalScreen[None]):
+    """Toggle chapter metadata independently for each registered service."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+    ]
+
+    def __init__(self, app) -> None:
+        super().__init__()
+        self.services = sorted(app.services, key=lambda cls: cls.NAME.casefold())
+        chapter_spec = next(spec for spec in service_license_settings() if spec.key == "fetch_chapters")
+        self.scopes = [
+            Settings(cls.ID, [chapter_spec], app.settings_store, parent=app.globals, legacy_ids=cls.LEGACY_IDS)
+            for cls in self.services
+        ]
+
+    def compose(self) -> ComposeResult:
+        yield Chrome(show_search=False, show_settings=False)
+        with Vertical(id="modal-body"):
+            yield Static(tr("service.chapters.title", default="Chapter metadata by service"), classes="ask-title")
+            yield Label(tr("service.chapters.help", default="Select a service to toggle optional chapter metadata."), classes="ask-hint")
+            yield OptionList(id="service-chapters-list")
+        yield KeyBar(("enter", "toggle"), ("^b", "back"), ("esc", "back"))
+
+    def on_mount(self) -> None:
+        self.rebuild()
+        self.query_one("#service-chapters-list", OptionList).focus()
+
+    def rebuild(self) -> None:
+        options = self.query_one("#service-chapters-list", OptionList)
+        previous = options.highlighted
+        options.clear_options()
+        labels = [cls.NAME for cls in self.services]
+        width = label_width(labels)
+        for index, (cls, settings) in enumerate(zip(self.services, self.scopes, strict=True)):
+            value = setting_value(settings.spec_by_key["fetch_chapters"], settings)
+            options.add_option(Option(setting_row(options, cls.NAME, f"[$accent]{value}[/]", width), id=str(index)))
+        if self.services:
+            options.highlighted = min(previous or 0, len(self.services) - 1)
+        else:
+            options.add_option(Option(tr("service.export.empty"), disabled=True))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        index = event.option_index
+        if index < 0 or index >= len(self.services):
+            return
+        settings = self.scopes[index]
+        settings.set("fetch_chapters", not bool(settings.get("fetch_chapters")))
+        self.rebuild()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.dismiss(None)
+        return True
 
 
 class _RegistrationEditor(ModalScreen[str | None]):
@@ -206,7 +267,7 @@ class ServicesManagerScreen(Screen[None]):
     def __init__(self, globals_scope: Settings):
         super().__init__()
         self.globals = globals_scope
-        self._rows = ("fetch", "register", "home", "export")
+        self._rows = ("chapters", "register", "home", "export")
         self._sources = []
 
     def compose(self) -> ComposeResult:
@@ -255,23 +316,24 @@ class ServicesManagerScreen(Screen[None]):
             for service_id in registered
         )
         rows = [
-            ("fetch", f"  {tr('setting.fetch_chapters')}  [$accent]{setting_value(self.globals.spec_by_key['fetch_chapters'], self.globals)}[/]"),
-            ("register", f"  {tr('service.register.action')}  [$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
-            ("home", f"  {tr('service.home.action')}  [$dim]{tr('service.home.summary', shown=shown, registered=count)}[/]"),
+            ("chapters", tr('service.chapters.action', default='Chapter metadata by service'), f"[$dim]{tr('service.chapters.summary', default='Independent on/off per registered service')}[/]"),
+            ("register", tr('service.register.action'), f"[$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
+            ("home", tr('service.home.action'), f"[$dim]{tr('service.home.summary', shown=shown, registered=count)}[/]"),
             (
                 "export",
-                f"  {tr('service.export.action')}  "
+                tr('service.export.action'),
                 f"[$dim]{tr('service.export.summary', media=media, master=max(0, count - media))}[/]",
             ),
         ]
-        for ident, text in rows:
-            options.add_option(Option(text, id=ident))
+        longest = label_width(label for _, label, _ in rows)
+        for ident, label, value in rows:
+            options.add_option(Option(setting_row(options, label, value, longest), id=ident))
         options.highlighted = min(previous or 0, len(rows) - 1)
         self._show_help(self._rows[options.highlighted or 0])
 
     def _show_help(self, ident: str) -> None:
         keys = {
-            "fetch": "setting.fetch_chapters.help",
+            "chapters": "service.chapters.help",
             "register": "service.register.help",
             "home": "service.home.help",
             "export": "service.export.help",
@@ -290,10 +352,8 @@ class ServicesManagerScreen(Screen[None]):
     def action_activate(self) -> None:
         options = self.query_one("#settings-group-list", OptionList)
         ident = str(options.get_option_at_index(options.highlighted or 0).id or "")
-        if ident == "fetch":
-            self.globals.set("fetch_chapters", not bool(self.globals.get("fetch_chapters")))
-            self.rebuild()
-            self.app.notify(tr("settings.changed", label=tr("setting.fetch_chapters"), value=setting_value(self.globals.spec_by_key["fetch_chapters"], self.globals)), timeout=4)
+        if ident == "chapters":
+            self.app.push_screen(_ChapterPolicyScreen(self.app), lambda _result: self.rebuild())
             return
         self._refresh_sources()
         if ident == "register":

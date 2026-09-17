@@ -85,9 +85,9 @@ parse manifest  ->  KIDs known
 
 Parsing must come first: the manifest is what reveals the KIDs. The order in
 `tui/session.py:_process` is `load_tracks`, `resolve_keys`, then output track
-selection for this reason. The vault and licence inventory always cover the full
-parsed encrypted ladder; changing the later download selection cannot change a
-lookup or licence request.
+selection for this reason. The vault and licence inventory normally cover the
+full parsed encrypted ladder; services may enable **License after final track
+selection** to use only their final selected encrypted tracks.
 
 The lookup returns a complete set only when it can skip the licence exchange. A
 partial hit is retained on the playback while the service's own licence path
@@ -110,6 +110,12 @@ service-owned flows keep their existing local handling. If such a service
 discovers additional per-track PSSH/KIDs only while running its own parser, it
 continues through that parser and the service licence path; Core never guesses a
 KID-only request for it.
+
+The service page's **License and vaults** section controls local/remote lookup,
+automatic storage, and target lists independently for that service. With
+**License after final track selection** enabled, only selected encrypted tracks'
+KIDs/PSSH values are sent to vault lookup or licensing; unselected renditions
+from the manifest are ignored.
 
 Lookup prefers a same-service match, then falls back to any service. KIDs are
 globally unique in practice, so a key imported under one service name still

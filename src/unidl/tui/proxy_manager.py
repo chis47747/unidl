@@ -27,6 +27,7 @@ from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
+from .settings_layout import SettingRow, label_width, setting_row
 
 
 @dataclass(frozen=True)
@@ -513,23 +514,27 @@ class ProxyManagerScreen(Screen[None]):
         self._preview()
         self._refresh_actions()
 
-    def _row_markup(self, row: ProxyRow) -> str:
+    def _row_markup(self, row: ProxyRow) -> SettingRow:
         if row.kind == "route":
             value = str(self.globals.get("proxy") or "") or tr("proxy.direct")
-            return f"  [$foreground]{tr('proxy.row.route')}[/]  [$accent]{visual_markup(value)}[/]"
-        if row.kind == "download":
+            markup = f"[$accent]{visual_markup(value)}[/]"
+        elif row.kind == "download":
             value = tr("value.on") if self.globals.get("proxy_downloads") else tr("value.off")
-            return f"  [$foreground]{tr('proxy.row.downloads')}[/]  [$accent]{value}[/]"
-        if row.kind == "endpoint":
-            enabled = not isinstance(row.value, dict) or bool(row.value.get("enabled", True))
+            markup = f"[$accent]{value}[/]"
+        else:
+            fallback = row.value.get("enable", True) if row.kind == "provider" and isinstance(row.value, dict) else True
+            enabled = not isinstance(row.value, dict) or bool(row.value.get("enabled", fallback))
             state = tr("value.enabled") if enabled else tr("value.disabled")
-            return f"  [$foreground]{visual_markup(row.name)}[/]  [$accent]{state}[/]  [$dim]{tr('proxy.static')}[/]"
-        enabled = not isinstance(row.value, dict) or bool(row.value.get("enabled", row.value.get("enable", True)))
-        state = tr("value.enabled") if enabled else tr("value.disabled")
-        return (
-            f"  [$foreground]{PROVIDER_LABELS.get(row.name, row.name)}[/]  "
-            f"[$accent]{state}[/]  [$dim]{tr('proxy.provider')}[/]"
+            kind = tr("proxy.static") if row.kind == "endpoint" else tr("proxy.provider")
+            markup = f"[$accent]{state}[/]  [$dim]{kind}[/]"
+        return setting_row(
+            self.query_one("#proxy-list", OptionList), self._row_label(row), markup,
+            label_width(self._row_label(item) for item in self._rows),
         )
+
+    @staticmethod
+    def _row_label(row: ProxyRow) -> str:
+        return PROVIDER_LABELS.get(row.name, row.name) if row.kind == "provider" else row.name
 
     def _preview(self) -> None:
         row = self._selected()

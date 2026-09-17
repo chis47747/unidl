@@ -43,6 +43,7 @@ from .settings import (
     drm_system_setting,
     live_settings,
     proxy_setting,
+    service_license_settings,
 )
 from .titles import Title
 
@@ -397,23 +398,15 @@ class Service:
     def fetch_chapters_enabled(self) -> bool:
         """Whether this run may request optional chapter metadata.
 
-        Chapter acquisition is an app-wide policy, so service scopes inherit the
-        ``fetch_chapters`` value from their parent global settings.  A few offline
-        service checks use a plain dict instead of :class:`Settings`; keeping the
+        Chapter acquisition is a per-service policy, with the app-wide value kept
+        as the compatibility fallback for scopes created before this setting was
+        introduced. A few offline service checks use a plain dict instead of
+        :class:`Settings`; keeping the
         small coercion here makes those checks and headless callers behave exactly
         like the TUI without requiring a settings object just to read one switch.
         """
         settings = getattr(self, "settings", None)
-        # A persisted service scope may contain an obsolete key from an older
-        # build.  When a real Settings parent declares the policy, read that
-        # app-wide value directly so a stale per-service entry cannot silently
-        # override the global switch.
-        parent = getattr(settings, "parent", None)
-        parent_specs = getattr(parent, "spec_by_key", {})
-        if parent is not None and "fetch_chapters" in parent_specs:
-            getter = getattr(parent, "get", None)
-        else:
-            getter = getattr(settings, "get", None)
+        getter = getattr(settings, "get", None)
         if not callable(getter):
             return True
         try:
@@ -496,6 +489,11 @@ class Service:
             # with no live channels is a setting that can never be read.
             declared = {s.key for s in specs}
             specs += [spec for spec in live_settings() if spec.key not in declared]
+        declared = {s.key for s in specs}
+        specs += [
+            spec for spec in service_license_settings(config)
+            if spec.key not in declared
+        ]
         declared = {s.key for s in specs}
         return specs + [spec for spec in TRACK_SETTINGS if spec.key not in declared]
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.1.1] - 2026-09-17
+
+### Per-service chapters, licensing and vaults
+
+- Added independent **Fetch chapter metadata** controls in each service's
+  settings and under **Settings → Services → Chapter metadata by service**.
+  Existing global chapter preferences remain the default until a service saves
+  its own choice; chapter embedding remains a separate output setting.
+- Moved **License after final track selection** into each service's settings.
+- Added a **License and vaults** section before **Tracks and output** for
+  service-specific local/remote lookup, automatic storage and vault destinations.
+  Home-screen search and manual key-entry permissions remain global.
+- Fixed selected-track vault lookup expanding to unrelated manifest KIDs.
+  A complete cache hit for the selected encrypted tracks avoids an unnecessary
+  licence request, while licence transport remains service-owned.
+- Enabled the common local-vault lookup path for service-owned DRM as well as
+  opt-in remote lookup.
+
+### Settings layout and native downloads
+
+- Aligned translated setting labels and values using terminal-cell-aware columns,
+  with independent wrapping for long labels, CJK text and values.
+- Kept settings descriptions inside the window, including narrow/short terminals.
+- Fixed the malformed first frame when opening settings by calculating row
+  wrapping at render time, without delayed full-list rebuilds.
+- Fixed first-download resume-cache directory handling on Python 3.11/3.12,
+  including the missing-path error reported on Windows.
+- Updated the in-app release notes in all six supported interface languages.
+
 ## [2.1.0] - 2026-09-16
 
 ### Per-service export policy
