@@ -138,6 +138,24 @@ platform notes and a complete preflight checklist.
 
 ## Use UniDL
 
+No YAML file or manual download-path configuration is required for first launch.
+Windows Command Prompt users can install and start with:
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip unidl
+unidl
+```
+
+Downloads default to `~/unidl_downloads/<service>/` (normally
+`C:\Users\<username>\unidl_downloads\<service>\` on Windows). Home shows this
+location on first launch. Change it under **Settings → Files & naming → Output
+locations → Finished downloads**, without editing YAML. After reviewing that
+screen, the first-run hint is dismissed. The setting remains available later.
+For a source checkout managed by uv, use `uv sync` then `uv run unidl`;
+`uv lock` and `--extra dev` are not required for ordinary use.
+
 Launch the installed TUI:
 
 ```console

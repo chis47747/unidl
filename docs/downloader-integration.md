@@ -5,6 +5,20 @@ Services prepare an authorized Playback; Core parses the source, presents track
 selection, resolves keys, downloads segments, decrypts, writes sidecars and
 muxes the final file.
 
+## Service-staged XML subtitles
+
+External subtitles in `Playback.mux_imports` bypass downloaded-track conversion.
+The common mux preparation step converts `.xml`, `.ttml` and `.dfxp` files to
+temporary SRT using UniDL's native converter before FFmpeg/mkvmerge sees them.
+This handles BBC EBU-TT/IMSC subtitles without requiring the optional `subby`.
+
+Original subtitles remain unchanged. Timing, text and input metadata are
+preserved, but SRT does not retain TTML styling or positioning. Short per-job
+temporary names avoid repeating long release names in Windows paths. Temporary
+files are cleaned up after success, failure or cancellation. Invalid subtitles
+produce a preparation error rather than being silently omitted; downloaded
+media remains available. Existing SRT/VTT and audio/video inputs are unchanged.
+
 ## Supported source families
 
 The native parser accepts:

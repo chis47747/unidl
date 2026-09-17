@@ -10,7 +10,8 @@ Changes persist immediately and apply to the next request without a restart.
 
 ## Services and homepage visibility
 
-Global Settings → **Services** contains **Chapter metadata by service**,
+Global Settings → **Services** contains the global **License after final track
+selection** default, **Chapter metadata by service**,
 **Register a service**, **Services shown on home**, and **Export manifest type**.
 UniDL discovers service
 packages from `src/unidl/services` and shows already registered packages as
@@ -130,7 +131,7 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 
 | Setting | Values | Default | Notes |
 |---------|--------|---------|-------|
-| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, live defaults, batch confirmation and native transfer options. Licence timing is configured per service. |
+| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, live defaults, batch confirmation and native transfer options. Licence timing defaults are configured under **Services** and may be overridden per service. |
 | `resource_manager` | manager screen | — | Opens **DRM & vaults**, the single place to choose the app-wide DRM/CDM, edit CDM rules, add/edit/delete remote CDMs and vaults, enable/disable backends, choose local vaults, and open vault policy. |
 | `storage_manager` | manager screen | — | Opens **Files & naming**, the single place to edit ordinary output folders and file-name templates, preview a sample release name, and inspect sensitive runtime paths without moving them. |
 | `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints and HTTPS proxy providers are managed together. |
@@ -141,18 +142,18 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 | `cdm_rules` | resolution-to-device rules | empty | Compatibility key controlled by **DRM & vaults → CDM rules**. Rules choose the app-wide CDM by output resolution and never replace a service's own CDM setting. |
 | `theme` | `dark` / `light` | `dark` | Compatibility key controlled by **Interface & diagnostics**. Also switch with `ctrl+t`; changes repaint the current screen immediately. |
 | `interface_locale` | `system` / `en` / `zh-Hans` / `zh-Hant` / `es` / `fr` / `pt` | `system` | Compatibility key controlled by **Interface & diagnostics**. Language of UniDL's own labels and settings. Service names, titles, URLs and API locales are not translated. |
-| `local_vault` | on / off | on | Service setting under **License and vaults**. It governs this service's automatic local lookup; it is not a duplicate backend-enable switch. |
-| `remote_vault` | on / off | off | Service setting under **License and vaults**. It remains this service's master network/write safety gate for remote-vault operations. |
-| `remote_vault_home_search` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Offers an explicit remote KID search row on the Home/search screen; it never searches while typing and requires a selected searchable backend. This explicit search permission is independent from `remote_vault`. |
+| `local_vault` | on / off | on | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden under **License and vaults**. It governs automatic local lookup; it is not a duplicate backend-enable switch. |
+| `remote_vault` | on / off | off | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden. It remains the master network/write safety gate for remote-vault operations. |
+| `remote_vault_home_search` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Offers an explicit remote KID search row on the Home/search screen; it never searches while typing and requires a selected searchable backend. This explicit action is independent from the automatic playback/write `remote_vault` gate. |
 | `remote_vault_manual_add` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Allows the Home/search **Add keys** editor to send manually entered pairs to selected remote writable vaults. Local manual writes are unaffected. |
-| `remote_vault_auto_store` | on / off | on | Service setting under **License and vaults**. After this service's licence succeeds, writes acquired pairs to selected remote writable vaults. A failed destination warns and does not fail the download. |
-| `remote_vault_auto_lookup` | on / off | on | Service setting under **License and vaults**. Queries selected remote vaults immediately before this service's licence request; complete hits skip that request and partial hits are merged with the service response. |
-| `vault_read_targets` | multi-select configured vaults | all | Service setting under **License and vaults** for automatic playback lookup. |
+| `remote_vault_auto_store` | on / off | on | Global vault-policy value inherited by services until overridden. After this service's licence succeeds, writes acquired pairs to selected remote writable vaults. |
+| `remote_vault_auto_lookup` | on / off | on | Global vault-policy value inherited by services until overridden. Queries selected remote vaults immediately before this service's licence request; complete hits skip that request and partial hits are merged with the service response. |
+| `vault_read_targets` | multi-select configured vaults | all | Global **Automatic playback lookup** destinations inherited by services until overridden under **License and vaults**. |
 | `vault_search_targets` | multi-select search-capable vaults | local vaults | Compatibility key controlled by **Vault policy → Home-screen key search**. Remote search remains explicit from the search result. |
-| `vault_write_targets` | multi-select writable vaults | all writable | Service setting under **License and vaults** for storing acquired keys. `no_push` backends are omitted. |
+| `vault_write_targets` | multi-select writable vaults | all writable | Global **Store acquired keys** destinations inherited by services until overridden. `no_push` backends are omitted. |
 | `live_record` | on / off | **off** | Compatibility key controlled by **Download behavior**. In the TUI this preselects the record-vs-command question asked after final track selection; headless runs use it directly. A recording then uses the service's `live_record_limit` default unless the user changes it for that run; `00:00:00` means unlimited until stopped. See [live.md](live.md). |
-| `license_after_tracks` | on / off | **off** | Service setting under **License and vaults**. When enabled, this service waits for the final track choice and resolves only those encrypted tracks' KIDs/PSSH values. It is independent for every service and is not a service API/profile selector. |
-| `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty means `paths.downloads` from `unidl.yaml`; `~` is expanded and the folder is created if it does not exist. |
+| `license_after_tracks` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. When enabled, only final selected encrypted tracks' KIDs/PSSH values are resolved; it is not a service API/profile selector. |
+| `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty uses YAML `paths.downloads` when configured, otherwise `~/unidl_downloads`, grouped by service. No YAML editing is required; `~` is expanded and the folder is created if it does not exist. |
 | `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
 | `retries` | integer | `5` | Compatibility key controlled by **Download behavior**. Segment retry count for the native engine. |
@@ -245,7 +246,13 @@ Two things happen on **every** run regardless of these settings:
 Each service page places a **License and vaults** section immediately before
 this shared section. It controls licence timing and that service's local/remote
 vault lookup, storage, and target lists. These settings are independent per
-service; Home-screen remote search and manual key-add permissions remain global.
+service when explicitly overridden; otherwise they inherit the values from the
+global **DRM & vaults → Vault policy** and **Services** settings. Home-screen
+remote search and manual key-add permissions remain global. Press `r` on a
+service policy row to clear its override and return to the global value. Rows
+display the effective value and mark whether it follows global settings or is a
+service override. Explicit off and explicit empty destination selections are
+overrides, not missing values. Opening an editor never saves inherited defaults.
 
 With **License after final track selection** enabled, only the final selected
 encrypted tracks contribute KIDs/PSSH values to vault lookup and licensing.
@@ -378,8 +385,12 @@ self.settings.get("video_quality")  # shared
 self.settings.get("debug")          # global, resolved through the parent scope
 ```
 
-One object, three scopes, resolved by fallback. Service settings shadow globals
-if a key collides, so avoid reusing global key names.
+One object, three scopes, resolved by fallback. Most service settings shadow a
+global key when a service declares the same name. Shared policy keys
+(`fetch_chapters`, `license_after_tracks`, vault gates, and vault target lists)
+instead inherit the global value until a service explicitly saves an override.
+An explicit `false` or empty target list is still an override. Press `r` on an
+inherited service-policy row to remove that override and resume global fallback.
 
 ## Storage
 

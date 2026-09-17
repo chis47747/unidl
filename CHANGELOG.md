@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.1.2] - 2026-09-18
+
+### First launch and download locations
+
+- Show the effective download folder on Home with a direct link to Files & naming.
+  Reviewing that screen dismisses the introduction; the folder remains editable
+  under Settings at any time. No YAML file or manual path entry is required.
+- Bound and scroll first-run hints so short terminals retain a usable service list.
+- Distinguish built-in download defaults from explicit YAML paths in Settings.
+  Downloads default to ~/unidl_downloads, grouped by service; paths.home does
+  not relocate finished media. Clarified Windows startup and custom --config usage.
+
+### Global defaults and per-service overrides
+
+- Service vault permissions and lookup/write destinations inherit the global
+  Vault policy until explicitly overridden. Display the effective value and
+  inheritance source; press r to remove a service override.
+- Restore the global License after final track selection default under Services.
+  Explicit service choices, including off and empty destinations, are preserved.
+- Keep third-party export imports isolated from service licence and vault calls.
+
+### Native subtitle muxing
+
+- Convert external XML/TTML/DFXP subtitles to temporary SRT before FFmpeg or
+  mkvmerge, fixing BBC XML subtitle mux failures without requiring subby.
+- Preserve original subtitles and input metadata, shorten temporary paths for
+  Windows, and clean up temporary files after success, failure or cancellation.
+- Refresh the in-app release notes in all six interface languages.
+
 ## [2.1.1] - 2026-09-17
 
 ### Per-service chapters, licensing and vaults

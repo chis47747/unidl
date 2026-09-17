@@ -930,7 +930,7 @@ class Engine:
         """
         if settings is None:
             return True, False
-        getter = getattr(settings, "scoped", settings.get)
+        getter = getattr(settings, "scoped", None) or settings.get
         return (
             bool(getter("local_vault", True)),
             bool(getter("remote_vault", False)),
@@ -954,7 +954,7 @@ class Engine:
         # historically remained available when the automatic playback/write
         # master gate was off. Its own switch is the permission boundary; the
         # other operations remain behind ``remote_vault``.
-        getter = getattr(settings, "scoped", settings.get)
+        getter = getattr(settings, "scoped", None) or settings.get
         if operation == "search":
             return bool(getter("remote_vault_home_search", True))
         if not bool(getter("remote_vault", False)):
@@ -986,7 +986,11 @@ class Engine:
         settings narrow those gates to named vaults; ``None`` means every vault
         in that category and ``()`` means none.
         """
-        getter = getattr(settings, "scoped", settings.get) if settings is not None else None
+        getter = (
+            (getattr(settings, "scoped", None) or settings.get)
+            if settings is not None
+            else None
+        )
         use_local = bool(getter("local_vault", True)) if getter is not None else True
         use_remote = Engine.remote_vault_operation_enabled(settings, "lookup")
         if settings is None:
@@ -1600,11 +1604,18 @@ class Engine:
             )
 
         if service.USES.is_self("drm"):
+            # A foreign export is a completed delivery handoff, not a service
+            # session.  Do not even consult local/remote vault policy here: its
+            # only legal key source is the KID:key material already in the file,
+            # and the inert service reports a clear error when that is missing.
+            if getattr(service, "_NO_LICENSE_IMPORT", False):
+                playback.keys = list(service.get_keys(playback) or [])
+                return playback.keys
             # Service-owned DRM still gets the same vault opportunity as the
-            # registry-backed path. The service remains the only licence
+            # registry-backed path.  The service remains the only licence
             # transport: ``vault_lookup`` merely supplies already-known
             # KID:key pairs and never creates a challenge or calls a licence
-            # endpoint. Keep the lookup here (after the licence inventory has
+            # endpoint.  Keep the lookup here (after the licence inventory has
             # been built) so a service's auth/session code is not bypassed at
             # title-resolution time.
             cached: list[str] = []

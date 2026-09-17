@@ -12,7 +12,7 @@ from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import exports, service_catalog
-from ..core.i18n import setting_value, tr
+from ..core.i18n import setting_label, setting_value, tr
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, service_license_settings
 from .bidi import visual_markup
@@ -256,18 +256,12 @@ class _ExportManifestEditor(ModalScreen[None]):
 
 
 class ServicesManagerScreen(Screen[None]):
-    """The Services section under global Settings."""
-
-    BINDINGS = [
-        Binding("ctrl+b", "back", "Back", show=False),
-        Binding("escape", "back", "Quit", show=False),
-        Binding("enter", "activate", "Change", show=True),
-    ]
+    BINDINGS = [Binding("ctrl+b", "back", "Back", show=False), Binding("escape", "back", "Quit", show=False), Binding("enter", "activate", "Change", show=True)]
 
     def __init__(self, globals_scope: Settings):
         super().__init__()
         self.globals = globals_scope
-        self._rows = ("chapters", "register", "home", "export")
+        self._rows = ("chapters", "license", "register", "home", "export")
         self._sources = []
 
     def compose(self) -> ComposeResult:
@@ -292,10 +286,10 @@ class ServicesManagerScreen(Screen[None]):
         found = self.query("#settings-group-help")
         if not found:
             return
-        # Chrome, masthead, four visible option rows and the key bar need eight
-        # rows. The rest can belong to the selected setting's prose, up to a
+        # Reserve room for Chrome, masthead, option rows and the key bar.
+        # The rest can belong to the selected setting's prose, up to a
         # readable twelve-row panel.
-        found.first(Static).styles.max_height = max(2, min(12, self.app.size.height - 8))
+        found.first(Static).styles.max_height = max(2, min(12, self.app.size.height - len(self._rows) - 4))
 
     def _refresh_sources(self) -> None:
         self._sources = service_catalog.merge_registry_sources(
@@ -317,6 +311,7 @@ class ServicesManagerScreen(Screen[None]):
         )
         rows = [
             ("chapters", tr('service.chapters.action', default='Chapter metadata by service'), f"[$dim]{tr('service.chapters.summary', default='Independent on/off per registered service')}[/]"),
+            ("license", tr('service.license.action', default='License after final track selection'), f"[$dim]{setting_value(self.globals.spec_by_key['license_after_tracks'], self.globals)}[/]"),
             ("register", tr('service.register.action'), f"[$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
             ("home", tr('service.home.action'), f"[$dim]{tr('service.home.summary', shown=shown, registered=count)}[/]"),
             (
@@ -334,6 +329,7 @@ class ServicesManagerScreen(Screen[None]):
     def _show_help(self, ident: str) -> None:
         keys = {
             "chapters": "service.chapters.help",
+            "license": "service.license.help",
             "register": "service.register.help",
             "home": "service.home.help",
             "export": "service.export.help",
@@ -354,6 +350,16 @@ class ServicesManagerScreen(Screen[None]):
         ident = str(options.get_option_at_index(options.highlighted or 0).id or "")
         if ident == "chapters":
             self.app.push_screen(_ChapterPolicyScreen(self.app), lambda _result: self.rebuild())
+            return
+        if ident == "license":
+            spec = self.globals.spec_by_key["license_after_tracks"]
+            self.globals.set("license_after_tracks", not bool(self.globals.get("license_after_tracks")))
+            self.app.notify(
+                tr("settings.changed", label=setting_label(spec),
+                   value=setting_value(spec, self.globals)),
+                timeout=4,
+            )
+            self.rebuild()
             return
         self._refresh_sources()
         if ident == "register":

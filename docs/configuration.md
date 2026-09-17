@@ -1,5 +1,26 @@
 # Configuration
 
+## First launch: no YAML required
+
+After installation, run `unidl` (or `python -m unidl`). A missing YAML file
+does not prevent startup. On first launch, Home shows the actual download
+directory with a clickable link to review or change it.
+
+The default is `~/unidl_downloads/<service>/`, which on Windows normally means
+`C:\Users\<username>\unidl_downloads\<service>\`. Directories are created
+automatically. Use **Settings → Files & naming → Output locations → Finished
+downloads** to change the destination without editing YAML.
+
+Precedence is: the saved **Finished downloads** preference, then YAML
+`paths.downloads`, then the built-in `~/unidl_downloads` default. Setting
+`paths.home` changes runtime state, not this finished-media default.
+
+Use `--config PATH` only to choose a specific file. For example,
+`unidl --config ./unidl.private.yaml` does not read `unidl.yaml`; editing the
+latter will not change that run. Keep using the same explicit path on later
+launches. Source installs normally use their checkout's `unidl.yaml`; packaged
+installs use `unidl.yaml` in the current directory if it exists.
+
 UniDL has two configuration tiers:
 
 - unidl.yaml stores paths, device definitions, credentials, helpers, proxies and
@@ -7,7 +28,7 @@ UniDL has two configuration tiers:
 - settings.json under paths.home stores interactive preferences such as quality,
   output tracks, theme, locale, vault policy and the selected CDM.
 
-Pass the YAML explicitly when starting UniDL:
+If you choose to use a custom YAML, pass it explicitly when starting UniDL:
 
 ~~~console
 python -m unidl --config ./unidl.yaml
@@ -49,12 +70,12 @@ Unknown path keys are ignored so a typo cannot silently redirect runtime state.
 
 ## Paths and runtime state
 
-paths.home is the root for disposable and account-bearing state. Core derives the
-following defaults beneath it:
+paths.home is the root for disposable and account-bearing state. Most runtime
+directories below are derived from it; finished downloads are the exception:
 
 | Path | Purpose |
 |---|---|
-| downloads | Finished media, grouped by service. |
+| downloads | Finished media under `~/unidl_downloads`, grouped by service, unless overridden. Not derived from paths.home. |
 | commands | Saved command/export text, grouped by service. |
 | exports | Re-importable resolved-title JSON documents. |
 | cache / temp | Manifest, segment and transient working data. |

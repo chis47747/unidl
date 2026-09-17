@@ -391,6 +391,10 @@ KIDs/PSSH are queried in vaults or licensed. It never authorizes service code to
 use shared output preferences to select a provider API or manifest profile.
 The service's **License and vaults** section configures automatic local/remote
 lookup, storage and destinations; Home search and manual key entry remain global.
+These shared service-policy rows inherit the global Vault policy and Services
+defaults until explicitly saved. Service code must use the effective Settings
+value, not a hardcoded fallback. Explicit false/empty selections override the
+global choice; resetting a row removes the override rather than saving a default.
 
 Declare every binary, module or asset through the helper contract. Resolve it with
 self.ctx.helper("name"); never hardcode a developer path or scan the filesystem.

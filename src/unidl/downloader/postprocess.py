@@ -6,11 +6,12 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .cenc_fragment import CencInitMetadata, decrypt_cenc_fragment, load_cenc_init_metadata
 from .embedding import managed_run
+from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import looks_like_h266
 
 DecryptEventCallback = Callable[[str], None]
@@ -780,30 +781,41 @@ def _coerce_mux_input(item: str | Path | MuxInput) -> MuxInput:
 
 
 def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxInput], Path | None]:
-    if not any(item.trim_start_ms and item.trim_start_ms > 0 for item in inputs):
+    # External service subtitles bypass the downloaded-track conversion stage.
+    # FFmpeg/mkvmerge cannot read standalone TTML/EBU-TT XML as mux inputs.
+    xml_subtitles = {".xml", ".ttml", ".dfxp"}
+    if not any(
+        (item.trim_start_ms and item.trim_start_ms > 0)
+        or item.path.suffix.lower() in xml_subtitles
+        for item in inputs
+    ):
         return inputs, None
-    temp_dir = Path(tempfile.mkdtemp(prefix=f"{output.stem}_mux_", dir=str(output.parent)))
+    # Avoid duplicating the release name in Windows temporary paths.
+    temp_dir = Path(tempfile.mkdtemp(prefix="unidl_mux_", dir=str(output.parent)))
     prepared: list[MuxInput] = []
-    for index, item in enumerate(inputs, start=1):
-        if not item.trim_start_ms or item.trim_start_ms <= 0:
+    try:
+        for index, item in enumerate(inputs, start=1):
+            if item.path.suffix.lower() in xml_subtitles:
+                converted = temp_dir / f"{index:02d}.srt"
+                try:
+                    convert_subtitle_file(item.path, output_path=converted, auto_fix=False)
+                    if not converted.is_file() or not converted.stat().st_size:
+                        raise SubtitleConversionError("no subtitle cues were produced")
+                except (SubtitleConversionError, OSError) as exc:
+                    raise SubtitleConversionError(
+                        f"Could not prepare subtitle {item.path.name} for muxing: {exc}"
+                    ) from exc
+                item = replace(item, path=converted, media_type="subtitles", codecs="srt")
+            if item.trim_start_ms and item.trim_start_ms > 0:
+                suffix = item.path.suffix or ".mp4"
+                trimmed = temp_dir / f"{index:02d}.trim{suffix}"
+                _trim_mux_input(item.path, trimmed, item.trim_start_ms)
+                item = replace(item, path=trimmed, trim_start_ms=None)
             prepared.append(item)
-            continue
-        suffix = item.path.suffix or ".mp4"
-        trimmed = temp_dir / f"{index:02d}_{item.path.stem}.trim{suffix}"
-        _trim_mux_input(item.path, trimmed, item.trim_start_ms)
-        prepared.append(
-            MuxInput(
-                path=trimmed,
-                language=item.language,
-                name=item.name,
-                default=item.default,
-                forced=item.forced,
-                delay_ms=item.delay_ms,
-                media_type=item.media_type,
-                track_type_filter=item.track_type_filter,
-                codecs=item.codecs,
-            )
-        )
+    except BaseException:
+        # Preparation happens before mux_files' try/finally owns this directory.
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
     return prepared, temp_dir
 
 

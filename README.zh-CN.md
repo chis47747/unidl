@@ -103,6 +103,23 @@ uv sync --extra dev
 
 ## 使用 UniDL
 
+首次启动无需创建 YAML，也无需手动填写下载目录。Windows CMD 用户可以执行：
+
+```bat
+py -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip unidl
+unidl
+```
+
+默认下载到 `~/unidl_downloads/<服务名>/`，Windows 通常为
+`C:\Users\<用户名>\unidl_downloads\<服务名>\`。首次启动主页会展示实际位置，
+点击可进入设置查看或修改，无需编辑 YAML。查看后提示会隐藏，但始终可在
+**Settings → Files & naming → Output locations → Finished downloads** 修改目录。
+源码用户也可执行 `uv sync` 后运行 `uv run unidl`；普通使用无需 `uv lock`
+或 `--extra dev`。使用 `--config ./unidl.private.yaml` 时不会读取 `unidl.yaml`，
+后续启动应继续使用同一个配置路径。
+
 启动已安装的 TUI：
 
 ```console

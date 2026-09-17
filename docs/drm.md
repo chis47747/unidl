@@ -56,7 +56,9 @@ must not alter the tracks the user finally downloads. This distinction is
 especially important when a service offers several ladders with similar
 resolution labels.
 
-The per-service **License after final track selection** mode waits for the final
+**Settings → Services → License after final track selection** is the global
+default. Services inherit it unless explicitly overridden; pressing `r` on the
+service row restores inheritance. The effective mode waits for the final
 selection and scopes vault lookup and licensing to those encrypted tracks'
 KIDs/PSSH, including init data discovered in media playlists. Unselected
 renditions do not expand that inventory. It does not let service code read shared

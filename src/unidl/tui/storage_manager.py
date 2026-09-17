@@ -48,7 +48,8 @@ _OUTPUT_ROWS = (
         "download_dir",
         "Finished downloads",
         "setting-path",
-        "Downloads and live recordings. Empty uses paths.downloads from unidl.yaml.",
+        "No YAML editing is required. Empty uses paths.downloads when configured, "
+        "otherwise ~/unidl_downloads. Files are grouped by service.",
     ),
     StorageRow(
         "subtitles",
@@ -298,7 +299,10 @@ class StorageManagerScreen(Screen[None]):
             selected = str(self.globals.get(row.key) or "").strip()
             if selected:
                 return str(Path(selected).expanduser()), tr("storage.source.override")
-            return str(self.app.config.paths.downloads), tr("storage.source.yaml_default")
+            raw = self.app.config.raw.get("paths") or {}
+            explicit = isinstance(raw, dict) and "downloads" in raw
+            source = "storage.source.yaml" if explicit else "storage.source.builtin"
+            return str(self.app.config.paths.downloads), tr(source)
         if row.kind == "config-path":
             value = getattr(self.app.config.paths, row.key)
             raw = self.app.config.raw.get("paths") or {}

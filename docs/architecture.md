@@ -229,9 +229,10 @@ parse full manifest -> service licence plan/init-data hook -> KIDs known
                     -> shared output selection -> native delivery core
 ```
 
-The global **License after final track selection** compatibility switch is the
-deliberate exception for HLS-style inputs whose master playlist cannot expose the
-selected media playlists' init data:
+**Settings → Services → License after final track selection** is the global
+default for services whose master playlist cannot expose the selected media
+playlists' init data. A service-specific value may override it; otherwise the
+service inherits the global Services value:
 
 ```
 parse full/merged ladder -> shared output selection -> selected encrypted tracks
@@ -239,8 +240,10 @@ parse full/merged ladder -> shared output selection -> selected encrypted tracks
                          -> native delivery core
 ```
 
-This switch changes when Core supplies the DRM inventory. It does not authorize a
-service to read `video_quality`, audio, subtitle or interactive checkbox settings
+This switch changes when Core supplies the DRM inventory. The vault gates and
+target lists likewise inherit the global **DRM & vaults → Vault policy** until
+explicitly overridden. It does not authorize a service to read `video_quality`,
+audio, subtitle or interactive checkbox settings
 to choose a provider endpoint. Service-owned `license_*` / `pssh_*` settings remain
 separate from shared output selection in both modes.
 

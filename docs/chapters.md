@@ -2,10 +2,11 @@
 
 Chapters are optional service metadata. A service that has no chapter endpoint
 does nothing; there is no capability flag and no empty method to implement. The
-per-service **Fetch chapter metadata** setting (on by default) decides whether
-chapter requests and optional response fields are made at all. The per-service
-**Embed chapters in the final file** setting is independent: it only controls
-container muxing after metadata has been acquired.
+per-service **Fetch chapter metadata** setting decides whether chapter requests
+and optional response fields are made at all. It follows the global Services
+policy until a service-specific value is saved (the effective default is on).
+The per-service **Embed chapters in the final file** setting is independent: it
+only controls container muxing after metadata has been acquired.
 Use **Settings → Services → Chapter metadata by service**, or the service's own
 settings, to change acquisition. Both edit the same persisted service value.
 Until a service is explicitly configured, the old global chapter preference is

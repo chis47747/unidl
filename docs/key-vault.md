@@ -99,20 +99,23 @@ before the final all-cached decision when a manifest can hide additional KIDs
 (for example an HLS media playlist or a Widevine v1 PSSH).
 
 This ordering also applies when a service declares `USES.drm = self` (for
-example Apple, YouTube and Sling) and **Use remote key vaults** is enabled.
+example Apple, YouTube and Sling) and local or remote lookup is enabled.
 Immediately before its service-owned `get_keys()` call, Core performs the same
 local-first/remote-second lookup using the KIDs already present in the parsed
 inventory. A complete hit skips that service's licence request; a partial hit is
 placed in the DRM context and merged with the keys returned by the service. The
 service still owns its session, challenge and licence endpoint — a vault is never
-used as a replacement transport. With the remote switch off, these legacy
-service-owned flows keep their existing local handling. If such a service
+used as a replacement transport. With the remote switch off, Core only queries
+permitted local vaults. If such a service
 discovers additional per-track PSSH/KIDs only while running its own parser, it
 continues through that parser and the service licence path; Core never guesses a
 KID-only request for it.
 
 The service page's **License and vaults** section controls local/remote lookup,
-automatic storage, and target lists independently for that service. With
+automatic storage, and target lists. Without a saved service override, each row
+inherits the global **DRM & vaults → Vault policy** value. The UI displays the
+effective value and its source; `r` removes a service override. Explicit off or
+an explicit empty destination selection is an override, not a missing value. With
 **License after final track selection** enabled, only selected encrypted tracks'
 KIDs/PSSH values are sent to vault lookup or licensing; unselected renditions
 from the manifest are ignored.

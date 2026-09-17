@@ -2,6 +2,7 @@
 # requirement lists, but never local runtime state or private media devices.
 include LICENSE README.md README.zh-CN.md CHANGELOG.md pyproject.toml requirements.txt requirements-dev.txt
 recursive-include docs *.md *.yaml
+prune tests
 recursive-exclude cdm *
 recursive-exclude helpers *
 recursive-exclude db *

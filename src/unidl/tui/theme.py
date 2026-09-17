@@ -887,7 +887,12 @@ Input > .input--cursor {
 /* What is not set up yet, on the screen you land on. Hidden the moment it is
    dealt with, so a working install never sees it. A left bar rather than a full
    border: it is a note beside the list, not a dialog in front of it. */
-#setup-note, #service-setup-note {
+#setup-notes {
+    height: auto;
+    max-height: 40%;
+    overflow-x: hidden;
+}
+#setup-note, #service-setup-note, #download-setup-note {
     display: none;
     width: 1fr;
     height: auto;
@@ -899,7 +904,7 @@ Input > .input--cursor {
 }
 /* it is a chip, so it inherits the chip hover: the background is the affordance
    here, and bolding two lines of prose is not */
-#setup-note:hover, #service-setup-note:hover {
+#setup-note:hover, #service-setup-note:hover, #download-setup-note:hover {
     background: $highlight;
     text-style: none;
 }

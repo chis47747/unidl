@@ -530,8 +530,12 @@ def service_license_settings(config: Any = None) -> list[Setting]:
     """Per-service licensing and vault policy settings."""
     targets = _vault_target_settings(config)
     by_key = {spec.key: spec for spec in targets}
-    read_targets = field_replace(by_key["vault_read_targets"], visible=True)
-    write_targets = field_replace(by_key["vault_write_targets"], visible=True)
+    read_targets = field_replace(
+        by_key["vault_read_targets"], visible=True, inherit_global=True
+    )
+    write_targets = field_replace(
+        by_key["vault_write_targets"], visible=True, inherit_global=True
+    )
     return [
         Setting(
             "fetch_chapters",
@@ -546,14 +550,17 @@ def service_license_settings(config: Any = None) -> list[Setting]:
             ),
         ),
         Setting("license_after_tracks", "License after final track selection", "bool", default=False,
+                inherit_global=True,
                 help="Wait for this service's final tracks, then query/license only their KIDs and PSSH values."),
-        Setting("local_vault", "Use the local key vault", "bool", default=True,
-                help="Allow this service to read and write local key vaults."),
-        Setting("remote_vault", "Use remote key vaults", "bool", default=False,
+        Setting("local_vault", "Use the local key vault", "bool", default=True, inherit_global=True,
+                help="Allow this service to read local key vaults; acquired keys still use the selected write targets."),
+        Setting("remote_vault", "Use remote key vaults", "bool", default=False, inherit_global=True,
                 help="Allow this service's automatic remote vault reads and writes."),
         Setting("remote_vault_auto_lookup", "Check remote vaults before licensing", "bool", default=True,
+                inherit_global=True,
                 help="Query selected remote vaults for this service's KIDs before licensing."),
         Setting("remote_vault_auto_store", "Store licensed keys in remote vaults", "bool", default=True,
+                inherit_global=True,
                 help="Store this service's acquired keys in selected remote writable vaults."),
         read_targets,
         write_targets,
@@ -598,6 +605,18 @@ GLOBAL_SETTINGS: list[Setting] = [
             "A chapter failure is auxiliary and never stops playback, DRM, downloading "
             "or final muxing. This legacy default is inherited until a service saves "
             "its own chapter policy. 'Embed chapters in the final file' controls only muxing."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "license_after_tracks",
+        "License after final track selection",
+        "bool",
+        default=False,
+        help=(
+            "Global default for services that have not saved their own "
+            "licensing policy. When enabled, licensing and vault lookup wait for "
+            "the final selected encrypted tracks."
         ),
         visible=False,
     ),
@@ -851,9 +870,16 @@ GLOBAL_SETTINGS: list[Setting] = [
         "Where files are saved",
         "text",
         default="",
-        help="Downloads and live recordings both land here. Empty means the folder "
-        "configured in unidl.yaml, which is what the row shows when nothing is set. "
+        help="No YAML editing is required. Empty uses paths.downloads when configured, "
+        "otherwise ~/unidl_downloads, grouped by service. "
         "The folder is created if it does not exist; ~ works.",
+        visible=False,
+    ),
+    Setting(
+        "download_location_confirmed",
+        "Download location introduction acknowledged",
+        "bool",
+        default=False,
         visible=False,
     ),
     Setting(
@@ -1446,6 +1472,23 @@ class Settings:
             self._store.save()
         return bool(spec and spec.resets_session)
 
+    def clear(self, key: str, *, persist: bool = True) -> None:
+        """Remove a service override so an inheriting setting uses its parent."""
+        self._overrides.pop(key, None)
+        self._store.clear(self.service_id, key)
+        # Renamed services must not resurrect an older override on reset.
+        for legacy_id in self.legacy_ids:
+            self._store.clear(legacy_id, key)
+        if persist:
+            self._store.save()
+
+    def has_override(self, key: str) -> bool:
+        """Whether this scope explicitly chooses a value, including false/empty."""
+        return key in self._overrides or any(
+            key in self._store.values_for(service_id)
+            for service_id in (self.service_id, *self.legacy_ids)
+        )
+
     def override(self, key: str, value: Any) -> None:
         """Set a value for this run only (used by non-interactive CLI flags)."""
         spec = self.spec_by_key.get(key)
@@ -1473,6 +1516,11 @@ class Settings:
         from a setting's default.  It is used by newly per-service policies so
         existing app-wide values remain compatible until a service is saved.
         """
+        spec = self.spec_by_key.get(key)
+        if spec is not None and spec.inherit_global:
+            # UI, provider code and Core must use the same effective value,
+            # including renamed service namespaces and explicitly empty targets.
+            return self.get(key, fallback)
         if key in self._overrides:
             return self._overrides[key]
         stored = self._store.values_for(self.service_id)

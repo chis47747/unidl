@@ -141,8 +141,10 @@ class HomeScreen(Screen):
         with Vertical(id="body"):
             # what is not set up yet, above the list rather than in it: a new
             # install is not a broken one, and the platforms are still all usable
-            yield StatusChip("pick_cdm", id="setup-note")
-            yield StatusChip("app.global_settings", id="service-setup-note")
+            with VerticalScroll(id="setup-notes"):
+                yield StatusChip("open_download_location", id="download-setup-note")
+                yield StatusChip("pick_cdm", id="setup-note")
+                yield StatusChip("app.global_settings", id="service-setup-note")
             with Horizontal(id="service-list-head", classes="section-head"):
                 yield Static("", id="service-list-summary")
                 yield StatusChip(
@@ -370,6 +372,14 @@ class HomeScreen(Screen):
         point the user has picked a platform, signed in and chosen an episode. Said
         here, it costs two rows once, and it goes away the moment a device exists.
         """
+        download_note = self.query_one("#download-setup-note", StatusChip)
+        download_note.display = not self.app.globals.get("download_location_confirmed", False)
+        if download_note.display:
+            folder = str(self.app.globals.get("download_dir") or self.app.config.paths.downloads)
+            download_note.update(
+                f"[$accent]{visual_markup(tr('home.download_location', path=folder))}[/]\n"
+                f"[$dim]{visual_markup(tr('home.download_location_hint'))}[/]"
+            )
         found = self.query("#setup-note")
         service_found = self.query("#service-setup-note")
         if not found or not service_found:
@@ -458,6 +468,15 @@ class HomeScreen(Screen):
                 found.first().display = chip not in hidden
 
     # ------------------------------------------------------------ chip actions
+    def action_open_download_location(self) -> None:
+        from .storage_manager import StorageManagerScreen
+
+        def finished(_result) -> None:
+            self.app.globals.set("download_location_confirmed", True)
+            self.refresh_env()
+
+        self.app.push_screen(StorageManagerScreen(self.app.globals), finished)
+
     def action_open_config(self) -> None:
         self.app.open_config()
 

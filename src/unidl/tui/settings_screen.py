@@ -491,6 +491,9 @@ class SettingsScreen(Screen):
         # one keypress away showed the truth, so the row was the only thing lying.
         #
         row = f"[$accent]{visual_markup(value)}[/]"
+        if spec.inherit_global and scope.parent is not None:
+            source = "settings.service_override" if scope.has_override(spec.key) else "settings.follows_global"
+            row += f"  [$dim]{tr(source)}[/]"
         if spec.resets_session:
             row += f"  [$dim]{tr('settings.signs_out')}[/]"
         return setting_row(
@@ -758,6 +761,11 @@ class SettingsScreen(Screen):
         if selected is not None:
             spec, scope = selected
             if spec.kind == "action":
+                return
+            if spec.inherit_global and scope is not self.globals:
+                scope.clear(spec.key)
+                self.rebuild()
+                self.set_hint(tr("settings.inherited_global", label=setting_label(spec)))
                 return
             self._apply(spec, scope, spec.default)
 
