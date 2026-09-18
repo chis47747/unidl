@@ -413,11 +413,11 @@ def live_settings() -> list[Setting]:
             default=False,
             help="Many live streams keep the last stretch available to rewind into - "
             "a replay or DVR window. This chooses the default after final track "
-            "selection. When a window is requested and actually there, the delivery "
-            "screen asks what to take from it: the edge, the whole window "
-            "as a file, or a stretch measured from the window's start. Asked at that "
-            "point rather than here because how much is available is only known once "
-            "the manifest has been read.",
+            "selection. When enabled, the delivery screen measures the selected "
+            "tracks and offers three choices: capture the current replay window, "
+            "start at its beginning and continue past the live edge, or choose a "
+            "bounded range inside it. The window is measured only after the "
+            "manifest has been read.",
         ),
     ]
 

@@ -31,17 +31,20 @@ live     not recording, saving the command instead
 `live_record_limit` lives in each service's own settings as the default, because
 it is a property of what is being recorded: a football match, a rolling news
 channel and a radio station want three different numbers. After tracks are final
-and **Record it now** was chosen, the TUI asks for this run's length. Changing it
-there does not rewrite the saved service default. It accepts `HH:MM:SS`, plain
+and **Record it now** was chosen, the TUI asks for this run's length only when
+**Record from the live edge** is selected. Replay/DVR choices derive their finite
+range from the detected window, while starting at its beginning and continuing
+live remains unlimited until stopped. Changing it does not rewrite the saved
+service default. It accepts `HH:MM:SS`, plain
 seconds, or `1h20m` — whatever native delivery core accepts. The default shown in
 the prompt is `00:00:00`, which means **no length limit**: recording continues
 until the user presses Stop, Back or Esc. A non-zero value is the explicit safety
 limit for unattended/headless recording.
 
 Back is local to this sequence. From the duration field it returns to the
-record-vs-command choice; from replay inspection it returns to the duration; from
-the replay-mode choice it returns to replay inspection; and from an offset field
-it returns to the replay-mode choice. Back on the first record-vs-command choice
+live-edge/replay source choice; from replay inspection it returns to that source
+choice; from the replay-mode choice it returns to source choice; and from an
+offset field it returns to the replay-mode choice. Back on the first record-vs-command choice
 reveals the track picker that preceded it when interactive track selection is
 enabled.
 
@@ -56,25 +59,25 @@ that can still be rewound into — a replay, or DVR, window. `live_replay` (per
 service, off by default) preselects whether the post-track question starts at the
 live edge or offers to inspect that window.
 
-With it **off**, **At the live edge** is preselected, which is what a recorder
-normally wants. The user can still choose to inspect the current window once.
+With it **off**, **Record from the live edge** is preselected. Only this path asks
+for a recording duration; `00:00:00` means unlimited recording.
 
-With it **on**, **Inspect the replay / DVR window** is preselected. Only after
+With it **on**, **Detect the live replay / DVR window** is preselected. Only after
 that explicit choice does UniDL fetch the selected media playlists to measure the
-window; if a usable window exists, the delivery screen asks what to take:
+window; if a usable window exists, the delivery screen offers exactly three choices:
 
 | choice | native delivery core | ends when |
 |---|---|---|
-| from now, the live edge | *(nothing extra)* | the length limit |
-| from the start of the window | `--live-dvr-from-start` | the length limit |
-| the window as it stands, once | `--live-perform-as-vod` | the window has been fetched |
-| a stretch of the window | `--live-dvr-start-at`, `--live-dvr-end-at` | the end offset |
+| the replay window as it stands | `--live-perform-as-vod` | near the current live edge |
+| from the window beginning, then continue live | `--live-dvr-from-start` | when the user stops it |
+| a chosen range inside the window | `--live-dvr-start-at`, `--live-dvr-end-at` | the end offset |
 
-The last two are finite, so no length limit is imposed on them — it could only
-truncate a window that was going to finish anyway. A stretch is typed as one
-field: `00:30:00`, or `00:30:00-01:15:00`, measured from the window's start. An
-unparseable answer records from the live edge and says so rather than passing
-nonsense on.
+The first and third choices are finite, so no length limit is imposed on them. The
+second starts at the beginning of the measured window and continues past the live
+edge until stopped. A stretch is typed as one field:
+`00:15:00-00:40:00` means 45 minutes before through 20 minutes before a one-hour
+live edge, measured from the window's start. An unparseable answer starts at the
+replay window beginning and says so rather than passing nonsense on.
 
 ### Why it is a question and not a setting
 

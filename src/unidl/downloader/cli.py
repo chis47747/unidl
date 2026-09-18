@@ -3760,7 +3760,11 @@ class _LivePipeMuxSession:
                         source_part = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
                         source_part = self._restamp_pipe_fragment(batch.stream, source_part, segment)
                         if not _live_pipe_part_contains_init(batch.stream, segment, source_part):
-                            remux_init = self.current_decrypted_init.get(stream_key, init_path)
+                            remux_init = self._decrypted_init_for_remux(
+                                batch.stream,
+                                init_path,
+                                stream_key,
+                            )
                 elif not _stream_uses_webm_container(batch.stream):
                     init_path = self.current_init.get(stream_key)
                     if not _live_pipe_part_contains_init(batch.stream, segment, source_part):
@@ -3810,7 +3814,11 @@ class _LivePipeMuxSession:
                 raise RuntimeError("Encrypted live pipe fragment appeared before init segment.")
             decrypted = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
             restamped = self._restamp_pipe_fragment(batch.stream, decrypted, segment)
-            remux_init = None if _live_pipe_part_contains_init(batch.stream, segment, restamped) else self.current_decrypted_init.get(stream_key, init_path)
+            remux_init = (
+                None
+                if _live_pipe_part_contains_init(batch.stream, segment, restamped)
+                else self._decrypted_init_for_remux(batch.stream, init_path, stream_key)
+            )
             decrypted = self._remux_pipe_fragment_to_ts(batch.stream, restamped, remux_init)
             payload.append((sequence, decrypted, segment))
         return payload
@@ -3986,6 +3994,27 @@ class _LivePipeMuxSession:
         self._report_decrypt_event("engine: internal fMP4 init metadata", stream)
         output = self._pipe_work_path(stream, part, "init.dec.mp4")
         return normalize_decrypted_mp4_init(part, output)
+
+    def _decrypted_init_for_remux(self, stream, init_path: Path, stream_key: int) -> Path:
+        """Return a live pipe init that still exists on disk.
+
+        DVR/HLS refreshes can replace an init part while a queued media batch is
+        still being processed.  The cached decrypted path then points at a file
+        that has disappeared; regenerate it from the current init instead of
+        passing a stale path to ffmpeg.
+        """
+        cached = self.current_decrypted_init.get(stream_key)
+        if cached is not None and cached.exists():
+            return cached
+        if cached is not None:
+            self.current_decrypted_init.pop(stream_key, None)
+        if not init_path.exists():
+            # Keep the prior value for mocked/virtual paths; the downstream
+            # remuxer will report the missing input with its original context.
+            return cached or init_path
+        refreshed = self._decrypt_pipe_init(stream, init_path)
+        self.current_decrypted_init[stream_key] = refreshed
+        return refreshed
 
     def _decrypt_pipe_webm_fragment(self, stream, part: Path, segment=None) -> Path:
         output = self._pipe_work_path(stream, part, "frag.dec.webm")

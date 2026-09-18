@@ -2372,39 +2372,50 @@ class SessionController:
         presenter: TextualPresenter,
         ctx: FlowContext,
     ) -> str | None:
-        """What "deliver this" means for a live stream. Returns the mode, or None to skip.
+        """Plan live delivery after the final track selection.
 
-        All recording decisions live here, after final track selection and before
-        the native recorder starts. App/service settings supply defaults for
-        headless runs; the interactive TUI confirms record-vs-command, duration
-        and replay-window use against the actual selected stream.
+        Interactive recording deliberately asks in this order: record versus
+        command, then whether to use the live edge or inspect a replay/DVR window.
+        Only the live-edge path asks for a recording duration.  A detected replay
+        window has three explicit choices: capture the window as it stands, start
+        at its beginning and continue past the edge, or choose a bounded range.
         """
         if mode != "download":
-            # An outcome that was never going to run UniDL is untouched by any of
-            # this: a command and an export are the same artefact for a live stream
-            # as for a film, and only a recording needs to know how much of the
-            # stream to take. This used to answer "command" for every mode, so
-            # asking for an export of a live channel wrote a command file instead -
-            # the one thing that was not asked for.
             return mode
+
         recording = bool(self.settings.get("live_record", False))
         limit = normalize_live_record_limit(
             playback.live_record_limit or self.settings.get("live_record_limit", "") or ""
         )
         wants_replay = bool(self.settings.get("live_replay", False))
         interactive = bool(getattr(ctx, "interactive", False))
-        window: float | None = None
 
         if not interactive and not recording:
             self.post_field("live", "not recording, saving the command instead", "warn")
             self.post_log("live recording was not selected; saving the command", "warning")
             return "command"
 
+        def ask_duration() -> bool:
+            """Ask the live-edge duration; False means Back to the source picker."""
+            nonlocal limit
+            try:
+                typed_limit = presenter.present(
+                    ctx.text(
+                        "How long should this live recording run?",
+                        placeholder="00:00:00 for no limit, 3600, or 1h",
+                        default=limit or "00:00:00",
+                        scope=SCOPE_DELIVERY,
+                    )
+                )
+            except Back:
+                return False
+            raw_limit = "00:00:00" if typed_limit is None else str(typed_limit)
+            limit = normalize_live_record_limit(raw_limit)
+            # Keep an explicit zero so it overrides a non-zero service default.
+            playback.live_record_limit = limit or "00:00:00"
+            return True
+
         if interactive:
-            # These nested loops are the live-delivery navigation stack.  Back
-            # moves one level at a time: duration -> record choice, replay
-            # inspection -> duration, replay mode -> inspection, and offset ->
-            # replay mode.  Only the outermost choice leaves this plan.
             while True:  # record-vs-command
                 try:
                     answer = presenter.present(
@@ -2414,7 +2425,7 @@ class SessionController:
                                 Choice(
                                     "Record it now",
                                     "record",
-                                    detail="track selection is final; recording starts after the next choices",
+                                    detail="choose the live edge or a replay / DVR window next",
                                 ),
                                 Choice(
                                     "Save the command only",
@@ -2427,248 +2438,166 @@ class SessionController:
                         )
                     )
                 except Back as exc:
-                    # The track picker is the previous delivery step.  The caller
-                    # catches this private signal and re-opens it instead of
-                    # treating the live plan as a completed/declined job.
                     raise _LiveBackToTracks from exc
                 recording = answer == "record"
                 if not recording:
                     self.post_field("live", "not recording, saving the command instead", "warn")
                     self.post_log("live recording was not selected; saving the command", "warning")
                     return "command"
-                duration_answered = False
-                while True:  # recording duration
+
+                source_backed = False
+                while True:  # live edge vs replay inspection
                     try:
-                        typed_limit = presenter.present(
-                            ctx.text(
-                                "How long should this live recording run?",
-                                placeholder="00:00:00 for no limit, 3600, or 1h",
-                                default=limit or "00:00:00",
+                        source = presenter.present(
+                            ctx.pick(
+                                "How should this live recording begin?",
+                                [
+                                    Choice(
+                                        "Record from the live edge",
+                                        "edge",
+                                        detail="ask for a duration, then start with the next available segment",
+                                    ),
+                                    Choice(
+                                        "Detect the live replay / DVR window",
+                                        "replay",
+                                        detail="measure the selected tracks before offering replay choices",
+                                    ),
+                                ],
+                                cursor=1 if wants_replay else 0,
                                 scope=SCOPE_DELIVERY,
                             )
                         )
                     except Back:
-                        # Return to the already answered record-vs-command pick.
+                        # Return to record-vs-command, the previous delivery step.
+                        source_backed = True
                         break
-                    duration_answered = True
-                    raw_limit = "00:00:00" if typed_limit is None else str(typed_limit)
-                    limit = normalize_live_record_limit(raw_limit)
-                    # This value is per delivery: do not silently rewrite the
-                    # service's saved default just because one match or programme
-                    # needed longer.
-                    # Keep an explicit zero spelling on Playback.  An empty field
-                    # means "inherit the service setting" at the engine boundary;
-                    # storing the canonical zero here is what lets a user override
-                    # an older non-zero service default with unlimited recording.
-                    playback.live_record_limit = limit or "00:00:00"
 
-                    begin_answered = False
-                    while True:  # live edge vs replay inspection
-                        try:
-                            replay_answer = presenter.present(
-                                ctx.pick(
-                                    "Where should the recording begin?",
-                                    [
-                                        Choice(
-                                            "At the live edge",
-                                            "edge",
-                                            detail="start with the next available segment",
-                                        ),
-                                        Choice(
-                                            "Inspect the replay / DVR window",
-                                            "replay",
-                                            detail="measure what the selected tracks still expose",
-                                        ),
-                                    ],
-                                    cursor=1 if wants_replay else 0,
-                                    scope=SCOPE_DELIVERY,
-                                )
+                    if source == "edge":
+                        wants_replay = False
+                        playback.live_window = None
+                        if ask_duration():
+                            self.post_field(
+                                "live",
+                                f"recording up to {limit}" if limit else "recording with no length limit",
+                                "warn",
                             )
-                        except Back:
-                            # Return to the duration field.
-                            begin_answered = False
-                            break
-                        begin_answered = True
-                        wants_replay = replay_answer == "replay"
-                        if not wants_replay:
-                            # An explicit edge choice supersedes a stale replay
-                            # mode left on a retried Playback.
-                            playback.live_window = None
-                            window = None
-                            break
-                        # Only measured when requested: finding the exact HLS
-                        # window can cost a request per selected rendition.
-                        window = self.engine.measure_live_window(playback, self.settings, tracks)
-                        replay = window >= self.engine.LIVE_WINDOW_FLOOR
-                        if not replay:
-                            break
+                            return mode
+                        # Back from duration returns to the source picker.
+                        continue
 
-                        replay_mode_back = False
-                        while True:  # replay mode / optional offset
-                            choices = [
-                                Choice(
-                                    "Record from now, the live edge",
-                                    "edge",
-                                    detail="what a recorder normally does",
-                                ),
-                                Choice(
-                                    "Record from the start of the replay window",
-                                    "start",
-                                    detail=f"{_hms(window)} further back, then keep going",
-                                ),
-                                Choice(
-                                    "Take the replay window as it stands, once",
-                                    "vod",
-                                    detail="finishes on its own, so the length limit does not apply",
-                                ),
-                                Choice(
-                                    "Take a stretch of the window",
-                                    "offset",
-                                    detail="measured from the window's start",
-                                ),
-                            ]
-                            try:
-                                answer = presenter.present(
+                    window = float(self.engine.measure_live_window(playback, self.settings, tracks) or 0.0)
+                    if window < self.engine.LIVE_WINDOW_FLOOR:
+                        self.post_log(
+                            "the selected tracks do not expose a usable replay window; recording from the live edge",
+                            "warning",
+                        )
+                        wants_replay = False
+                        playback.live_window = None
+                        if ask_duration():
+                            self.post_field(
+                                "live",
+                                f"recording up to {limit}" if limit else "recording with no length limit",
+                                "warn",
+                            )
+                            return mode
+                        continue
+
+                    while True:  # exactly three replay/DVR choices
+                        choices = [
+                            Choice(
+                                f"Record the { _hms(window) } replay window as it stands",
+                                "vod",
+                                detail=f"start { _hms(window) } before the live edge and stop near the current edge",
+                            ),
+                            Choice(
+                                "Start at the replay window beginning and continue live",
+                                "start",
+                                detail=f"start { _hms(window) } before the live edge, then keep recording past it",
+                            ),
+                            Choice(
+                                "Choose a range inside the replay window",
+                                "offset",
+                                detail="for example, 45 minutes before to 20 minutes before the live edge",
+                            ),
+                        ]
+                        try:
+                            chosen = str(
+                                presenter.present(
                                     ctx.pick(
-                                        f"{playback.save_name}: {_hms(window)} of this stream is still "
-                                        "available to rewind into",
+                                        f"{playback.save_name}: {_hms(window)} replay / DVR window detected",
                                         choices,
                                         scope=SCOPE_DELIVERY,
                                     )
                                 )
+                                or "vod"
+                            )
+                        except Back:
+                            # Re-measuring is intentionally avoided; go back to the
+                            # source picker and let the user choose edge or replay.
+                            break
+
+                        if chosen == "offset":
+                            try:
+                                typed = presenter.present(
+                                    ctx.text(
+                                        "Choose the replay range (positions from window start)",
+                                        placeholder="00:15:00-00:40:00 = 45 to 20 minutes before a 1-hour live edge",
+                                        default="00:00:00",
+                                        scope=SCOPE_DELIVERY,
+                                    )
+                                )
                             except Back:
-                                # Return to edge-vs-replay inspection.
-                                replay_mode_back = True
-                                break
-                            chosen = str(answer or "edge")
+                                continue
+                            start_at, end_at = _split_span(str(typed or ""))
+                            if not start_at:
+                                self.post_log(
+                                    f"{typed!r} is not a position in the window; recording from the replay window start",
+                                    "warning",
+                                )
+                                playback.live_window = LiveWindow("start")
+                            else:
+                                playback.live_window = LiveWindow("offset", start_at, end_at)
+                        else:
+                            playback.live_window = LiveWindow(chosen if chosen in {"vod", "start"} else "vod")
+                        # Replay choices do not ask for a duration.  Make that
+                        # explicit so a non-zero service default cannot truncate
+                        # the start-and-continue option; bounded offsets are capped
+                        # by their own end position in the native recorder.
+                        playback.live_record_limit = "00:00:00"
+                        self.post_field("live window", playback.live_window.describe(), "warn")
+                        return mode
 
-                            if chosen == "offset":
-                                try:
-                                    typed = presenter.present(
-                                        ctx.text(
-                                            "How far into the replay window, measured from its start?",
-                                            placeholder="00:30:00, or 00:30:00-01:15:00 for a stretch",
-                                            default="00:00:00",
-                                            scope=SCOPE_DELIVERY,
-                                        )
-                                    )
-                                except Back:
-                                    # Return to the replay-mode picker.
-                                    continue
-                                start_at, end_at = _split_span(str(typed or ""))
-                                if not start_at:
-                                    self.post_log(
-                                        f"{typed!r} is not a position in the window; recording from the "
-                                        "live edge instead",
-                                        "warning",
-                                    )
-                                    chosen = "edge"
-                                else:
-                                    playback.live_window = LiveWindow("offset", start_at, end_at)
-                            if chosen != "offset":
-                                playback.live_window = LiveWindow(chosen)
-                            self.post_field("live window", playback.live_window.describe(), "warn")
-                            return mode
-                        if replay_mode_back:
-                            # The replay-mode picker was backed out.  Continue the
-                            # edge-vs-replay loop, rather than leaving delivery.
-                            continue
-                        break
-
-                    if not begin_answered:
-                        # The begin picker was backed out; ask for the duration
-                        # again, retaining the value already typed.
-                        continue
-                    break
-                if not duration_answered:
-                    # The duration field was backed out; ask record-vs-command
-                    # again instead of returning to the service menu.
+                    # Back from replay choices returns to edge-vs-replay.
                     continue
-                break
 
-        # Only measured when requested: finding the exact HLS window can cost a
-        # request per selected rendition.
-        if window is None:
-            window = (
-                self.engine.measure_live_window(playback, self.settings, tracks)
-                if wants_replay
-                else self.engine.live_window_seconds(tracks)
-            )
+                # Back from edge-vs-replay returns to record-vs-command.
+                if source_backed:
+                    continue
+
+        # Non-interactive delivery follows saved defaults. A replay request is
+        # measured once; without a usable window it safely falls back to the edge.
+        window = (
+            self.engine.measure_live_window(playback, self.settings, tracks)
+            if wants_replay
+            else self.engine.live_window_seconds(tracks)
+        )
         window = float(window or 0.0)
-        replay = window >= self.engine.LIVE_WINDOW_FLOOR
-
-        shape = f"recording up to {limit}" if limit else "recording with no length limit"
+        replay = wants_replay and window >= self.engine.LIVE_WINDOW_FLOOR
         if replay:
-            shape += f"  ·  {_hms(window)} of replay available"
-        self.post_field("live", shape, "warn")
-
-        if not replay or not wants_replay:
-            if wants_replay and not replay:
+            playback.live_window = playback.live_window or LiveWindow("start")
+            playback.live_record_limit = "00:00:00"
+            self.post_field("live window", playback.live_window.describe(), "warn")
+        else:
+            playback.live_window = None
+            if wants_replay:
                 self.post_log(
                     "the selected tracks do not expose a usable replay window; recording from the live edge",
                     "warning",
                 )
-            return mode
-
-        choices = [
-            Choice(
-                "Record from now, the live edge",
-                "edge",
-                detail="what a recorder normally does",
-            ),
-            Choice(
-                "Record from the start of the replay window",
-                "start",
-                detail=f"{_hms(window)} further back, then keep going",
-            ),
-            Choice(
-                "Take the replay window as it stands, once",
-                "vod",
-                detail="finishes on its own, so the length limit does not apply",
-            ),
-            Choice(
-                "Take a stretch of the window",
-                "offset",
-                detail="measured from the window's start",
-            ),
-        ]
-        try:
-            answer = presenter.present(
-                ctx.pick(
-                    f"{playback.save_name}: {_hms(window)} of this stream is still available to rewind into",
-                    choices,
-                    scope=SCOPE_DELIVERY,
-                )
-            )
-        except Back:
-            return None
-        chosen = str(answer or "edge")
-
-        if chosen == "offset":
-            try:
-                typed = presenter.present(
-                    ctx.text(
-                        "How far into the replay window, measured from its start?",
-                        placeholder="00:30:00, or 00:30:00-01:15:00 for a stretch",
-                        default="00:00:00",
-                        scope=SCOPE_DELIVERY,
-                    )
-                )
-            except Back:
-                return None
-            start_at, end_at = _split_span(str(typed or ""))
-            if not start_at:
-                self.post_log(
-                    f"{typed!r} is not a position in the window; recording from the live edge instead",
-                    "warning",
-                )
-                chosen = "edge"
-            else:
-                playback.live_window = LiveWindow("offset", start_at, end_at)
-        if chosen != "offset":
-            playback.live_window = LiveWindow(chosen)
-
-        self.post_field("live window", playback.live_window.describe(), "warn")
+        shape = f"recording up to {limit}" if limit else "recording with no length limit"
+        if replay:
+            shape += f"  ·  {_hms(window)} of replay available"
+        self.post_field("live", shape, "warn")
         return mode
 
     def _name_release(self, playback: Playback, tracks: TrackSet) -> None:
