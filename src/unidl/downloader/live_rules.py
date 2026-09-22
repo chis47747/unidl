@@ -3,21 +3,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from .utils import join_uri, pretty_codec
 
 _LIVE_DASH_ROOTS = {"dayone", "pdx-nitro"}
 _IQIYI_AUDIO_GROUP = "iq-audio"
-_YSP_CASTING_AAC_STREAM_ID = 0x102
-_TENCENTVIDEO_CENC_SCHEMES = {"CENC", "SAMPLE_AES", "SAMPLE_AES_CENC", "SAMPLE_AES_CTR"}
-_TENCENTVIDEO_PIFF_SAMPLE_ENCRYPTION_UUID = bytes.fromhex("a2394f525a9b4f14a2446c427c648df4")
-_TENCENTVIDEO_FRAGMENT_PREFIX_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,12 +22,6 @@ class AudioVividPolicyResult:
     warning: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class _TencentVideoCencLayout:
-    init_index: int
-    init_path: Path
-    metadata: Any
-    fragments: tuple[tuple[int, Path, object, str], ...]
 
 
 def apply_audio_vivid_policy(streams, enabled: bool) -> None:
@@ -46,26 +33,6 @@ def apply_audio_vivid_policy(streams, enabled: bool) -> None:
             extra = {}
             stream.extra = extra
         extra["audio_vivid_policy"] = True
-
-
-def tencentvideo_separate_audio_mux_media_type(stream) -> str | None:
-    """Select only the requested elementary track from Tencent's TV HLS inputs.
-
-    A Tencent TV video HLS is physically muxed video/AAC.  When the service
-    emits a separate Dolby, HiFi or Audio Vivid HLS, the AAC is the source
-    soundtrack being replaced rather than another requested output track.
-    The explicit JSON source marker keeps this policy limited to that picker.
-    """
-
-    extra = getattr(stream, "extra", None)
-    if not isinstance(extra, dict):
-        return None
-    if extra.get("title_source") != "tencentvideo_tv_separate_audio":
-        return None
-    if extra.get("source") != "json":
-        return None
-    media_type = str(getattr(stream, "media_type", None) or "").strip().lower()
-    return media_type if media_type in {"video", "audio"} else None
 
 
 def iqiyi_separate_audio_mux_media_type(stream, selected_streams) -> str | None:
@@ -98,101 +65,6 @@ def _is_iqiyi_audio_group_track(stream) -> bool:
         str(audio_id or "").strip(),
     }
     return _IQIYI_AUDIO_GROUP in groups
-
-
-def tencentvideo_separate_audio_custom_hls_applies(stream, scheme: str) -> bool:
-    """Keep a TV VINFO ChaCha key off the independent replacement audio HLS.
-
-    Tencent's key and nonce protect the selected video transport stream.  The
-    separately selected Dolby/HiFi/Audio Vivid HLS is an independent clear
-    source, so applying the same custom ChaCha transform corrupts that audio.
-    The JSON source marker makes the exception exact and leaves every ordinary
-    custom-HLS invocation unchanged.
-    """
-
-    if str(scheme or "").strip().upper() != "CHACHA20":
-        return True
-    extra = getattr(stream, "extra", None)
-    if not isinstance(extra, dict):
-        return True
-    if extra.get("title_source") != "tencentvideo_tv_separate_audio":
-        return True
-    if extra.get("source") != "json":
-        return True
-    return str(getattr(stream, "media_type", None) or "").strip().lower() == "video"
-
-
-def mark_yangshipin_casting_streams(streams, headers) -> None:
-    """Tag YSP casting streams from their authenticated request contract.
-
-    The high-bitrate receiver returns media from CCTV's TP4K/TPGQ domains,
-    shared hostnames that alone do not identify Yangshipin.  Its signed VDN
-    request headers do, so retain only that provenance for the live pipe rules.
-    """
-    values = {
-        str(name).strip().lower(): str(value).strip()
-        for name, value in (headers or {}).items()
-        if str(name).strip()
-    }
-    signed = (
-        values.get("user-agent") == "cctv_app_tv"
-        and values.get("referer") == "api.cctv.cn"
-        and all(
-            values.get(name)
-            for name in ("uid", "appid", "appsign", "apprandomstr")
-        )
-    )
-    if not signed:
-        return
-    for stream in streams or []:
-        if not any(
-            _is_ysp_casting_media_host(urlparse(url).netloc)
-            for url in _stream_urls(stream)
-        ):
-            continue
-        extra = getattr(stream, "extra", None)
-        if not isinstance(extra, dict):
-            extra = {}
-            stream.extra = extra
-        extra["yangshipin_casting_source"] = True
-
-
-def is_yangshipin_catchup_cdn_url(url: str) -> bool:
-    """Whether a URL belongs to Yangshipin's catch-up media CDN.
-
-    Child TS URLs inherit the authorization in their parent playlist and do
-    not repeat its query parameters.  Keep the transport rule scoped to the
-    dedicated playback host and path so those children use the same policy.
-    """
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    return host == "tlivecloud-playback-cdn.ysp.cctv.cn" and parsed.path.lower().startswith("/tcloud.cctv.com/")
-
-
-def should_prefer_yangshipin_catchup_curl(url: str) -> bool:
-    """Whether an authorized Yangshipin catch-up playlist needs curl transport.
-
-    ``tlivecloud-playback`` intermittently closes a valid HTTP/1.1 client
-    connection before returning a response.  Curl's transport retries recover
-    the same signed manifest and its TS parts reliably.  The path and replay
-    parameters make this specific to Yangshipin catch-up, rather than every
-    CCTV CDN URL.
-    """
-    if not is_yangshipin_catchup_cdn_url(url):
-        return False
-    parsed = urlparse(url)
-    values = {name.lower(): value for name, value in parse_qsl(parsed.query, keep_blank_values=True)}
-    return values.get("from") == "player" and all(values.get(name) for name in ("pid", "starttime", "svrtime"))
-
-
-def yangshipin_catchup_parallelism(url: str, workers: int) -> tuple[int, int] | None:
-    """Return the replay CDN's deliberately conservative connection limits."""
-    if not is_yangshipin_catchup_cdn_url(url):
-        return None
-    count = max(1, int(workers or 1))
-    # Two streams materially improve a five-segment replay, while the shared
-    # adaptive limiter backs off to one when this CDN starts closing requests.
-    return min(count, 2), min(count, 2)
 
 
 def postprocess_audio_vivid(
@@ -390,258 +262,14 @@ def should_treat_live_stream_as_fragmented_mp4(stream) -> bool:
     return _is_youtube_json_direct_live_stream(stream) and not _stream_uses_webm_container(stream)
 
 
-def tencentvideo_clear_cenc_fragment_compatibility(stream, part_paths, segments) -> bool:
-    """Recognize Tencent TV's CENC-signalled but clear-sample HLS variant.
-
-    The TV VINFO playlist can advertise Widevine/CENC while each media
-    fragment selects a clear ``avc1`` sample-description entry from the init
-    segment.  Those fragments have no ``senc``/auxiliary encryption data, so
-    sending them through the generic fragment decryptor only produces a false
-    "unsupported layout" error.  Keep this rule deliberately conservative:
-    it requires a Tencent media URL, a CENC HLS stream, a protected and a
-    clear init entry, and every downloaded media fragment to select the clear
-    entry without any fragment encryption boxes.
-    """
-
-    layout = _analyze_tencentvideo_cenc_parts(stream, part_paths, segments)
-    if layout is None or any(kind != "clear" for _index, _path, _segment, kind in layout.fragments):
-        return False
-    extra = _tencentvideo_rule_extra(stream)
-    extra["tencentvideo_cenc_compatibility"] = "clear_sample_entry"
-    extra["tencentvideo_cenc_init_index"] = layout.init_index
-    return True
 
 
-def decrypt_tencentvideo_cenc_parts(
-    stream,
-    part_paths,
-    segments,
-    keys,
-    output_path: str | Path,
-    *,
-    temp_dir: str | Path | None = None,
-) -> Path | None:
-    """Handle Tencent TV HLS that switches between clear and CENC entries.
-
-    The first section of an otherwise protected Tencent TV asset can select a
-    clear sample entry, then later fragments switch to the protected entry and
-    carry ordinary ``senc`` metadata.  The generic fragment pipeline aborts on
-    the first clear fragment before it reaches the decryptable ones.  This
-    rule copies only the proven-clear fragments and delegates every protected
-    fragment to the existing CENC implementation.
-    """
-
-    layout = _analyze_tencentvideo_cenc_parts(stream, part_paths, segments)
-    if layout is None:
-        return None
-    kinds = {kind for _index, _path, _segment, kind in layout.fragments}
-    if "clear" not in kinds:
-        return None
-    if "encrypted" in kinds and not keys:
-        raise ValueError("Tencent Video mixed CENC fragments need a matching Widevine key")
-    if kinds == {"clear"}:
-        output = assemble_tencentvideo_clear_cenc_parts(
-            part_paths,
-            output_path,
-            init_index=layout.init_index,
-        )
-        extra = _tencentvideo_rule_extra(stream)
-        extra["tencentvideo_cenc_compatibility"] = "clear_sample_entry"
-        extra["tencentvideo_cenc_clear_fragments"] = len(layout.fragments)
-        extra["tencentvideo_cenc_encrypted_fragments"] = 0
-        return output
-
-    from .cenc_fragment import decrypt_cenc_fragment
-    from .postprocess import normalize_decrypted_mp4_bytes
-
-    parts = [Path(path) for path in (part_paths or [])]
-    output = Path(output_path)
-    if output in parts:
-        raise ValueError("Tencent Video CENC output must be separate from downloaded parts")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    work_parent = Path(temp_dir).expanduser() if temp_dir else output.parent
-    work_parent.mkdir(parents=True, exist_ok=True)
-    work_dir = Path(tempfile.mkdtemp(prefix=f"{output.stem}_tencentvideo_", dir=str(work_parent)))
-    temporary = output.with_name(f".{output.name}.tencentvideo.tmp")
-    by_index = {
-        index: (path, segment, kind)
-        for index, path, segment, kind in layout.fragments
-    }
-    expected_kids = _tencentvideo_stream_key_ids(stream)
-    clear_count = 0
-    encrypted_count = 0
-    try:
-        with temporary.open("wb") as target:
-            for index, part in enumerate(parts):
-                if index == layout.init_index:
-                    target.write(normalize_decrypted_mp4_bytes(part.read_bytes()))
-                    continue
-                fragment = by_index.get(index)
-                if fragment is None:
-                    raise RuntimeError(f"Tencent Video CENC part {index} has no matching media segment")
-                _path, segment, kind = fragment
-                if kind == "clear":
-                    clear_count += 1
-                    with part.open("rb") as source:
-                        shutil.copyfileobj(source, target)
-                    continue
-                encrypted_count += 1
-                clear_fragment = work_dir / f"{index:08d}.clear.mp4"
-                segment_kid = str(getattr(segment, "key_id", None) or "").strip()
-                fragment_kids = [segment_kid] if segment_kid else expected_kids
-                decrypted = decrypt_cenc_fragment(
-                    part,
-                    keys,
-                    clear_fragment,
-                    fragment_kids,
-                    init_path=layout.init_path,
-                    default_constant_iv=getattr(segment, "key_iv", None),
-                    init_metadata=layout.metadata,
-                )
-                if decrypted is None:
-                    raise RuntimeError(
-                        f"Tencent Video protected CENC fragment {index} has an unsupported layout"
-                    )
-                with decrypted.open("rb") as source:
-                    shutil.copyfileobj(source, target)
-                decrypted.unlink(missing_ok=True)
-        temporary.replace(output)
-    except Exception:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
-        raise
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-    extra = _tencentvideo_rule_extra(stream)
-    extra["tencentvideo_cenc_compatibility"] = "mixed_sample_entries"
-    extra["tencentvideo_cenc_clear_fragments"] = clear_count
-    extra["tencentvideo_cenc_encrypted_fragments"] = encrypted_count
-    return output
 
 
-def _analyze_tencentvideo_cenc_parts(stream, part_paths, segments) -> _TencentVideoCencLayout | None:
-    if not _is_tencentvideo_cenc_stream(stream):
-        return None
-    parts = [Path(path) for path in (part_paths or [])]
-    segment_list = list(segments or [])
-    if not parts or len(parts) != len(segment_list):
-        return None
-    init_indices = [
-        index
-        for index, segment in enumerate(segment_list)
-        if getattr(segment, "index", None) == -1
-    ]
-    # Multiple-period/multi-init HLS needs a section-aware rule.  Leave it to
-    # the normal decryptor until that variant is observed and described.
-    if len(init_indices) != 1:
-        return None
-    init_index = init_indices[0]
-    init_path = parts[init_index]
-    try:
-        from .cenc_fragment import parse_cenc_init_metadata
-
-        metadata = parse_cenc_init_metadata(
-            init_path.read_bytes(),
-            _tencentvideo_stream_key_ids(stream),
-        )
-    except (OSError, ValueError, TypeError):
-        return None
-    states_by_track = metadata.sample_entry_encrypted_by_track
-    if not metadata.schemes.intersection({b"cenc", b"cens"}) or not states_by_track:
-        return None
-    if not any(not state for states in states_by_track.values() for state in states):
-        return None
-
-    fragments: list[tuple[int, Path, object, str]] = []
-    for index, (path, segment) in enumerate(zip(parts, segment_list, strict=False)):
-        if index == init_index:
-            continue
-        try:
-            prefix = _read_tencentvideo_fragment_prefix(path)
-        except OSError:
-            return None
-        if prefix is None:
-            return None
-        tracks = _tencentvideo_fragment_tracks(prefix)
-        if not tracks:
-            return None
-        selected_states: list[bool] = []
-        for track_id, sample_description_index in tracks:
-            states = states_by_track.get(track_id)
-            if states is None and len(states_by_track) == 1:
-                states = next(iter(states_by_track.values()))
-            if (
-                not states
-                or sample_description_index < 1
-                or sample_description_index > len(states)
-            ):
-                return None
-            selected_states.append(states[sample_description_index - 1])
-        has_encryption = _tencentvideo_fragment_is_encrypted(prefix)
-        if has_encryption and all(selected_states):
-            kind = "encrypted"
-        elif not has_encryption and not any(selected_states):
-            kind = "clear"
-        else:
-            return None
-        fragments.append((index, path, segment, kind))
-    if not fragments:
-        return None
-    return _TencentVideoCencLayout(
-        init_index=init_index,
-        init_path=init_path,
-        metadata=metadata,
-        fragments=tuple(fragments),
-    )
 
 
-def _tencentvideo_rule_extra(stream) -> dict:
-    extra = getattr(stream, "extra", None)
-    if not isinstance(extra, dict):
-        stream.extra = {}
-        extra = stream.extra
-    return extra
 
 
-def assemble_tencentvideo_clear_cenc_parts(
-    part_paths,
-    output_path: str | Path,
-    *,
-    init_index: int = 0,
-) -> Path:
-    """Assemble parts accepted by the Tencent clear-sample compatibility rule."""
-
-    parts = [Path(path) for path in (part_paths or [])]
-    if not parts:
-        raise ValueError("Tencent Video clear CENC compatibility has no downloaded parts")
-    output = Path(output_path)
-    if output in parts:
-        raise ValueError("Tencent Video CENC output must be separate from downloaded parts")
-    if init_index < 0 or init_index >= len(parts):
-        raise ValueError("Tencent Video clear CENC compatibility has an invalid init index")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.tencentvideo.tmp")
-    from .postprocess import normalize_decrypted_mp4_bytes
-
-    try:
-        with temporary.open("wb") as target:
-            for index, part in enumerate(parts):
-                with part.open("rb") as source:
-                    if index == init_index:
-                        target.write(normalize_decrypted_mp4_bytes(source.read()))
-                    else:
-                        shutil.copyfileobj(source, target)
-        temporary.replace(output)
-    except Exception:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
-        raise
-    return output
 
 
 def live_pipe_media_part_contains_init(stream, segment=None) -> bool:
@@ -676,19 +304,11 @@ def live_pipe_mux_disabled_reason(stream) -> str | None:
 
 
 def live_pipe_matroska_options(streams, output_container: str | None) -> list[str]:
-    """Return Matroska live-pipe options, including YSP's AAC probe exception.
-
-    FFmpeg's Matroska ``-live 1`` mode commits the output header before a FIFO
-    MPEG-TS input has necessarily exposed an AAC ADTS configuration. YSP's
-    ordinary live feeds are muxed H.264/AAC TS, so that turns a valid AAC track
-    into an unknown-samplerate failure. The normal cluster limits still flush
-    live output promptly; this only omits the premature Matroska mode for YSP.
-    """
+    """Return Matroska live-pipe options for continuous recording."""
     if output_container != "matroska":
         return []
     options: list[str] = []
-    if not any(_is_ysp_muxed_live_ts(stream) for stream in streams or []):
-        options.extend(["-live", "1"])
+    options.extend(["-live", "1"])
     options.extend([
         "-cluster_time_limit",
         "1000",
@@ -698,24 +318,6 @@ def live_pipe_matroska_options(streams, output_container: str | None) -> list[st
     return options
 
 
-def yangshipin_casting_live_pipe_map_specs(stream, input_index: int) -> list[str] | None:
-    """Map the usable AAC PID from a Yangshipin high-bitrate live TS.
-
-    The casting CDN's AAC rendition carries an undecodable companion PID
-    (usually ``0x101``) before its actual AAC PID (``0x102``). Stream indexes
-    are not stable: FFmpeg may expose the companion as MP3, unknown, or omit it
-    while probing the FIFO. Map the MPEG-TS stream id instead of an audio
-    ordinal so the real AAC remains selected in every segment.
-
-    Audio Vivid is not routed here because its existing policy disables
-    real-time pipe muxing before this point.
-    """
-    extra = getattr(stream, "extra", None)
-    if not isinstance(extra, dict) or not extra.get("yangshipin_casting_source"):
-        return None
-    if not _is_ysp_muxed_live_ts(stream):
-        return None
-    return [f"{input_index}:v?", f"{input_index}:i:{_YSP_CASTING_AAC_STREAM_ID}?"]
 
 
 def should_finalize_live_pipe_matroska_output(streams, output_container: str | None) -> bool:
@@ -791,158 +393,20 @@ def _is_vgc_stream(stream) -> bool:
     return isinstance(extra, dict) and bool(extra.get("vgc"))
 
 
-def _is_tencentvideo_cenc_stream(stream) -> bool:
-    if getattr(stream, "manifest_type", None) != "hls":
-        return False
-    if getattr(stream, "media_type", None) != "video" or not getattr(stream, "encrypted", False):
-        return False
-    schemes = [getattr(stream, "encryption_scheme", None)]
-    schemes.extend(
-        getattr(segment, "encryption_scheme", None)
-        for segment in getattr(stream, "segments", []) or []
-    )
-    if not any(str(value or "").upper().replace("-", "_") in _TENCENTVIDEO_CENC_SCHEMES for value in schemes):
-        return False
-    extra = getattr(stream, "extra", None)
-    if isinstance(extra, dict) and extra.get("tencentvideo_tv"):
-        return True
-    return any(_is_tencentvideo_media_url(url) for url in _stream_urls(stream))
 
 
-def _is_tencentvideo_media_url(value: str) -> bool:
-    parsed = urlparse(value)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if not (host == "qq.com" or host.endswith(".qq.com") or host == "gtimg.com" or host.endswith(".gtimg.com")):
-        return False
-    path = parsed.path.lower()
-    return ".m3u8" in path or ".mp4" in path or "/vod/" in path
 
 
-def _tencentvideo_stream_key_ids(stream) -> list[str]:
-    values: list[str] = []
-    extra = getattr(stream, "extra", None)
-    if isinstance(extra, dict):
-        raw_values = [extra.get("key_id"), *(extra.get("key_ids") or [])]
-        for value in raw_values:
-            text = str(value or "").strip()
-            if text and text not in values:
-                values.append(text)
-    for segment in getattr(stream, "segments", []) or []:
-        text = str(getattr(segment, "key_id", None) or "").strip()
-        if text and text not in values:
-            values.append(text)
-    return values
 
 
-def _read_tencentvideo_fragment_prefix(path: Path) -> bytes | None:
-    with path.open("rb") as source:
-        data = source.read(_TENCENTVIDEO_FRAGMENT_PREFIX_BYTES)
-        if len(data) < 8:
-            return None
-        boxes = list(_tencentvideo_mp4_boxes(data))
-        moof = next((item for item in boxes if item[2] == b"moof"), None)
-        if moof is None:
-            return None
-        moof_end = moof[0] + moof[1]
-        source.seek(moof_end)
-        mdat_header = source.read(8)
-    if len(mdat_header) < 8 or mdat_header[4:8] != b"mdat":
-        return None
-    mdat_size = int.from_bytes(mdat_header[:4], "big")
-    if mdat_size not in {0} and mdat_size < 8:
-        return None
-    return data[:moof_end]
 
 
-def _tencentvideo_fragment_is_encrypted(data: bytes) -> bool:
-    for moof_position, moof_size, box_type, moof_header in _tencentvideo_mp4_boxes(data):
-        if box_type != b"moof":
-            continue
-        moof_end = moof_position + moof_size
-        for position, size, child_type, header_size in _tencentvideo_mp4_boxes(
-            data, moof_position + moof_header, moof_end
-        ):
-            if child_type != b"traf":
-                continue
-            traf_end = position + size
-            for child_position, child_size, child_box_type, child_header in _tencentvideo_mp4_boxes(
-                data, position + header_size, traf_end
-            ):
-                if child_box_type in {b"senc", b"saiz", b"saio", b"sgpd", b"sbgp"}:
-                    return True
-                if child_box_type == b"uuid":
-                    uuid_start = child_position + child_header
-                    uuid_end = uuid_start + len(_TENCENTVIDEO_PIFF_SAMPLE_ENCRYPTION_UUID)
-                    if uuid_end <= child_position + child_size and bytes(data[uuid_start:uuid_end]) == _TENCENTVIDEO_PIFF_SAMPLE_ENCRYPTION_UUID:
-                        return True
-    return False
 
 
-def _tencentvideo_fragment_tracks(data: bytes) -> list[tuple[int, int]]:
-    tracks: list[tuple[int, int]] = []
-    for moof_position, moof_size, box_type, moof_header in _tencentvideo_mp4_boxes(data):
-        if box_type != b"moof":
-            continue
-        moof_end = moof_position + moof_size
-        for position, size, child_type, header_size in _tencentvideo_mp4_boxes(
-            data, moof_position + moof_header, moof_end
-        ):
-            if child_type != b"traf":
-                continue
-            traf_end = position + size
-            tfhd: tuple[int, int] | None = None
-            has_trun = False
-            for child_position, child_size, child_box_type, child_header in _tencentvideo_mp4_boxes(
-                data, position + header_size, traf_end
-            ):
-                if child_box_type == b"trun":
-                    has_trun = True
-                elif child_box_type == b"tfhd":
-                    tfhd = _tencentvideo_parse_tfhd(data, child_position, child_size, child_header)
-            if tfhd is not None and has_trun:
-                tracks.append(tfhd)
-    return tracks
 
 
-def _tencentvideo_parse_tfhd(
-    data: bytes, position: int, size: int, header_size: int
-) -> tuple[int, int] | None:
-    payload = position + header_size
-    end = position + size
-    if payload + 8 > end:
-        return None
-    flags = int.from_bytes(data[payload + 1 : payload + 4], "big")
-    cursor = payload + 4
-    track_id = int.from_bytes(data[cursor : cursor + 4], "big")
-    cursor += 4
-    if flags & 0x000001:
-        cursor += 8
-    sample_description_index = 1
-    if flags & 0x000002:
-        if cursor + 4 > end:
-            return None
-        sample_description_index = int.from_bytes(data[cursor : cursor + 4], "big")
-    return track_id, sample_description_index
 
 
-def _tencentvideo_mp4_boxes(data: bytes, start: int = 0, end: int | None = None):
-    end = len(data) if end is None else end
-    position = start
-    while position + 8 <= end:
-        size = int.from_bytes(data[position : position + 4], "big")
-        box_type = bytes(data[position + 4 : position + 8])
-        header_size = 8
-        if size == 1:
-            if position + 16 > end:
-                return
-            size = int.from_bytes(data[position + 8 : position + 16], "big")
-            header_size = 16
-        elif size == 0:
-            size = end - position
-        if size < header_size or position + size > end:
-            return
-        yield position, size, box_type, header_size
-        position += size
 
 
 def _is_kan_medone_dash_hevc_live_stream(stream) -> bool:
@@ -998,34 +462,10 @@ def _is_audio_vivid_policy_muxed_hls(stream) -> bool:
     return True
 
 
-def _is_ysp_muxed_live_ts(stream) -> bool:
-    if getattr(stream, "manifest_type", None) != "hls" or not getattr(stream, "is_live", False):
-        return False
-    if getattr(stream, "media_type", None) != "video":
-        return False
-    if (getattr(stream, "extension", None) or "").lower().lstrip(".") != "ts":
-        return False
-    extra = getattr(stream, "extra", None)
-    if not isinstance(extra, dict) or not extra.get("muxed_audio"):
-        return False
-    return bool(extra.get("yangshipin_casting_source")) or any(
-        _is_ysp_live_media_host(urlparse(url).netloc) for url in _stream_urls(stream)
-    )
 
 
-def _is_ysp_live_media_host(host: str) -> bool:
-    normalized = (host or "").split(":", 1)[0].lower()
-    return normalized == "ysp.cctv.cn" or normalized.endswith(".ysp.cctv.cn")
 
 
-def _is_ysp_casting_media_host(host: str) -> bool:
-    normalized = (host or "").split(":", 1)[0].lower()
-    return normalized in {
-        "live-tpgq.cctv.cn",
-        "liveali-tpgq.cctv.cn",
-        "live-tp4k.cctv.cn",
-        "liveali-tp4k.cctv.cn",
-    }
 
 
 def _json_stream_has_init_range(stream) -> bool:

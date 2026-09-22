@@ -69,6 +69,11 @@ _C1_CSI_ESCAPE = re.compile(r"\x9b[0-?]*[ -/]*[@-~]")
 _ESCAPE = re.compile(r"\x1b[ -/]*[@-~]")
 
 
+def _resolution_height(value: object) -> int:
+    match = re.search(r"x(\d+)$", str(value or ""))
+    return int(match.group(1)) if match else 0
+
+
 def _plain_terminal_text(value: object) -> str:
     """Remove terminal state changes from an embedded downloader message."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -330,9 +335,9 @@ class _StructuredProgressScreen:
         fixed_tail = bar_width + 2 + 4 + 1 + size_width
         label_width = max(4, min(longest_label, 28, width - fixed_tail - 2))
         # Speed is the one live value that tells the user whether transfer is
-        # actually moving. On a narrow terminal the old append-only ordering
+        # actually moving.  On a narrow terminal the old append-only ordering
         # spent the remaining cells on the segment counter and then dropped
-        # speed entirely. Reserve room for it by shortening the label first;
+        # speed entirely.  Reserve room for it by shortening the label first;
         # ETA and the counter remain optional when the row is crowded.
         longest_speed = max((len(record[4]) for record in records), default=0)
         if longest_speed:
@@ -443,6 +448,10 @@ class TrackSet:
     #: be able to send a selected track back through the matching DRM token,
     #: endpoint and client session.  It never crosses the delivery boundary.
     origins: dict[int, Playback] = field(default_factory=dict, repr=False)
+    #: Whether two or more service-authorized manifest profiles were actually
+    #: parsed and merged into this ladder. This is provenance metadata only;
+    #: Hybrid also supports a single manifest containing both layers.
+    merged_profiles: bool = False
 
     @property
     def video(self) -> list[StreamInfo]:
@@ -555,12 +564,12 @@ class Engine:
     def playback_input(self, playback: Playback) -> str:
         """Return the concrete input handed to UniDL.
 
-        Some services receive an adaptive track inventory rather than an
-        MPD/HLS URL. ``Playback`` keeps that inventory as a dict, while UniDL
-        deliberately accepts JSON through the same file-oriented input as every
-        other manifest. Materialising it here keeps services out of temp-file
-        management and gives parsing, command export and downloading the exact
-        same input path.
+        Services such as Netflix and YouTube receive an adaptive track inventory
+        rather than an MPD/HLS URL.  ``Playback`` keeps that inventory as a dict,
+        while UniDL deliberately accepts JSON through the same file-oriented
+        input as every other manifest.  Materialising it here keeps services out
+        of temp-file management and, importantly, gives parsing, command export
+        and downloading the exact same input path.
         """
         if playback.inline_manifest:
             payload = str(playback.inline_manifest)
@@ -720,7 +729,7 @@ class Engine:
 
         Three places, and which ones are read depends on the system. A master
         playlist may announce the key up front with ``EXT-X-SESSION-KEY``, which is
-        what a master playlist may do and is the cheap answer. For a system whose init data is
+        what Disney+ does and is the cheap answer. For a system whose init data is
         per key id, the playlists in the encrypted licence inventory are read first:
         an audio rendition and a video rendition can carry different keys, and each
         PlayReady exchange only answers for the header it was made with, so reading
@@ -747,7 +756,7 @@ class Engine:
             if media:
                 resolved = system.extract(media, drm, self.log) or resolved
         # the master last, so a per-track key line is what the first exchange uses
-        # and the master's is the fallback - the order used by earlier clients
+        # and the master's is the fallback - the order the legacy scripts used
         resolved = system.extract(text, drm, self.log) or resolved
         if resolved or "#EXT-X-STREAM-INF" not in text:
             return resolved
@@ -794,7 +803,8 @@ class Engine:
 
     def _fetch_text(self, playback: Playback, url: str) -> str:
         # A service may snapshot the authorized master locally. Keep DRM
-        # inspection on that snapshot too; child playlists use its remote base.
+        # inspection on that snapshot too; only child playlists and segments
+        # should use the network after this point.
         if str(url) == str(playback.manifest_url) and (
             playback.inline_manifest
             or not is_url(str(playback.manifest_url or ""))
@@ -842,13 +852,14 @@ class Engine:
             return None
         if playback.manifest_url and _looks_like_hls(playback.manifest_url):
             # HLS does carry init data, in an EXT-X-KEY/EXT-X-SESSION-KEY attribute
-            # rather than in XML. Skipping the fetch here would report
+            # rather than in XML. Skipping the fetch here is what made Disney+ report
             # "no PSSH found in the manifest" about a playlist that announces one.
             return self._init_data_from_playlist(playback, system, tracks)
 
         # Everything else is worth fetching: this used to require ".mpd" in the URL,
-        # and a service that serves DASH from a path without it would be told
-        # "no PSSH found in the manifest" about a manifest nobody had looked at.
+        # and a service that serves DASH from a path without it - Plex serves
+        # /library/parts/<id>-dash - was told "no PSSH found in the manifest" about a
+        # manifest nobody had looked at.
         self.log(
             "Reading inline manifest for DRM init data"
             if playback.inline_manifest
@@ -1091,8 +1102,8 @@ class Engine:
             return []
         # ``license_track_kids`` normally contains the same ids as the parsed
         # streams, but a service may replace it in ``prepare_drm`` when its media
-        # and licence protocols spell the same KID differently. A PlayReady
-        # client may carry a little-endian
+        # and licence protocols spell the same KID differently. Netflix
+        # PlayReady Web is the important case: JSON/MP4 carries a little-endian
         # fragment GUID while its WRM header, licence response and stored vault
         # row use the canonical UUID. Looking up the stream spelling made every
         # repeat download miss keys that were already in the vault.
@@ -1310,9 +1321,8 @@ class Engine:
                 service.ID,
                 pairs,
                 use_local=True,
-                # A live key discovered after recording starts is an acquired
-                # key, so remote writes follow the store policy, not the lookup
-                # policy used below for cache reads.
+                # Live rotation keys are acquired data, so writes follow the
+                # remote auto-store switch rather than the lookup switch.
                 use_remote=bool(write_remote),
                 local_names=write_local,
                 remote_names=write_remote,
@@ -1625,9 +1635,9 @@ class Engine:
             # applies to local-only policies as well as remote-enabled ones.
             if inventory_tracks is not None and settings is not None and self.vault_reads(settings):
                 # A self-owned service may leave init data empty until the
-                # manifest is read (Apple/Sling HLS is a common example). Give
-                # the registry extractor one chance to populate KIDs before
-                # the vault query, without taking ownership of the service's
+                # manifest is read (Apple/Sling HLS is a common example).  Give
+                # the registry extractor one chance to populate KIDs before the
+                # vault query, without taking ownership of the service's
                 # subsequent license exchange.
                 if (
                     not drm_registry.init_data_for(
@@ -1637,7 +1647,11 @@ class Engine:
                 ):
                     try:
                         self.resolve_init_data(playback, inventory_tracks)
-                    except Exception as exc:  # noqa: BLE001 - service parser remains authoritative
+                    except Exception as exc:  # noqa: BLE001 - the service owns its fallback parser
+                        # Service-owned DRM often has a richer manifest/init
+                        # parser. A failed optional core probe must not replace
+                        # that service-specific error or prevent its own
+                        # license flow from running.
                         self.log(f"vault: core init-data probe skipped ({exc})")
                 if playback.drm.clear:
                     playback.keys = []
@@ -1833,7 +1847,12 @@ class Engine:
             for stream in streams
             if id(stream) in tracks.origins
         }
-        return TrackSet(streams=streams, selected=encrypted, origins=origins)
+        return TrackSet(
+            streams=streams,
+            selected=encrypted,
+            origins=origins,
+            merged_profiles=tracks.merged_profiles,
+        )
 
     # ------------------------------------------------------------------ parse
     def parse_request(
@@ -1877,7 +1896,7 @@ class Engine:
             append_url_params=overrides.append_url_params,
             ad_keywords=list(overrides.ad_keywords),
             # trick-play and thumbnail ladders otherwise win "best video" on
-            # height alone, which is why earlier clients used -dv to avoid
+            # height alone, which is what the old scripts used -dv to avoid
             drop_video=normalize_drop_video_pattern(settings.get("drop_video", "")),
         )
 
@@ -2012,7 +2031,12 @@ class Engine:
             f"merged {len(manifests)} authorized manifests into "
             f"{len(streams)} distinct tracks"
         )
-        return TrackSet(streams=streams, manifest=merged, origins=origins)
+        return TrackSet(
+            streams=streams,
+            manifest=merged,
+            origins=origins,
+            merged_profiles=len(manifests) > 1,
+        )
 
     def _parse_manifest_segments(
         self,
@@ -2136,7 +2160,50 @@ class Engine:
             quality_override=playback.video_quality_hint,
             **kwargs,
         )
+        # Hybrid is a VOD transformation. A live/replay ladder is changing
+        # while it is consumed and cannot be paired safely.
+        if self.hybrid_enabled(settings, playback=playback, tracks=tracks):
+            tracks.selected = self.ensure_hybrid_tracks(tracks, tracks.selected)
         return tracks.selected
+
+    @staticmethod
+    def hybrid_enabled(
+        settings: Settings | None,
+        *,
+        playback: Playback | None = None,
+        tracks: TrackSet | None = None,
+    ) -> bool:
+        if settings is None:
+            return False
+        if playback is not None and playback.is_live:
+            return False
+        scoped = getattr(settings, "inherited", None)
+        value = scoped("dolby_vision_hybrid", False) if callable(scoped) else settings.get("dolby_vision_hybrid", False)
+        return bool(value)
+
+    @staticmethod
+    def ensure_hybrid_tracks(tracks: TrackSet, selected: Sequence[StreamInfo]) -> list[StreamInfo]:
+        """Add matching HDR base/DV ingredients when hybrid output is enabled."""
+        chosen_ids = {id(stream) for stream in selected}
+        videos = [stream for stream in tracks.streams if stream.media_type == "video" and not stream.is_live]
+        dv = [stream for stream in videos if "DV" in str(stream.video_range or "").upper() and "HDR10" not in str(stream.video_range or "").upper()]
+        hdr = [stream for stream in videos if str(stream.video_range or "").upper() in {"HDR10", "HDR10+", "HDR"}]
+        # The DV layer is metadata only. Use the lowest available DV rendition,
+        # regardless of its resolution; the selected HDR rendition is the base.
+        lowest_dv = min(dv, key=lambda item: (_resolution_height(item.resolution), item.bandwidth or 0), default=None)
+        chosen_videos = [stream for stream in selected if stream.media_type == "video"]
+        selected_hdr = [stream for stream in chosen_videos if stream in hdr]
+        selected_dv = [stream for stream in chosen_videos if stream in dv]
+        if selected_hdr and lowest_dv is not None:
+            chosen_ids.difference_update(id(stream) for stream in selected_dv if stream is not lowest_dv)
+            chosen_ids.add(id(lowest_dv))
+        elif selected_dv and hdr:
+            chosen_ids.difference_update(id(stream) for stream in selected_dv)
+            chosen_ids.add(id(lowest_dv or selected_dv[0]))
+            chosen_ids.add(id(max(hdr, key=lambda item: item.bandwidth or 0)))
+        else:
+            return list(selected)
+        return [stream for stream in tracks.streams if id(stream) in chosen_ids]
 
     def load_tracks(
         self,
@@ -2695,7 +2762,12 @@ class Engine:
             save_name=playback.save_name,
             output_dir=self.save_dir(settings, playback.title.service),
             keys=tuple(playback.keys),
-            service_context=dict(playback.drm.context) if playback.drm is not None else {},
+            service_context={
+                **(dict(playback.drm.context) if playback.drm is not None else {}),
+                "unidl_hybrid_dv_hdr10": self.hybrid_enabled(
+                    settings, playback=playback, tracks=tracks
+                ),
+            },
             policy=policy,
         )
 
@@ -2734,7 +2806,12 @@ class Engine:
             save_name=playback.save_name,
             save_dir=str(self.save_dir(settings, playback.title.service)),
             keys=list(playback.keys),
-            service_context=dict(drm.context) if drm is not None else {},
+            service_context={
+                **(dict(drm.context) if drm is not None else {}),
+                "unidl_hybrid_dv_hdr10": self.hybrid_enabled(
+                    settings, playback=playback
+                ),
+            },
             workers=int(settings.get("workers", 16) or 16),
             retries=int(settings.get("retries", 5) or 5),
             concurrent_tracks=bool(settings.get("concurrent_tracks", True)),

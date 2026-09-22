@@ -72,12 +72,9 @@ def _load_direct_manifest_candidate(source: str, headers: dict[str, str] | None 
     if size and size > MAX_MANIFEST_SNIFF_BYTES and not _looks_like_manifest_content_type(content_type):
         return None
 
-    try:
-        resource = load_text(source, headers=headers)
-    except LoadError:
-        if _looks_like_manifest_content_type(content_type):
-            raise
-        return None
+    # A likely manifest that could not be fetched is not a one-file video.
+    # Surface auth/network failures rather than queueing the API URL as media.
+    resource = load_text(source, headers=headers)
 
     sniffed_kind = guess_kind(resource.uri, resource.text)
     if sniffed_kind == "direct":
@@ -113,6 +110,10 @@ def _looks_like_manifest_content_type(content_type: str | None) -> bool:
 def _looks_like_manifest_url(source: str) -> bool:
     path = (urlparse(source).path or source).lower()
     name = Path(path).name
+    if "m3u8" in name:
+        # Script endpoints such as getm3u8.jsp may reject HEAD and return text/plain.
+        # This only triggers content sniffing; the response must still be HLS.
+        return True
     if name.endswith(("-dash", "_dash", "-mpd", "_mpd", "-manifest", "_manifest", "-playlist", "_playlist")):
         return True
     return any(token in path for token in ("/manifest", "/playlist", "/master", ".mpd", ".m3u8", ".ism/", ".isml/"))

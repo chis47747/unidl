@@ -160,30 +160,41 @@ class NativeDownloaderBackend:
         seen: set[tuple[object, ...]] = set()
         for manifest in manifests:
             for stream in self.streams(manifest):
-                # A provider may assign a different representation id on each
-                # playback response even though the authorized media URL and its
-                # properties are identical.  The id is therefore only an identity
-                # fallback for URL-less records; including it unconditionally made
-                # the same audio rendition appear once per requested profile.
-                source_identity = (
-                    ("url", str(stream.url or ""))
-                    if stream.url
-                    else (
-                        "id",
-                        str(stream.id or ""),
-                        str(stream.group_id or ""),
-                    )
-                )
-                fingerprint = (
-                    str(stream.media_type or "").lower(),
-                    source_identity,
+                # A provider commonly signs the same representation with a new
+                # URL for every profile request.  URL (and provider representation
+                # id) therefore cannot identify a track across authorized
+                # profile manifests.  Use the media properties that the picker
+                # actually exposes; retain URL only for records with no useful
+                # properties at all (typically an unusual direct sidecar).
+                media = str(stream.media_type or "").lower()
+                semantic_identity = (
+                    media,
                     str(stream.language or ""),
                     str(stream.role or ""),
                     str(stream.resolution or ""),
                     str(stream.codecs or ""),
-                    int(stream.bandwidth or 0),
+                    float(stream.frame_rate or 0),
+                    str(stream.video_range or ""),
                     str(stream.channels or ""),
+                    int(stream.bandwidth or 0),
+                    str(stream.extension or ""),
+                    str(stream.encryption_scheme or ""),
+                    bool(stream.encrypted),
+                    bool(stream.extra.get("muxed_audio")),
                     tuple(api.stream_key_ids(stream)),
+                )
+                has_semantic_identity = any(
+                    value not in {"", 0, ()}
+                    for value in semantic_identity[1:]
+                )
+                source_identity = semantic_identity if has_semantic_identity else (
+                    "url",
+                    str(stream.url or ""),
+                    str(stream.id or ""),
+                    str(stream.group_id or ""),
+                )
+                fingerprint = (
+                    source_identity,
                 )
                 if fingerprint in seen:
                     continue
@@ -193,6 +204,22 @@ class NativeDownloaderBackend:
             # Keep the source shape valid even when a candidate was an empty
             # manifest; the caller can report an empty ladder consistently.
             all_streams = []
+        # Individual profile parsers already return the native order, but
+        # concatenating profile ladders would otherwise put profile-B video
+        # after profile-A audio/subtitles.  The picker indexes the merged list,
+        # so keep one global media grouping before applying the existing quality
+        # order: all video first, then audio, then subtitles.
+        media_order = {"video": 0, "audio": 1, "subtitle": 2, "subtitles": 2, "text": 2}
+        all_streams.sort(
+            key=lambda stream: (
+                media_order.get(str(stream.media_type or "").lower(), 9),
+                1 if str(stream.media_type or "").lower() == "audio" and stream.manifest_type == "sabr_ump" else 0,
+                -(stream.bandwidth or 0),
+                str(stream.language or ""),
+                str(stream.group_id or ""),
+                str(stream.name or ""),
+            )
+        )
 
         document: dict[str, object] = {
             "video_tracks": [],
@@ -496,9 +523,6 @@ class NativeDownloaderBackend:
         ):
             if key in stream.extra:
                 record[key] = stream.extra[key]
-        raw = stream.extra.get("raw")
-        if isinstance(raw, dict) and isinstance(raw.get("deezer"), dict):
-            record["deezer"] = dict(raw["deezer"])
         return {key: value for key, value in record.items() if value is not None}
 
     @staticmethod

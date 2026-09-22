@@ -1,440 +1,824 @@
-# Adding a native service
+# Writing a service
 
-A service is a small adapter between a provider API and UniDL's typed Core
-contracts. It owns authentication, catalogue calls, manifest authorization and
-licence transport. Core owns the interaction shell, manifest parsing, output
-track selection, download, decryption, subtitles and muxing.
+## Dolby Vision hybrid output
 
-The result is one service that works in the TUI and in headless tests without a
-second menu implementation.
+The global `dolby_vision_hybrid` setting is an output transformation, not a
+service API/profile selector. A service may inherit it or declare the same
+boolean in its policy settings to override it. When enabled for VOD, Core keeps
+both a selected DV video and its matching HDR10/HDR10+ HEVC base in the licence
+inventory; the native downloader combines them after decryption with `dovi_tool`.
+The source may be one manifest containing both layers or several service-authorized
+profiles merged by Core; multiple profiles are not a prerequisite.
+Do not implement a second licence client for the transformation, and do not
+enable it for live/replay ladders. If the two files do not have matching
+frame rate, duration or frame count, the downloader must fail clearly rather
+than produce an incorrectly aligned stream. The DV source is intentionally the
+lowest-resolution available DV layer; it does not need to match the HDR base
+resolution because only its RPU metadata is used.
 
-## 1. Create, import and register the package
+Two things to read alongside this:
 
-Create one package under `src/unidl/services/<service_id>/`. The repository
-includes [`src/unidl/services/example/`](../src/unidl/services/example/) as a
-small, import-safe reference scaffold; copy it, rename the class and IDs, and
-replace its provider-specific placeholders before importing the new service:
+- `src/unidl/services/EXAMPLE/` — the reference service. Every hook, every
+  declaration, and a comment on each saying why it exists and what breaks without
+  it. It is not registered, so it never appears in the platform list. Copy the
+  folder, rename it, delete what you do not need. `scripts/template_check.py`
+  keeps it from drifting away from the real API.
+- `src/unidl/services/paramount/` — a real one, doing Widevine and PlayReady.
+  `services/bbcsounds/` is the audio-only shape and `services/iq/` is the one with
+  a third DRM system and a local helper.
 
-~~~text
-src/unidl/services/example/
-  __init__.py        Service subclass, settings and Flow entry points
-  api.py             HTTP client, response models and provider parsing
-  drm.py             optional service-local licence helpers
-  chapters.py        optional chapter parser
-  tests/             optional service-focused fixtures
-~~~
+## Start from the template
 
-Use a stable lowercase ID; it is used in configuration, vault rows, token
-folders, command exports and JustWatch mappings. NAME is the display name, TAG
-is the short output/name tag, and ALIASES contains accepted search and palette
-names.
+    cp -r src/unidl/services/EXAMPLE src/unidl/services/mysvc
 
-The example package is intentionally not registered, so it does not appear as a
-usable platform until its API, authentication and playback contract have been
-implemented. A completed package must contain one concrete `Service` subclass.
-For code shipped as part of a build, the conventional code-level registration is
-`@registry.register` (or one `registry.register(...)` call). For a package
-installed by a user, the TUI registration path can register the class after
-import, so the service does not have to import `registry` solely for that
-purpose. UniDL scans the services directory and imports packages at startup;
-editing `src/unidl/services/__init__.py` for every new package is not required:
+Then edit `ID`, `NAME`, `TAG`, and delete the hooks you do not implement. A
+service shipped in the build may use the code-level `@registry.register`
+decorator; a package imported by a user may omit `registry` and use **Settings →
+Services → Register a service** instead. The loader discovers concrete
+`Service` subclasses after the user restarts UniDL, so adding a manual import to
+`src/unidl/services/__init__.py` is no longer required.
 
-~~~python
-# Optional code-level registration for a service shipped in the build:
-from ...core.service import Service, registry
+## The one hard rule
 
-@registry.register
-class Example(Service):
-    ...
-~~~
+Service code does not import a UI framework, does not `print()`, does not
+`input()`. It yields *asks* and receives answers. In exchange you get: your
+service works in the interface and headlessly, it is unit-testable by feeding
+scripted answers, and you never write a menu loop.
 
-A package intended for user-level TUI registration can simply import
-`Service`, define the same class, and omit `registry`; the loader performs the
-registration after the user selects the package and restarts.
+## Minimum viable service
 
-The decorator is one way to put a class in the runtime registry. The other is
-the user-level TUI registration path: the user copies the package (or a single
-`<service_id>.py` module) into the installed `unidl/services` directory, opens
-**Settings → Services → Register a service**, selects the package, and restarts
-UniDL. The loader then discovers concrete `Service` subclasses and registers
-them automatically. The TUI only reads package metadata while the picker is
-open; it does not execute newly selected code in that interaction. Both routes
-produce the same registered service and the same Home/search behaviour;
-already registered packages are shown dimmed. Do not register a service more
-than once through the same route.
-
-On a minimal distribution with no service packages, Home displays the exact
-directory to use and a link to the Services manager. After copying a completed
-package there, use the same TUI registration flow and restart. This user-level
-gate controls which discovered classes are exposed; it is an alternative to the
-code-level decorator, not a second decorator requirement.
-
-### What the reference scaffold demonstrates
-
-`example/__init__.py` is the service-facing side of the contract. It declares
-the service identity and capabilities, defines provider-owned settings, creates
-a proxy/cookie-aware API client from `ServiceContext`, turns search results into
-`Choice` values, and emits a typed `Playback`. Its `_playback()` method is the
-place to translate a normalized API item into `Title`, `DrmInfo` and playback
-metadata; it is not a second downloader.
-
-`example/api.py` is the provider-facing side. `ExampleApi` owns the requests
-session, URL construction, timeout and HTTP error handling. `ExampleItem` is the
-small normalized model passed to the Flow, and `from_payload()` is where a real
-provider's JSON is validated and converted. Replace the placeholder search and
-resolve paths, authentication headers, manifest response fields and
-`post_license()` body/response handling with the provider contract. Keep secrets
-in `ctx.credential()`, `ctx.tokens` or managed cookies; never put them in this
-template or in a URL constant.
-
-The scaffold includes separate `manifest_profile` and `license_profile` settings
-to make the timing boundary visible. The first may select which provider
-manifest is requested; the second may select a provider-specific licence
-context. Neither is the shared Track output selection. Add `drm.py`,
-`chapters.py` or helper declarations only when the provider needs those
-extension points, and document each setting beside its implementation.
-
-## 2. Declare capabilities
-
-The base Service.home() builds the service menu from capability flags. Override
-only the entry points the provider supports:
-
-~~~python
+```python
 from collections.abc import Iterator
 
-from ...core.flow import Ask, FlowContext
+from ...core.flow import Ask, Choice, FlowContext
+from ...core.playback import DrmInfo, Playback
 from ...core.service import Service, registry
+from ...core.titles import Title, TitleKind
 
 
 @registry.register
 class Example(Service):
-    ID = "example"
-    NAME = "Example TV"
-    TAG = "EX"
-    ALIASES = ("ex", "exampletv")
-    TITLE_RE = r"(?:^|\.)example\.com"
+    ID = "example"                       # stable, lowercase, used everywhere
+    NAME = "Example TV"                  # shown in the interface
+    ALIASES = ("ex", "exampletv")         # accepted by search and the palette
+    TITLE_RE = r"example\.com"            # a pasted URL routes here
     GEOFENCE = ("US",)
-    MEDIA_TYPES = ("video",)
 
     SUPPORTS_URL = True
-    SUPPORTS_SEARCH = True
+    SUPPORTS_SEARCH = False
     SUPPORTS_LIVE = False
     SUPPORTS_LIBRARY = False
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
-        ...
+        info = self.api.title(target)
+        title = Title(id=info["id"], kind=TitleKind.MOVIE, name=info["name"],
+                      year=info["year"], service=self.ID)
+        yield ctx.emit(Playback(
+            title=title,
+            save_name=self.save_name(title),
+            manifest_url=info["manifest"],
+            headers={"User-Agent": USER_AGENT},
+            drm=DrmInfo(license_url=info["license"], headers={"authorization": info["token"]}),
+        ))
+```
 
-    def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
-        ...
-~~~
+The `Service` import is required because the class must inherit the UniDL
+service contract. Importing `registry` is only required for the optional
+code-level decorator; the user-level TUI registration path performs the same
+runtime registration automatically after restart.
 
-The public signatures are fixed:
+That is a complete service. You did not write a menu, a login prompt, a track
+picker, a CDM call, a filename builder or a download command.
 
-| Entry point | Purpose |
-|---|---|
-| open_url(ctx, target) | Resolve a provider URL or content identifier. |
-| search(ctx, query) | Search titles; the query is already supplied by the shared screen. |
-| live(ctx) | Browse live channels or an EPG. |
-| library(ctx) | Browse the signed-in account library. |
-| login(ctx) | Run an account, device-code or QR sign-in flow. |
-| home(ctx) | Custom menu only when the inherited menu cannot express the service. |
+## File layout
 
-The SUPPORTS_* flags must match the methods that are genuinely implemented. A
-service with MEDIA_TYPES = ("audio",) receives the audio layout and naming path;
-use ("audio", "video") for a mixed catalogue.
+One package per service:
 
-## 3. Keep API code and Flow code separate
+```
+services/example/
+  __init__.py      the Service subclass and its flows
+  api.py           HTTP client and response parsing, no UI, no printing
+```
 
-api.py should contain requests, authentication headers, response validation and
-provider-specific models. It must not import Textual, call print() or call
-input(). Flow methods in __init__.py turn API results into Core asks:
+Keeping the API client separate matters: it is the part you will debug against
+a live service, and it should be usable from a scratch script.
 
-~~~python
-from ...core.flow import Choice
+## Entry points
 
-def search(self, ctx, query):
-    results = self.api.search(query)
-    choices = [
-        Choice(item.label, item, detail=item.year or "")
-        for item in results
-    ]
-    picked = yield ctx.pick("Search results", choices)
-    yield from self.open_url(ctx, picked.id)
-~~~
+Override the ones you support and set the matching `SUPPORTS_*` flag. The base
+`home()` assembles the top menu from those flags, so you normally do not write
+`home()` at all.
 
-Use the shared asks rather than writing a menu loop:
+| Method | When |
+|--------|------|
+| `open_url(ctx, target)` | a URL or content id was given |
+| `search(ctx, query)` | free-text search |
+| `live(ctx)` | live channels or EPG |
+| `library(ctx)` | the account's own list |
+| `home(ctx)` | only if the default menu genuinely does not fit |
 
-~~~python
-season = yield ctx.pick("Season", season_choices)
-episodes = yield ctx.pick("Episodes", episode_choices, multi=True)
-url = yield ctx.text("URL or ID", placeholder="https://…")
-confirmed = yield ctx.confirm("Start download now?", default=True)
-row = yield ctx.table("Live TV", columns, rows, values)
-yield ctx.emit(playback)
-~~~
+## Asks
 
-Use ctx.status() for transient progress, ctx.log() for durable diagnostics,
-ctx.warn() for recoverable problems and ctx.error() for a visible error. A
-provider failure should raise a service-specific RuntimeError subclass with a
-clear recovery hint. A programming error such as TypeError or AttributeError
-must remain visible instead of being swallowed.
+All built from `ctx`:
 
-### Back, paging and batch results
+```python
+choice   = yield ctx.pick("Season", choices)                    # single
+choices_ = yield ctx.pick("Episodes", choices, multi=True)      # multi
+text     = yield ctx.text("URL or id", placeholder="https://…")
+yes      = yield ctx.confirm("Include extras?", default=False)
+row      = yield ctx.table("Live TV", columns, rows, values)    # grids, EPG
+token    = yield ctx.wait_for(                                  # something done elsewhere
+               "Confirm sign-in",
+               [("Code", "ABCD-1234"), ("Open", "https://…"), "and nothing to type here"],
+               poll,
+               qr=QrPresentation(payload="https://…"))          # optional QR in the TUI
+yield ctx.emit(playback)                                        # a result
+yield ctx.settings_request()                                    # open settings
+result   = yield ctx.suspend(callable)                           # release the terminal
+```
 
-The driver sends Back into the generator. Catch it only when the service owns an
-intermediate level; otherwise let it bubble to the parent menu. Mark paging rows
-with Choice(..., navigates=True) so they are not counted as titles in a
-multi-select batch.
+`Choice(label, value, detail="", tags=(), disabled=False, navigates=False)` —
+`detail` renders as a dim second line, `tags` as dim inline markers.
+`navigates=True` marks entries such as **Next page**: they move the list and are
+excluded when the driver infers a batch total from a multi-select answer.
 
-For QR, TV-code or browser authorization, yield ctx.wait_for() and keep the
-polling operation in api.py as one check per call:
+Multi-picks accept `preselected=[0, 3]` to arrive pre-checked. That is how the
+track picker starts on the automatic selection.
 
-~~~python
-challenge = self.api.begin_login()
-answer = yield ctx.wait_for(
+`ctx.wait_for()` displays its lines and calls `poll` on the flow worker every
+`interval` seconds until it returns something other than `None`. Timeout or Back
+raises `Back`. Use it for anything confirmed on another screen; use
+`ctx.suspend()` only when another process must temporarily own the terminal.
+
+For a scan-to-sign-in challenge, pass a `QrPresentation` from
+`unidl.core.qr`. Use `payload=` when the service returns the text/URL encoded by
+the QR; the presenter generates a sharp bitmap locally. Use `image_data=` only
+when the service returns an image as bytes or a base64 `data:image/...` URI.
+`image_url=` may name an official, public HTTPS QR bitmap returned by the
+provider. When both `image_url=` and `payload=` are present, the official bitmap
+is rendered first and the payload is the local fallback. `image_data=` remains
+the preferred option for protected images: fetch those through the service's own
+API session before constructing the presentation so the TUI does not bypass
+cookies, headers, or a service proxy. `fallback_url=` is the ordinary HTTP(S)
+address opened when the terminal cannot display images. Older service adapters
+may put a clearly named QR image endpoint in `fallback_url=`; the public QR
+layer recognises those endpoints for compatibility.
+
+```python
+challenge = client.start_qr_login()
+session = yield ctx.wait_for(
     "Scan to sign in",
-    [("Code", challenge.code), ("Open", challenge.url)],
-    poll=lambda: self.api.poll_login(challenge),
-    qr=QrPresentation(payload=challenge.url, alt="Example login QR"),
-)
-~~~
-
-Do not put QR image data, bearer URLs, cookies or tokens in log lines. Use the
-dedicated qr field so the TUI renders it without recording it in scrollback.
-
-## 4. Produce a Playback
-
-A successful title flow ends by yielding a Playback. Core then performs the
-native parse/select/download/decrypt/mux sequence:
-
-~~~python
-from ...core.playback import DrmInfo, Playback
-from ...core.titles import Title, TitleKind
-
-title = Title(
-    id=item.id,
-    kind=TitleKind.MOVIE,
-    name=item.name,
-    year=item.year,
-    service=self.ID,
-)
-yield ctx.emit(Playback(
-    title=title,
-    save_name=self.save_name(title),
-    manifest_url=item.manifest_url,
-    headers=item.headers,
-    proxy=self.ctx.proxy,
-    is_live=False,
-    drm=DrmInfo(
-        system=None,
-        license_url=item.license_url,
-        headers=item.license_headers,
-        context={"account": item.account_id},
+    [("Open in a browser", challenge.url), "Confirm on your phone."],
+    poll=lambda: client.poll_qr_login(challenge),
+    qr=QrPresentation(
+        payload=challenge.url,
+        image_url=challenge.image_url,
+        fallback_url=challenge.image_url,
+        alt="Example TV login QR",
     ),
-))
-~~~
+)
+```
 
-Always call self.save_name(title). Do not call a nonexistent title.save_name()
-method or construct a filename independently. Put service metadata in the Title,
-Playback and track models rather than in display strings.
+Never put a QR image or base64 data URI in `lines` or `ctx.log()`. Manual lines
+are copied and recorded as text; the dedicated QR field is rendered in memory
+and discarded when the wait ends. Fetch a protected image through the service's
+own API session before constructing the presentation—the TUI must not bypass the
+service's proxy, cookies or headers.
 
-A clear title has no drm object. A protected catalogue item that is explicitly
-clear may use DrmInfo(clear=True). An existing DrmInfo means encrypted media
-unless it declares a service-owned HLS key/decryptor.
+### Something the user has to do by hand
 
-Supported playback fields include:
+Not only device codes. Any step a person has to carry out somewhere else - a code
+to type, a page to sign in on, a name to pick out of a list on a phone - is
+written as `(label, value)` pairs, with plain strings for the prose around them:
 
-- manifest_url and explicitly authorized alternate_manifest_urls;
-- inline_manifest or json_manifest for structured provider responses;
-- headers, proxy, is_live, live_window and live_record_limit;
-- chapters, lyrics, subtitle_references and mux_imports;
-- keys for keys already obtained by a service-owned DRM path.
+```python
+yield ctx.wait_for(                       # confirmed elsewhere, polled for
+    "Activate with your TV provider",
+    [("Open", url), ("Code", code), "The page signs you in."],
+    poll,
+)
+answer = yield ctx.text(                  # finished in a browser, pasted back
+    "Sign in, then paste the address back",
+    placeholder="https://…?code=…",
+    lines=[("Open and sign in", url), "Do not press Continue; the address matters."],
+)
+```
 
-## 5. Integrate native manifest and track handling
+The pairs are what the UI leads with: a bordered card in the middle of the
+screen, each value on its own row, bold, numbered so a keypress copies it,
+clickable for the same reason, and `o` (or `^o` beside a field) opens the first
+one that is a link. Labels are yours - they are what the copy hints are worded
+from - so name them for what the person is about to do with them.
 
-The native downloader accepts DASH/MPD, HLS, ISM/Smooth Streaming, JSON manifest,
-SABR and direct media sources. Services should pass the authorized source and
-metadata; they should not parse representations or download segments themselves.
+Do not put a code or a URL in a `ctx.log()` line or fold it into a title. It is
+still written to the log for the scrollback, but the log is where you look for
+what already happened, not for what the app is waiting on you to do.
 
-Keep these three decisions separate:
+**Your client must not do the waiting.** This is the one way the rule above gets
+broken by accident: an `api.py` that takes a `show(code)` callback and then loops
+inside itself until the code is used leaves the flow with nothing to yield, so the
+only place the code *can* go is the log. Six services were written that way, and on
+screen they all looked the same - a blank pane, a code buried in the scrollback and
+a Back key that did nothing for ten minutes.
 
-| Decision | Owner | Example |
-|---|---|---|
-| Provider source/profile | Service setting and API | manifest_profile, region or codec family used to request an MPD. |
-| Final output tracks | Shared Core settings | Video quality/codec/range, audio and subtitles selected in the track picker. |
-| Licence track/profile/seed | Service DRM setting | license_profile, license_tracks or pssh_video_profile. |
+Split the client at the seam instead: one call for everything up to the code, one
+that asks *once* whether it has been used.
 
-Shared Track output selection controls what is downloaded and muxed. It is not a
-licence selector and must not be read by get_license, prepare_drm, or a
-service-local DRM helper. If a provider needs a particular video track or media
-playlist to obtain a licence, expose that choice as a separate service setting.
+```python
+code = client.begin_provider_sign_in(provider)      # no waiting in here
+session = yield ctx.wait_for(
+    f"Sign in to {provider.label()}",
+    [("Open", code.url), ("Code", code.code), "Nothing is typed here."],
+    poll=lambda: client.finish_provider_sign_in(code, provider),   # one check
+    timeout=max(60.0, float(code.seconds_left)),
+)
+```
 
-For multiple authorized ladders, return one Playback with merge_manifests=True and
-implement manifest_variants():
+The driver does the rest: it counts down in the status line, treats a failed poll as
+"not yet" rather than as an error, and turns Back or the timeout into `Back`. Keep a
+blocking form as well if a scratch script needs one - write it in terms of the two
+halves rather than the other way round.
 
-~~~python
-def manifest_variants(self, playback, log):
-    return [
-        replace(
-            playback,
-            manifest_url=self.api.manifest(profile),
-            merge_manifests=False,
-        )
-        for profile in self.settings.get("manifest_profiles")
-    ]
-~~~
+### Progress and messages
 
-Every variant must already be authorized and carry its own headers/proxy. Core
-parses and deduplicates the variants before showing one track picker. Never
-concatenate raw stream objects in the service.
+Do not yield for these; they are side channels:
 
-## 6. Integrate DRM safely
+```python
+ctx.status("Loading season 3")   # the crumb line, transient
+ctx.log("found 12 episodes")     # the log pane
+ctx.warn("no subtitles")
+ctx.error("playback denied")
+```
 
-Declare only systems the service actually supports:
+### Back
 
-~~~python
-DRM_SYSTEMS = ("widevine", "playready")
-~~~
+`Back` is thrown into your generator when the user goes up a level. Catch it to
+handle a level yourself, or let it propagate:
 
-Core loads the selected local or remote CDM, creates the challenge, parses the
-response and extracts content keys. The service owns the licence endpoint,
-request body, headers, authentication and response transport. Keep those methods
-in the service package (a local drm.py is recommended):
+```python
+while True:
+    try:
+        season = yield ctx.pick("Season", seasons)
+    except Back:
+        return                      # leave this sub-flow
+    episodes = yield ctx.pick(f"Season {season}", ...)
+```
 
-~~~python
+You do not need to catch it at your top level — `Service.home()` already
+catches `Back` from sub-flows and redisplays its menu.
+
+## Playback and DRM
+
+Return a `Playback`. Fill `drm` with what core needs; do not run the CDM
+yourself.
+
+If the service's playback API also exposes chapter markers, attach
+`unidl.core.Chapter` values to `Playback.chapters`; this field is optional and
+services without such an endpoint do not need a stub. Use milliseconds (or
+`Chapter.from_seconds` only when the API explicitly reports seconds). The full
+contract and delivery presentation are in [chapters.md](chapters.md).
+Honor the per-service `fetch_chapters` policy (with legacy global fallback) through
+`self.fetch_chapters_enabled()`: when it is false, skip the optional endpoint or
+selection-set field entirely. Chapter parsing is best effort; catch provider
+timeouts, schema changes and malformed optional entries, log a warning when the
+flow has a context, and continue returning the normal `Playback` so DRM,
+download and mux are unaffected.
+Chapter embedding is already a shared **Tracks and output** setting named
+`embed_chapters` (on by default); a service should not add a second mux toggle.
+
+```python
+DrmInfo(
+    system=None,                                 # None: service/global selection decides
+    pssh=None,                                   # None: core tries MPD, init segment, then KID fallback
+    wrm_header=None,                             # PlayReady: core tries MPD and init segment
+    init_data=None,                              # registry-specific, e.g. MonaLisa ticket
+    service_certificate=None,                    # Widevine privacy-mode certificate bytes
+    license_url="https://…/getlicense",
+    headers={"authorization": f"Bearer {session}"},
+    context={"session": session},                # yours, passed back to get_license
+    cdm=None,                                    # override the device for this playback
+    hls_key=None, hls_iv=None, hls_method=None,  # HLS AES-128 instead of Widevine
+    clear=False,                                 # True: this title is not encrypted
+)
+```
+
+Two of those fields are about intent rather than data, and both fail safe:
+
+- Leave `system` as `None` unless the service or this playback requires a
+  particular registered DRM system. `None` means "no opinion", and the
+  service/global selection decides. Naming one pins it, and the setting no
+  longer overrides it.
+- A `DrmInfo` that exists means the stream is encrypted. If you attach one to a
+  title that is *not* — a clear extra in a protected catalogue — say
+  `clear=True`. Core will not guess from empty fields, because a service that
+  builds its licence URL inside `get_license` legitimately has all of them empty,
+  and guessing "no DRM" there downloads encrypted output while reporting that no
+  key was needed.
+
+Do not attach a `DrmInfo` at all for a title with no DRM of any kind.
+
+When one authorization explicitly returns several equivalent manifest URLs,
+put the first in `manifest_url` and the remaining URLs in
+`alternate_manifest_urls`. Core tries only those declared candidates, in order,
+and updates `manifest_url` to the one that loaded. `manifest_attempts` is an
+opt-in retry count for a platform whose verified client retries transient
+manifest failures; it is not a host- or schema-discovery fallback.
+
+Declare the systems the service can actually use:
+
+```python
+DRM_SYSTEMS = ("widevine", "playready")  # service setting chooses between them
+# DRM_SYSTEMS = ("monalisa",)             # one system is pinned, with no setting
+```
+
+An empty tuple means the app-wide DRM choice applies. One item is a fact about
+the service and overrides the app-wide preference. Several items add a
+service-scoped `drm_system` setting. The order is the service's preference.
+
+ChinaDRM is currently a shared protocol with service-owned provision identity,
+not a globally registered device system. A ChinaDRM service uses
+`Capabilities().with_self("drm")`, pins `DrmInfo.system` to `CHINADRM`, keeps its
+provision cache and HTTP session under that service, and uses the neutral codec
+from `unidl.core.chinadrm`. Do not add it to `DRM_SYSTEMS` or reuse another
+service's provision material. The complete contract is in
+[chinadrm.md](chinadrm.md).
+
+There is no default licence POST. Every networked DRM service implements its own
+transport, even when the endpoint accepts a raw challenge. Core owns CDM loading,
+challenge creation, licence parsing and key extraction; the service owns the URL,
+headers, authentication, request body and response unwrapping. Both base hooks
+fail closed so an incomplete port cannot silently inherit another HTTP contract:
+
+```python
 def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
-    response = self.api.post_license(
+    response = self.http.post(
         drm.license_url,
-        challenge=challenge,
+        json={"payload": base64.b64encode(challenge).decode()},
         headers=drm.headers,
     )
-    return response.license_bytes
+    return base64.b64decode(response.json()["license"])
+```
 
+PlayReady services likewise implement `get_license_soap`. Keep both methods in
+the service package (splitting them into a service-local `drm.py` is fine); never
+call `super().get_license(...)` or `super().get_license_soap(...)`.
 
-def get_license_soap(self, challenge: str, drm: DrmInfo) -> str:
-    return self.api.post_playready_license(
-        drm.license_url,
-        soap=challenge,
-        headers=drm.headers,
-    )
-~~~
+For Widevine privacy mode, fetch the service certificate before emitting the
+playback and put its decoded bytes in `service_certificate`. Core applies it
+before creating the challenge for both local and remote CDMs.
 
-Never call a shared default HTTP licence implementation and never invoke a CDM
-directly from service code. Keep service context in DrmInfo.context; do not
-depend on a later settings change to route an active playback.
+If the verified client chooses its licence seed independently of the tracks that
+will be downloaded, override `prepare_drm(playback, tracks, log)`. It runs on the
+full encrypted licence inventory before vault/CDM resolution and before shared
+output selection. The hook may set `drm.pssh` or the registered system's
+equivalent init data; it must not make a licence request or rewrite
+`license_tracks` / `license_track_kids` with output preferences.
+DIRECTV is the reference: its service setting defaults to the legacy 720p video
+profile, the exact highest-bandwidth 1280x720 media playlist supplies one PSSH,
+and the one Widevine licence response keeps every returned content key even when
+the user chose another video/audio combination.
 
-### PlayReady and multiple PSSH values
+For encrypted live recording, override
+`live_key_pssh(playback, stream, segment, kid, log)` only when the service can map
+the newly observed KID to exact init data from the selected stream/segment.
+Prefer init data already bound to the triggering segment; for a rolling HLS
+playlist this also covers an older DVR-window segment after its key line has
+fallen out of the current playlist. Core tries the vault first, then this hook and
+the same service's own licence transport, then a password-masked TUI `KEY` /
+`KID:KEY` prompt. Returning `None` declines automatic rotation. Never manufacture
+a generic KID-only PSSH here: a service must prove that request shape itself. Core
+retains and stores every content key returned by the licence but hands the
+delivery backend only the pair matching the KID that paused the recording. A KID already present
+in the recording key set is not an automatic rotation event; validation failures
+for that KID go to explicit user entry.
 
-The normal PlayReady Core path reads the complete manifest, keeps PlayReady
-protection data, deduplicates raw PSSH/WRM identities and performs one request per
-remaining identity. It merges every returned content key. A service may override
-this only when its verified provider behavior requires a selected media playlist
-or a service-specific licence seed. HLS services whose master playlist omits PSSH
-should use a separate license_tracks/pssh_* setting and fetch the matching media
-playlist.
+### Multiple PSSH objects
 
-For live rotation, implement live_key_pssh() only when the service can map the new
-KID to exact init data. Core tries the vault first, then this service hook and
-transport, and finally an explicit masked KID:key prompt. Never invent a generic
-KID-only request shape.
+The default PlayReady port must hand core the full DASH/ISM manifest, not extract
+only its first PSSH in the service. Core filters PlayReady protection data,
+deduplicates raw PSSH and equivalent WRM/KID identities, performs one independent
+licence exchange per remaining identity and merges the keys. Most services happen
+to produce one key; that observation is not permission to hard-code one PSSH.
 
-## 7. Settings, credentials, cookies and tokens
+Keep verified service-specific behaviour instead of mechanically applying that
+default. If an HLS master omits per-track PSSH data, use the service's separately
+configured/default **licence tracks** and their media playlists rather than
+scanning every rendition. A port such as Apple, whose original PlayReady and
+Widevine paths are both controlled by its own `license_tracks`, must preserve that
+separation for both systems. No service licence helper reads shared output
+settings; only Core's explicit post-selection compatibility mode may supply a
+selected-only DRM inventory. See
+[drm.md](drm.md#the-default-rule-and-when-not-to-use-it).
 
-Declare provider-owned settings with Setting/Option; shared output settings are
-appended by Core:
+Clear streams: leave `drm` as `None` when the service never uses DRM. Inside a
+protected catalogue use `DrmInfo(clear=True)`, so the absence of a licence is an
+explicit fact rather than an incomplete encrypted playback.
 
-~~~python
-from ...core.settings import Option, Setting
+## Settings
+
+Declare whatever knobs your service actually has. There is no fixed set.
+
+```python
+from ...core.settings import Option, Setting, multi_choice_setting
+
+# Use this only when every value maps to a real, service-owned API request.
+LADDERS = multi_choice_setting(
+    "ladders",
+    "Requested ladders",
+    [("hd", "1080p"), ("uhd", "2160p")],
+    default=("hd",),
+)
 
 SETTINGS = [
     Setting(
-        key="manifest_profile",
-        label="Manifest profile",
-        kind="choice",
-        options=[Option("hd", "HD"), Option("uhd", "UHD")],
+        key="profile",
+        label="Stream profile",
+        kind="choice",                       # choice | bool | text | int | multi
+        options=[Option("hd", "1080p H.264"), Option("uhd", "4K Dolby Vision")],
         default="hd",
+        help="4K needs a TV login and an L1 device.",
+        resets_session=True,                 # changing it signs the user out
     ),
-    Setting(
-        key="license_track",
-        label="Licence track",
-        kind="choice",
-        options=[Option("720p", "720p seed"), Option("1080p", "1080p seed")],
-        default="720p",
-    ),
+    LADDERS,
 ]
-~~~
+```
 
-Keep API credentials in declared CredentialSlots and read them through the
-service context:
+These appear in a section named after your service. The shared track settings
+(quality, codec, range, audio, subtitles) are appended automatically — do not
+redeclare them. See [settings.md](settings.md) for which tier a knob belongs in.
 
-~~~python
-credential = self.ctx.credential("default")
-username = credential.username
-password = credential.password
-~~~
+Read them with `self.settings.get("profile")`.
 
-Use self.ctx.tokens for service-owned refresh/session state. Use
-USES_COOKIES = True when browser cookie profiles are a supported login path; Core
-then scopes files to <paths.cookies>/<service>/. Never accept an arbitrary
-cookie path from a setting.
+There are three separate decisions. Do not collapse any two because their values
+happen to look alike:
 
-If a service has multiple independent login methods, give each method its own
-token/cookie file and route refresh/logout only for the selected method. Changing
-a profile must not delete another profile's state. auth_status() must be cheap
-and offline; it should inspect local state and never make a network call.
+| Decision | Configuration owner | What it may change |
+|----------|---------------------|--------------------|
+| Provider source/manifest profile | service setting such as `manifest_*`, `source_*` or `profile_*` | API payload and returned manifest URL |
+| Track output selection | shared `video_*`, audio, subtitle and `track_mode` settings | tracks handed to native delivery core for download/mux |
+| Licence track/profile/seed | separate service setting such as `license_tracks`, `license_profile` or `pssh_video_profile` | init data and service-owned licence plan only |
 
-## 8. Helpers, chapters, audio and live
+The shared Track output selection settings are **never licence settings**.
+`get_keys`, `get_license`, `get_license_soap`, `prepare_drm` and service-local DRM
+helpers must not read `video_quality`, `video_codec`, `video_range`, audio or
+subtitle output preferences to decide what to licence. If a service needs a
+special licence track, profile or PSSH seed, declare a separate setting in that
+service's own `SETTINGS`, even when it has the same choices and default as an
+output setting.
 
-The per-service **License after final track selection** switch changes the
-inventory Core passes to DRM hooks: only the final selected encrypted tracks'
-KIDs/PSSH are queried in vaults or licensed. It never authorizes service code to
-use shared output preferences to select a provider API or manifest profile.
-The service's **License and vaults** section configures automatic local/remote
-lookup, storage and destinations; Home search and manual key entry remain global.
-These shared service-policy rows inherit the global Vault policy and Services
-defaults until explicitly saved. Service code must use the effective Settings
-value, not a hardcoded fallback. Explicit false/empty selections override the
-global choice; resetting a row removes the override rather than saving a default.
+By default Core supplies `license_tracks` as the complete encrypted parsed
+inventory before shared output selection. A service may narrow that inventory
+only through its own explicit `license_*` / `pssh_*` policy. Service code must
+never read shared output settings to decide its API/profile or licence seed.
 
-Declare every binary, module or asset through the helper contract. Resolve it with
-self.ctx.helper("name"); never hardcode a developer path or scan the filesystem.
-See external-helpers.md.
+The per-service **License after final track selection** compatibility mode changes
+the inventory Core passes to the same hooks: it is the final selected encrypted
+tracks rather than the complete ladder. This exists for HLS/per-media-playlist
+init data. The service does not branch on the global switch and does not inspect
+checkbox settings itself; it simply receives the inventory Core selected for the
+current mode.
 
-Optional provider chapters are converted to Core Chapter values in milliseconds
-and attached to Playback.chapters. Honor the per-service chapter policy through
-`self.fetch_chapters_enabled()` (with legacy global fallback), and treat a
-chapter endpoint failure as a warning: return the normal playback and continue
-to DRM/download.
+Keep all three phases separate in both the setting names and the code. A
+service-level `manifest_*`, `source_*` or `profile_*` setting may select the
+provider's manifest profile before the MPD/playlist request. The shared
+`video_quality`, `video_codec` and `video_range` settings must be passed to core's
+track selection after that manifest has been parsed. They must not be reused to
+silently select a different provider URL or a licence track. A service-specific
+`license_*` / `pssh_*` setting may choose licence inputs but must not rewrite the
+final `TrackSet.selected` handed to native delivery core.
 
-For audio services set MEDIA_TYPES appropriately and populate title-level audio
-metadata. Core handles the audio layout, selected audio tracks, cover art and MP3
-ID3 export. See audio.md and downloader/mp3-audio-format.md.
+### Several authorized manifests, one picker
 
-For live services set SUPPORTS_LIVE = True, return Playback(is_live=True), and let
-Core ask for recording, replay/DVR mode and duration after track selection.
-00:00:00 is unlimited; Stop/Back/Esc cancels the active recording. Only add a
-service-local session/heartbeat lifecycle when the provider actually requires it,
-and release it in an outer finally around the emitted playback.
+A service may offer a multi-valued provider profile setting when its verified
+client really requires one playback request per resolution/codec family. Declare
+the value with `multi_choice_setting`, request the first profile normally, set
+`Playback.merge_manifests=True`, and override:
 
-## 9. Testing checklist
+```python
+def manifest_variants(self, playback: Playback, log) -> list[Playback]:
+    return [
+        replace(playback, manifest_url=self.client.playback(profile),
+                merge_manifests=False)
+        for profile in self.remaining_profiles(playback)
+    ]
+```
 
-Before calling a service ready, verify:
+Every returned object must already be authorized and must carry the exact
+headers, proxy and service state needed for that URL. Core neither guesses profile
+names nor rewrites URLs. It parses each variant independently, skips an unavailable
+variant with a log message, then constructs one typed JSON manifest containing the
+deduplicated streams. Deduplication uses the track properties exposed to the
+picker (media kind, language/role, resolution, codec, frame rate, dynamic range,
+channels, bitrate, container and KIDs), not signed URLs or provider representation
+IDs. This matters when each profile request returns a different expiring URL.
+Live playback must remain a single refreshable manifest, so
+Core deliberately ignores merging for `Playback.is_live`.
 
-- import and registry validation succeed;
-- inspect.signature() matches every base entry point;
-- search, URL, live, library and login paths match SUPPORTS_* declarations;
-- Back returns to the preceding question, and paging is marked navigates=True;
-- login, refresh, expiry, logout and independent login profiles are covered;
-- auth_status() performs no network request;
-- at least one authorized title reaches a Playback;
-- manifest/profile, output-track and licence-track settings remain independent;
-- service-local licence transport works for each declared DRM system;
-- multiple PSSH/KID and live-key rotation behavior follows the provider contract;
-- chapters, audio metadata, helpers and session cleanup are failure-safe;
-- tests pass with ruff, compileall and the project's offline test suite;
-- live tests use authorized accounts and never print tokens, keys, PSSH, cookies,
-  signed URLs or licence bodies.
+The merged source is also what command/export paths receive; do not concatenate
+`TrackSet` objects inside the service or return raw stream objects from this hook.
+Disney is the reference implementation.
 
-Document the service's settings and any provider-specific DRM/profile behavior in
-the same change. Keep the public service ID stable after release; use aliases or
-a migration when a display name changes.
+### Licensing a merged profile set
+
+The merged ladder is only a display and delivery view; it does not give the
+primary profile authority over tracks returned by another profile. Core keeps an
+origin for every merged stream and groups the final licence inventory by that
+origin. A service-owned `resolve_keys` implementation must therefore keep each
+profile's licence context, endpoint and session separate, request every needed
+profile/PSSH once, and return the union of the resulting keys. When
+`license_after_tracks` is enabled, narrow that work to the origins and encrypted
+tracks represented by the final selection; do not use the full profile list just
+because it was requested earlier. Clear duplicate `playback.keys`/cached-key
+state between independent exchanges so one successful profile cannot suppress
+the next one.
+
+Movies Anywhere is the concrete example: `manifest_resolution`,
+`manifest_codec` and `manifest_color` choose the source family, while the shared
+track settings choose the representations inside the selected MPD. Tests should
+set deliberately different values for all applicable phases and assert the
+source URL/profile, final output tracks and licence inputs independently, so a
+future port cannot collapse them back into one knob. DIRECTV is the three-way
+example: manifest authorization returns the ladder, shared output settings choose
+what unidl downloads, and `pssh_video_profile` independently chooses the video
+media playlist used as the Widevine licence seed.
+
+## Credentials
+
+Declare the logins you need; `unidl.yaml` fills them.
+
+```python
+from ...core.credentials import CredentialSlot
+
+CREDENTIALS = [
+    CredentialSlot("us", "Example US account"),
+    CredentialSlot("intl", "Example international account"),
+]
+```
+
+```python
+cred = self.ctx.credential("us")
+cred.username, cred.password, cred.cookies
+```
+
+Field names are yours: `unidl.yaml` passes through whatever keys you put under
+the slot, so a service wanting `device_id` or `api_key` just reads
+`cred.get("device_id")`.
+
+### Partner authorization from another service
+
+When one installed service obtains a short-lived SSO URL for another, use
+core's `PartnerAuthorization` contract. The producer yields
+`ctx.partner_handoff()`; the consumer declares
+`PARTNER_AUTHORIZATION_SOURCES`, claims the URL once and saves only its own final
+session. Services do not import one another, and the consumer never calls the
+producer's authorization endpoint.
+
+Do not treat this as a login fallback or a general browser-link wrapper. A
+consumer that also accepts account credentials exposes an explicit
+`login_method` setting with `resets_session=True`, and isolates the two token and
+refresh domains. The complete producer and consumer templates, persistence
+rules and tests are in
+[partner-authorization.md](partner-authorization.md).
+
+## Failing
+
+Raise. Do not catch your own error just to return quietly, and do not print.
+
+What happens next depends on the type, and the line is between *the situation is
+wrong* and *this code is wrong*:
+
+| You raise | The session |
+|-----------|-------------|
+| any `RuntimeError` - which every service error class in this tree is | shows a panel and returns to your menu; the rest of the session is untouched |
+| anything else - `TypeError`, `AttributeError`, `KeyError` | ends, with a panel and a traceback in debug mode |
+
+So an expired login, a licence the CDM was refused, an episode this region does not
+carry: raise your own error and say what a person can do about it. The advice is
+worth writing because the menu is where they end up, so "sign in again from this
+service's menu" can actually be followed.
+
+A `TypeError` is a bug, and it stays loud on purpose. Catching it behind a friendly
+menu is how a bug becomes a mystery.
+
+Two consequences worth knowing:
+
+- **Derive your error from `RuntimeError`.** `class ExampleError(RuntimeError)` -
+  the template does this and `scripts/template_check.py` asserts the rule holds.
+- **If you write your own `home()` menu loop** instead of using the inherited one,
+  you take on the recovery too, because a generator that raised cannot be resumed
+  from outside. Put it beside the `except Back: continue` you already have:
+
+  ```python
+  except RuntimeError as exc:
+      ctx.problem(
+          f"{self.NAME} could not finish that",
+          f"{type(exc).__name__}: {exc}",
+          "The service menu is still open - the rest of the session is fine.",
+      )
+      continue
+  ```
+
+  `ctx.problem()` is the loud channel: a panel on screen as well as a log line.
+  `ctx.warn()` and `ctx.log()` stay for the running commentary.
+
+## Tokens
+
+`self.ctx.tokens` is a `TokenStore` rooted at **this service's own folder**,
+`paths.tokens/<your id>/`. Pass it a file name, never a path: a name with a `/` in
+it makes a folder inside your folder, and there is nothing to disambiguate from
+because no other service can reach in here.
+
+```python
+cached = self.ctx.tokens.read("example_token.json")
+self.ctx.tokens.write("example_token.json", {"token": ..., "expires": ...})
+```
+
+There is no second place to look. If your service's file was called something else
+in an earlier version, read the old name once, write the new one and **remove the
+old one** - a copy leaves a session that signing out does not delete and the next
+read adopts again, which reads to the user as a sign-out that did not work.
+
+When one service exposes independent API families, the client selector is not an
+authorization selector. Give each family its own file or managed cookie profile,
+set the selector's `resets_session=False`, and route read, refresh and logout from
+the selected family without inspecting or clearing the other family. Playback
+must carry its family in `DrmInfo.context`; licence routing follows that recorded
+context rather than whichever setting happens to be selected later. Tencent Video
+is the reference for a Web-cookie client and TV-QR client that coexist this way.
+
+This rule also applies when the setting is labelled **platform**, **API version**,
+**region**, **delivery** or **profile**. Selecting another route is not signing
+out. Never call `logout()`, delete a token/cookie file, overwrite another
+variant's cache, or mark another variant signed-out from a settings-change
+callback. Keep each route's token/cookie state independently addressable and
+refresh only the route selected for the current request. An explicit Sign out
+action may clear the selected service session according to that service's
+documented policy; it must not be used as a side effect of changing a selector.
+
+Sign out must write an empty or tombstone state, rather than only deleting, when a
+missing file would be read as "never signed in" and silently re-enter a flow the
+user just left. Xfinity and Rakuten are the reference implementations.
+
+## Cookies
+
+For a lot of services the sign-in cannot be reproduced from a script at all — a
+captcha, a device attestation, an SSO redirect — and an exported cookies.txt is
+not a shortcut but the only route. Declare it and core supplies the rest:
+
+```python
+class Example(Service):
+    USES_COOKIES = True
+```
+
+That alone gives you:
+
+- the sign-in entry in the service menu, which verifies the managed cookie profile
+- a **Browser cookie file** service setting populated only from direct `.txt`
+  files in `~/.unidl/cookies/example/`
+- an explicitly selected `example/<profile>.txt` used exactly, with no fallback
+  to another account; an empty/automatic choice uses only `example/default.txt`
+- **the jar attached to every session** `self.ctx.session()` builds
+- `logout()` removing the selected file
+- `self.cookie_status()` for `auth_status()`
+
+Most services need no cookie code beyond the declaration, because cookies are not
+a different code path — they are the same requests with an account behind them.
+
+The sign-in flow does not ask for a path. Put the browser export directly under the
+service's cookie folder and choose its profile in Settings. This is intentional:
+an arbitrary path would bypass the per-service boundary.
+
+```python
+def auth_status(self) -> AuthStatus:
+    status = self.cookie_status()          # logged_in + "17 cookie(s) for .example.com"
+    if status.logged_in:
+        return status
+    return AuthStatus(logged_in=False, anonymous_ok=True, label="free tier needs no sign-in")
+```
+
+Three things worth knowing:
+
+- **Expiry is ignored deliberately.** A browser export is usually already stale,
+  and `requests` silently drops an expired cookie *at send time* — a jar that
+  loaded fine would send nothing and the service would answer as if signed out. The
+  in-memory jar is neutralised; the user's file is never rewritten.
+- `self.ctx.session(cookies=False)` for the request that must be anonymous, like
+  minting a guest token.
+- `self.ctx.cookie_header(url)` builds a `Cookie:` header for a `Playback`, since
+  the downloader takes headers and not a jar. It is narrowed to the URL's host, so
+  an account's whole jar is not sent to a CDN.
+- Cookie choices are profile names rather than paths. Do not add a service-owned
+  free-text cookie path setting: it bypasses the per-service directory boundary
+  and prevents core from showing the available accounts consistently.
+
+A service with its own sign-in *and* cookies gets both offered in the menu.
+They are not abstract alternatives: the real sign-in is better when it works, and
+cookies are what you reach for when it does not.
+
+## Reporting login state
+
+`auth_status()` must be cheap and must not touch the network. It is used while
+building the service menu and identity band, and may be called again after
+login, logout or settings changes. Home deliberately does not call it for every
+platform row.
+
+```python
+def auth_status(self) -> AuthStatus:
+    cached = self.ctx.tokens.read("example_token.json")
+    if cached and cached.get("token"):
+        return AuthStatus(True, f"Example · {cached.get('username', 'signed in')}")
+    if self.ctx.credential("us").complete:
+        return AuthStatus(False, "credentials ready", detail="will sign in on demand")
+    return AuthStatus(False, "no credentials", detail="slot 'us'")
+```
+
+`logout()` should drop whatever you cached in memory; core calls it when a
+`resets_session=True` setting changes.
+
+## Naming
+
+`self.save_name(title)` produces the project convention:
+`Title.S01E02.Episode.Name` / `Title.YEAR`. Override only if your service needs
+something genuinely different, and declare `naming="self"`.
+
+## Capabilities
+
+Default is everything `core`. The only native runtime override currently wired
+through this declaration is DRM:
+
+```python
+USES = Capabilities().with_self("drm")     # I fetch my own keys
+```
+
+With `drm="self"`, the engine calls
+`get_keys(playback) -> ["kid:key", ...]` instead of the registered DRM system.
+The `auth`, `catalog`, `tracks` and `naming` fields currently describe ownership
+for diagnostics and for the platform list; they do not select alternate
+hooks. Use `login()`/`auth_status()`, the flow entry points, `Playback`, and
+`save_name()` directly regardless of those fields.
+
+In particular, there is no `get_tracks()` hook. A local `.json` manifest path
+may be supplied as `manifest_url`, because native delivery core can parse that input. The
+`Playback.json_manifest` dictionary field exists in the model but the current
+delivery controller skips it; do not use it for a native service yet.
+
+## Playback and concurrency sessions
+
+Before porting any server-side playback, watch, concurrency, heartbeat or helper
+session, trace the source script's call sites in both WV and PR variants. A response
+field or unused method is not proof that the old flow used that lifecycle.
+
+When it did, keep the transport service-local and put stop/release in an outer
+`finally` around the synchronous `yield ctx.emit(playback)` (or around the whole
+service-owned multi-PSSH key loop when that is where the old script opened it).
+This is what covers manifest errors, licence errors, cancellation and Back/Quit.
+See [playback-lifecycle.md](playback-lifecycle.md) for the current audit matrix,
+the non-session lookalikes and the exact review checklist.
+
+## External helpers
+
+If you need java, node, adb, a certificate or a Python module loaded by path,
+declare it. Do not hardcode a path and crash mid-flow. See
+[external-helpers.md](external-helpers.md).
+
+## Testing a service without the interface
+
+```python
+from unidl.core.flow import AutoPresenter, FlowContext, run_flow
+
+ctx = FlowContext(settings=service.settings)
+emitted = run_flow(
+    service.open_url(ctx, "https://example.com/show/x"),
+    AutoPresenter({"Season": 2}),          # match by ask title
+)
+assert emitted[0].save_name == "Show.S02E01.Pilot"
+```
+
+`AutoPresenter` picks the first enabled choice by default, honours
+`preselected` for multi-picks, and takes overrides keyed by ask title. For an
+`Await`, it calls `poll` once and raises `Back` if the result is still `None`, so
+a headless walk never waits for the full device-code timeout.
+
+## Checklist for a port
+
+- [ ] `ID`, `NAME`, `ALIASES`, `TITLE_RE`, `GEOFENCE`, `MEDIA_TYPES`
+      (`("video",)` by default; use `("audio",)` for audio-only services and
+      `("audio", "video")` when the platform offers both). The home screen's
+      country view uses the first `GEOFENCE` code as the primary market and puts
+      an empty declaration under International; its type view keeps audio/video
+      platforms in a separate combined group.
+- [ ] `SUPPORTS_*` flags match the methods you implemented
+- [ ] `DRM_SYSTEMS` names only systems the service really supports
+- [ ] API client in `api.py`, no printing
+- [ ] `auth_status()` is cheap and offline
+- [ ] token file names match; external legacy state is explicitly validated/copied once when the login must carry over
+- [ ] settings declared, not hardcoded constants
+- [ ] credentials read from slots, never hardcoded
+- [ ] `Playback` has `save_name` from `self.save_name(title)`
+- [ ] `DrmInfo` filled; CDM not called directly
+- [ ] old WV/PR playback-session call sites audited; no lifecycle inferred from names alone
+- [ ] start/heartbeat/stop stays service-local and cleanup runs in an outer `finally`
+- [ ] success, manifest/licence failure, cancellation and Back/Quit cleanup counts tested
+- [ ] paging choices use `navigates=True`
+- [ ] helpers declared if any external tool is used
+- [ ] verified against the live service, not just imported

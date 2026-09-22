@@ -562,6 +562,11 @@ class SessionController:
         #: put two workers through the same Engine and queue.
         self._retry_pending = False
         self.finished = False
+        #: True when this controller was opened from the export picker. Import
+        #: navigation has a title-selection page above the session, so Back must
+        #: return there in one step instead of exposing the service's ordinary
+        #: root and flow menus.
+        self.import_session = False
         #: Set when Back is pressed on the service's root menu.  A root Back is
         #: the one navigation action that should finish the whole service session;
         #: result/download pages deliberately use one-level popping instead.
@@ -738,6 +743,20 @@ class SessionController:
         by :meth:`_drive` on the UI thread.
         """
         self.root_back_requested = True
+
+    def return_to_import(self) -> bool:
+        """Stop this import session and reveal its export title picker.
+
+        The picker is already below ``root``/``flow_screen``/``delivery`` in the
+        Textual stack.  Pop only those screens; the export list (or the main import
+        screen for a one-title file) remains mounted underneath.  This is called
+        on the UI thread by :class:`AskHost` after it has released any pending ask.
+        """
+        if not self.import_session:
+            return False
+        self.abort()
+        self.leave_service()
+        return True
 
     def _shutdown_active_download(self) -> None:
         """Close the native downloader's sockets/processes, if one is active."""
@@ -1265,8 +1284,8 @@ class SessionController:
         step that set it.
 
         Cleared here rather than by whoever set it, because most of what sets it is
-        service code: many services call ``ctx.status`` before a request and none
-        of them can be expected to take it down again on every path out,
+        service code: a hundred-odd services call ``ctx.status`` before a request
+        and none of them can be expected to take it down again on every path out,
         including the ones that raise. A live channel that failed to resolve is the
         case that showed it - "Resolving <channel> (widevine)" sat on the service
         menu for the rest of the session, with the menu itself proving nothing was
@@ -1600,9 +1619,12 @@ class SessionController:
         document = extras.pop("initial_import", None)
 
         if document is not None:
-            # An export is already an explicit batch. Seed the expected count
-            # before the first playback so queue completion cannot unwind replay
-            # after only the first title.
+            # An export is already an explicit batch.  Unlike a service flow,
+            # it does not call ``begin_batch``/``hint_batch`` before emitting,
+            # so seed the expected count before the first playback reaches
+            # ``deliver``.  Leaving this unset makes ``queue_complete`` treat
+            # the first completed entry as the end of the run and ``Back``
+            # unwinds ``_replay`` before the remaining entries are delivered.
             self.batch_total = len(document.entries)
             flow = self._replay(ctx, document)
         elif target:
@@ -1694,7 +1716,7 @@ class SessionController:
                 ctx.log(f"exported as: {entry.summary}")
             playback = entry.playback()
             # Use the installed service's canonical namespace for output paths,
-            # settings and any artefacts written during import. The document may
+            # settings and any artefacts written during import.  The document may
             # legitimately carry an older ID which was needed only to find this
             # service (for example Peacock's former ``pcock`` namespace).
             playback.title.service = str(
@@ -1713,7 +1735,7 @@ class SessionController:
         and where finishing one download tore all four screens down - while the
         very same title picked from the menu left you on the menu. Running the
         link first and then handing over to ``home`` gives all three entry points
-        the same navigation, without requiring every service to know about it.
+        the same navigation, and does not ask 150 services to know about it.
         """
         try:
             yield from entry(ctx, argument)
@@ -2123,7 +2145,7 @@ class SessionController:
             elif playback.drm is not None and (playback.drm.context.get("apple_music") or {}).get(
                 "foothill_context_keys"
             ):
-                self.post_field("key", "Audio helper ready", "ok")
+                self.post_field("key", "Apple Music FootHill ready", "ok")
             elif playback.drm is not None and playback.drm.needs_license:
                 self.post_field("key", "unavailable", "error")
             elif playback.display_keys:
@@ -2157,6 +2179,8 @@ class SessionController:
                 self.post_log("skipped", "warning")
                 return SKIPPED, "tracks not chosen"
             tracks.selected = chosen
+            if self.engine.hybrid_enabled(self.settings, playback=playback, tracks=tracks):
+                tracks.selected = self.engine.ensure_hybrid_tracks(tracks, tracks.selected)
         elif interactive:
             # said out loud, because the setting was asked for and is not being
             # obeyed here, and silence would look like it had been forgotten
@@ -2165,6 +2189,8 @@ class SessionController:
                 "command carries the automatic selection. Edit it there, or pick "
                 "'download the file' to choose tracks yourself."
             )
+
+        self._report_hybrid_choice(playback, tracks)
 
         if not tracks.selected:
             self.post_log("nothing selected", "warning")
@@ -2222,10 +2248,13 @@ class SessionController:
                         self.post_log("skipped", "warning")
                         return SKIPPED, "tracks not chosen"
                     tracks.selected = chosen
+                    if self.engine.hybrid_enabled(self.settings, playback=playback, tracks=tracks):
+                        tracks.selected = self.engine.ensure_hybrid_tracks(tracks, tracks.selected)
                     if not tracks.selected:
                         self.post_log("nothing selected", "warning")
                         return SKIPPED, "no tracks selected"
                     self.post_log(f"tracks: {tracks.summary()}")
+                    self._report_hybrid_choice(playback, tracks)
                     if defer_license:
                         # The selected-only compatibility path may already have
                         # populated keys for the old selection.  Remove them before
@@ -2601,7 +2630,7 @@ class SessionController:
         return mode
 
     def _name_release(self, playback: Playback, tracks: TrackSet) -> None:
-        """Add the release half to the save name: ``.1080p.SERVICE.WEB-DL.DV-TAG``.
+        """Add the release half to the save name: ``.1080p.DSNP.WEB-DL.DV-TAG``.
 
         The queue row is renamed with it, so the row, the log, the command file and
         the file on disk are all one string rather than four nearly-identical ones.
@@ -2626,6 +2655,28 @@ class SessionController:
             self.render_queue()
 
     # UI-thread helpers used by _process ------------------------------------
+    def _report_hybrid_choice(self, playback: Playback, tracks: TrackSet) -> None:
+        """Explain why Hybrid did or did not add an ingredient track."""
+        if not bool(self.settings.get("dolby_vision_hybrid", False)):
+            return
+        if playback.is_live:
+            self.post_log(tr("hybrid.live_disabled", default="Hybrid disabled for live/replay streams."), "warning")
+            return
+        videos = [stream for stream in tracks.selected if stream.media_type == "video"]
+        ranges = {str(stream.video_range or "").upper() for stream in videos}
+        if not videos:
+            self.post_log(tr("hybrid.no_video", default="Hybrid not applied: no video track was selected."), "warning")
+        elif ranges and ranges <= {"SDR", "UNKNOWN", ""}:
+            self.post_log(tr("hybrid.sdr_only", default="Hybrid not applied: the selected video is SDR; choose a DV and HDR10/HDR10+ pair."), "warning")
+        elif not ranges & {"DV", "DOLBY VISION", "DOVI"}:
+            self.post_log(tr("hybrid.no_dv", default="Hybrid not applied: no Dolby Vision video track was selected."), "warning")
+        elif not ranges & {"HDR10", "HDR10+", "HDR"}:
+            self.post_log(tr("hybrid.no_hdr", default="Hybrid not applied: select an HDR10/HDR10+ base video together with Dolby Vision."), "warning")
+        elif len(videos) < 2:
+            self.post_log(tr("hybrid.need_two", default="Hybrid needs both a DV layer and an HDR10/HDR10+ base; the selected video is kept unchanged."), "warning")
+        else:
+            self.post_log(tr("hybrid.staged", default="Hybrid staged: the lowest-resolution DV layer will be combined with the selected HDR10/HDR10+ base after download."), "ok")
+
     async def _open_delivery(self, playback: Playback, tracks: TrackSet) -> None:
         """Bring UniDL's screen up, just before it has something to show."""
         screen = await self.delivery_screen()

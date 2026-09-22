@@ -701,6 +701,10 @@ def _key_id_from_hls_key_uri(uri: str) -> str | None:
         return None
     parsed = urlparse(uri)
     if parsed.scheme.lower() == "skd":
+        if parsed.netloc == "itunes.apple.com" and not parsed.query and not parsed.fragment:
+            identity = re.fullmatch(r"/p([0-9]{1,20})/c([0-6])", parsed.path)
+            if identity and int(identity[1]) < 1 << 64:
+                return (int(identity[1]).to_bytes(8, "big") + f"c{identity[2]}".encode().ljust(8, b" ")).hex()
         return _clean_key_id(parsed.netloc) or _clean_key_id(parsed.path.strip("/"))
     return None
 
@@ -728,9 +732,17 @@ def _apply_key_to_trailing_maps(
     key_uri: str | None,
     key_iv: bytes | None,
 ) -> None:
+    # CMAF sample-encryption metadata may be declared after its MAP. Preserve
+    # that compatibility, but never retroactively apply whole-segment AES:
+    # a MAP uses the KEY in effect where it appears, not the next media KEY.
+    sample_schemes = {"SAMPLE-AES", "SAMPLE-AES-CTR", "CBCS", "CENC"}
+    if key_scheme not in sample_schemes:
+        return
     for segment in reversed(segments):
         if segment.index != -1:
             break
+        if segment.encryption_scheme and segment.encryption_scheme not in sample_schemes:
+            continue
         segment.encrypted = segment.encrypted or key_scheme is not None or key_id is not None
         if key_scheme and (
             not segment.encryption_scheme
@@ -840,7 +852,7 @@ def _infer_media_type_from_segments(segments: list[SegmentInfo]) -> str:
 
 def _infer_type_from_extension(url: str) -> str:
     ext = (_extension_from_segment(url) or "").lower()
-    if ext in {"mp3", "m4a", "aac", "flac", "wav"}:
+    if ext in {"mp3", "m4a", "aac", "ac3", "ec3", "eac3", "flac", "wav"}:
         return "audio"
     if ext in {"vtt", "srt", "ttml", "dfxp"}:
         return "subtitle"

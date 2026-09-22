@@ -26,6 +26,7 @@ from .titles import Title, TitleKind
 UNSHACKLE_V2 = "unshackle-v2"
 UNSHACKLE_LEGACY_TRACKS = "unshackle-legacy-tracks"
 UNSHACKLE_LEGACY_SERIES = "unshackle-legacy-series"
+MEDIAEXPORT = "mediaexport"
 
 _HEX_128 = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 _MANIFEST_SUFFIXES = {
@@ -62,6 +63,8 @@ def load(raw: Mapping[str, Any]):
     """Recognize and convert one supported non-UniDL export document."""
     from .exports import ExportError
 
+    if _looks_like_mediaexport(raw):
+        return _load_mediaexport(raw)
     if _looks_like_unshackle_v2(raw):
         return _load_unshackle_v2(raw)
     if _looks_like_unshackle_legacy_series(raw):
@@ -71,9 +74,260 @@ def load(raw: Mapping[str, Any]):
     version = raw.get("version") if isinstance(raw, Mapping) else None
     raise ExportError(
         "not a supported export"
-        " (third-party readers: Unshackle v2 and legacy track/series exports; "
+        " (third-party readers: mediaexport, Unshackle v2 and legacy track/series exports; "
         f"document version: {version!r})"
     )
+
+
+def _looks_like_mediaexport(raw: Mapping[str, Any]) -> bool:
+    return raw.get("kind") == "mediaexport"
+
+
+def _load_mediaexport(raw: Mapping[str, Any]):
+    """Read the shared mediaexport v1 shape into the inert UniDL model.
+
+    This adapter deliberately consumes only settled shared fields. In particular,
+    it does not interpret HLS AES URI records or frozen ``segments`` inventories
+    until their cross-tool download semantics are finalized.
+    """
+    from .exports import Document, ExportError
+
+    version = raw.get("version")
+    if type(version) is not int or version < 1:
+        raise ExportError(f"mediaexport version must be an integer, got {version!r}")
+    if version > 1:
+        raise ExportError(f"mediaexport version {version} is newer than this build (1)")
+    service = raw.get("service")
+    if not isinstance(service, Mapping) or not str(service.get("tag") or "").strip():
+        raise ExportError("mediaexport does not say which service it came from")
+    titles = raw.get("titles")
+    if not isinstance(titles, list) or not titles:
+        raise ExportError("mediaexport has no titles in it")
+
+    entries = []
+    seen_ids: set[str] = set()
+    for position, title in enumerate(titles, start=1):
+        if not isinstance(title, Mapping):
+            raise ExportError(f"mediaexport title {position} is not an object")
+        entry = _mediaexport_entry(title, position=position)
+        if entry.title is not None and entry.title.id in seen_ids:
+            raise ExportError(f"mediaexport contains duplicate title id {entry.title.id!r}")
+        seen_ids.add(entry.title.id if entry.title is not None else entry.save_name)
+        entries.append(entry)
+    return Document(
+        service=str(service.get("tag")).strip(),
+        service_name=str(service.get("name") or service.get("tag")).strip(),
+        app=str((raw.get("generator") or {}).get("app") or "mediaexport"),
+        created=str(raw.get("created") or ""),
+        entries=entries,
+        source_format=MEDIAEXPORT,
+    )
+
+
+def _mediaexport_entry(title: Mapping[str, Any], *, position: int):
+    from .exports import Entry, ExportError
+
+    title_id = str(title.get("id") or f"title-{position}").strip()
+    critical = title.get("crit")
+    if critical is not None:
+        if not isinstance(critical, list) or not critical or any(not isinstance(item, str) or not item for item in critical):
+            raise ExportError(f"mediaexport title {title_id!r} has invalid crit")
+        if len(set(critical)) != len(critical):
+            raise ExportError(f"mediaexport title {title_id!r} repeats a crit field")
+        # UniDL currently implements only the settled base fields. A critical
+        # extension is a hard refusal; never fall back to a normal manifest and
+        # risk silently downloading the wrong source.
+        unsupported = list(critical)
+        if unsupported:
+            raise ExportError(
+                f"mediaexport title {title_id!r} requires unsupported field {unsupported[0]!r}"
+            )
+    kind = str(title.get("kind") or "movie").strip().casefold()
+    if kind not in {"movie", "episode", "song", "clip"}:
+        kind = "movie"
+    title_kind = {"song": TitleKind.TRACK, "clip": TitleKind.CLIP}.get(kind)
+    if title_kind is None:
+        title_kind = TitleKind(kind)
+    name = str(title.get("title") or "").strip()
+    if not name:
+        raise ExportError(f"mediaexport title {title_id!r} has no title")
+
+    manifests: list[Mapping[str, Any]] = []
+    raw_manifests = title.get("manifests") or []
+    if not isinstance(raw_manifests, list):
+        raise ExportError(f"mediaexport title {title_id!r} manifests must be a list")
+    for manifest in raw_manifests:
+        if not isinstance(manifest, Mapping) or not str(manifest.get("url") or "").strip():
+            continue
+        manifests.append(manifest)
+
+    tracks = title.get("tracks") or []
+    if not isinstance(tracks, list):
+        raise ExportError(f"mediaexport title {title_id!r} tracks must be a list")
+    # A row with a URL is executable only when its type is a side-load. Rows
+    # without a URL remain informational and are intentionally not fabricated
+    # into a source URL.
+    track_docs: list[dict[str, Any]] = []
+    for index, row in enumerate(tracks, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        url = _url(row.get("url"))
+        if not url:
+            continue
+        media_type = str(row.get("type") or "").strip().casefold()
+        if media_type not in {"video", "audio", "subtitle"}:
+            continue
+        document = dict(row)
+        document.update(
+            id=str(row.get("id") or f"track-{index}"),
+            type=media_type,
+            url=url,
+            descriptor=_manifest_type(row.get("descriptor"), url),
+        )
+        track_docs.append(document)
+
+    primary = next(
+        (m for m in manifests if str(m.get("role") or "").casefold() == "primary"),
+        next((m for m in manifests if str(m.get("role") or "").casefold() != "extra"), None),
+    )
+    manifest_urls = [str(m["url"]).strip() for m in manifests]
+    if primary is not None:
+        primary_url = str(primary["url"]).strip()
+        alternates = tuple(url for url in manifest_urls if url != primary_url)
+    else:
+        primary_url = ""
+        alternates = ()
+
+    # If there is no manifest, direct side-load rows are still a valid title.
+    json_manifest = _json_manifest(
+        Title(
+            id=title_id,
+            kind=title_kind,
+            name=name,
+            service="third-party",
+        ),
+        track_docs,
+    ) if track_docs else None
+    if not primary_url and json_manifest is None:
+        raise ExportError(f"mediaexport title {title_id!r} has no downloadable manifest or track URL")
+
+    # A side-loaded row needs the JSON variant alongside the primary manifest.
+    # Let Engine merge the inert JSON source with every authorized manifest;
+    # ordinary manifest-only exports keep their fast primary path.
+    json_plus_manifests = bool(json_manifest and primary_url)
+    effective_primary_url = "" if json_plus_manifests else primary_url
+    effective_alternates = tuple(manifest_urls) if json_plus_manifests else alternates
+
+    key_pairs = _mediaexport_keys(title.get("keys"), title_id=title_id)
+    drm_system, pssh, wrm_header, protected = _mediaexport_drm(title.get("drm"), title_id=title_id)
+    if protected and not key_pairs:
+        note = "protected tracks contain no exported content key"
+    else:
+        note = ""
+    note_parts = ["third-party export · generic downloader · no service login or licence"]
+    if note:
+        note_parts.append(note)
+    return Entry(
+        save_name=str(title.get("release_name") or name),
+        title=Title(
+            id=title_id,
+            kind=title_kind,
+            name=str(title.get("series") or name) if kind == "episode" else name,
+            episode_name=name if kind == "episode" else None,
+            season=_optional_int(title.get("season")),
+            episode=_optional_int(title.get("episode")),
+            year=_optional_text(title.get("year")),
+            language=_optional_text(title.get("language")),
+            service="third-party",
+        ),
+        manifest_url=effective_primary_url,
+        alternate_manifest_urls=effective_alternates,
+        merge_manifests=len(manifest_urls) > 1,
+        json_manifest=json_manifest,
+        headers=_mediaexport_headers(primary),
+        note=" · ".join(note_parts),
+        drm_system=drm_system,
+        pssh=pssh,
+        wrm_header=wrm_header,
+        keys=key_pairs,
+        chapters=_mediaexport_chapters(title.get("chapters"), title_id=title_id),
+        summary=f"mediaexport · {len(tracks)} exported track(s) · {len(key_pairs)} content key(s)",
+    )
+
+
+def _mediaexport_headers(manifest: Mapping[str, Any] | None) -> dict[str, str]:
+    raw = manifest.get("headers") if manifest else {}
+    if not isinstance(raw, Mapping):
+        return {}
+    forbidden = {"cookie", "authorization"}
+    return {
+        str(key): str(value)
+        for key, value in raw.items()
+        if value is not None and str(key).casefold() not in forbidden
+    }
+
+
+def _mediaexport_keys(value: Any, *, title_id: str) -> list[str]:
+    from .exports import ExportError
+
+    if value in (None, {}):
+        return []
+    if not isinstance(value, Mapping):
+        raise ExportError(f"mediaexport title {title_id!r} keys must be an object")
+    found: dict[str, str] = {}
+    for raw_kid, raw_key in value.items():
+        if not raw_kid or not raw_key:
+            continue
+        kid = _kid(raw_kid)
+        key = str(raw_key).strip().casefold().replace("-", "")
+        if not _HEX_128.fullmatch(key):
+            raise ExportError(f"mediaexport title {title_id!r} has an invalid content key")
+        previous = found.get(kid)
+        if previous is not None and previous != key:
+            raise ExportError(f"mediaexport title {title_id!r} contains conflicting keys for KID {kid}")
+        found.setdefault(kid, key)
+    return [f"{kid}:{key}" for kid, key in found.items()]
+
+
+def _mediaexport_drm(value: Any, *, title_id: str) -> tuple[str, str, str, bool]:
+    from .exports import ExportError
+
+    if value in (None, []):
+        return "", "", "", False
+    if not isinstance(value, list):
+        raise ExportError(f"mediaexport title {title_id!r} drm must be a list")
+    systems: list[str] = []
+    pssh = ""
+    wrm_header = ""
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        system = str(item.get("system") or "").strip().casefold()
+        if system and system not in systems:
+            systems.append(system)
+        if not pssh and item.get("pssh"):
+            pssh = str(item["pssh"])
+        if not wrm_header and item.get("wrm_header"):
+            wrm_header = str(item["wrm_header"])
+    return (systems[0] if systems else "", pssh, wrm_header, bool(value))
+
+
+def _mediaexport_chapters(value: Any, *, title_id: str) -> list[Chapter]:
+    from .exports import ExportError
+
+    if value in (None, []):
+        return []
+    if not isinstance(value, list):
+        raise ExportError(f"mediaexport title {title_id!r} chapters must be a list")
+    chapters: list[Chapter] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, Mapping):
+            raise ExportError(f"mediaexport title {title_id!r} chapter {index} is invalid")
+        try:
+            chapters.append(Chapter.from_document(item))
+        except (TypeError, ValueError) as exc:
+            raise ExportError(f"mediaexport title {title_id!r} chapter {index} is invalid ({exc})") from exc
+    return chapters
 
 
 def _looks_like_unshackle_v2(raw: Mapping[str, Any]) -> bool:

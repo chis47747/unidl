@@ -1,10 +1,13 @@
 """Turning service ids into brand names.
 
-A service id is a Python package name, which is fine for a directory and wrong
-for a menu. The main screen shows display brands instead.
+A service id is a Python package name - ``bbc``, ``10play``, ``mediaset_es`` -
+which is fine for a directory and wrong for a menu. The main screen shows
+platforms, so it shows brands.
 
-An explicit table beats a clever rule here. The fallback covers anything added
-later, and a new service can be given its preferred spelling by adding one row.
+An explicit table beats a clever rule here: no heuristic gets ``bbc`` to ``BBC``
+and ``binge`` to ``Binge`` and ``mytvsuper`` to ``myTV SUPER``. The fallback
+covers anything added later, and a new service listed as ``Newthing`` instead of
+``newthing`` is enough until someone adds a row.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ BRANDS: dict[str, str] = {
     "apple": "Apple TV",
     "appletv": "Apple TV",
     "ard": "ARD",
+    "arte": "ARTE",
     "atresplayer": "Atresplayer",
     "bbc": "BBC iPlayer",
+    "bahamut": "巴哈姆特動畫瘋",
     "bilibili": "哔哩哔哩",
     "binge": "Binge",
     "britbox": "BritBox",
@@ -35,6 +40,7 @@ BRANDS: dict[str, str] = {
     "catchplay": "CatchPlay+",
     "cbc": "CBC Gem",
     "cbcgem": "CBC Gem",
+    "cda": "CDA",
     "channel4": "Channel 4",
     "channel5": "Channel 5",
     "citytv": "Citytv+",
@@ -61,6 +67,7 @@ BRANDS: dict[str, str] = {
     "gagaoolala": "GagaOOLala",
     "globaltv": "Global TV",
     "globoplay": "Globoplay",
+    "goplay": "Play (Belgium)",
     "gothamsports": "Gotham Sports",
     "hallmark": "Hallmark+",
     "hamivideo": "Hami Video",
@@ -142,20 +149,22 @@ BRANDS: dict[str, str] = {
     "tennistv": "Tennis TV",
     "tf1": "TF1+",
     "threenow": "ThreeNow",
-    # This tag is shared by multiple related catalogue endpoints; keep the
-    # display spelling explicit rather than relying on acronym heuristics.
+    # Turner's US network - tntdrama.com - which the tnt script covers along with
+    # TBS and truTV. Not Discovery's TNT Sports.
     "tnt": "TNT",
     "tod": "TOD",
     "tsn": "TSN",
     "tubi": "Tubi",
+    "tv1001": "1001 TV",
     "tv2play": "TV 2 Play",
     "tv2playno": "TV 2 Play Norway",
     "tv4play": "TV4 Play",
     "tva": "TVA+",
     "tvbanywhere": "TVB Anywhere",
     "tvnz": "TVNZ+",
+    "tvp": "TVP VOD",
     "tvplus": "TV+",
-    "tvingw": "TVING",
+    "tving": "TVING",
     # UKTV's service, renamed from UKTV Play to just "U". Not Bell's U.
     "u": "U (UKTV)",
     "ufc": "UFC Fight Pass",
@@ -168,6 +177,8 @@ BRANDS: dict[str, str] = {
     "viju": "viju",
     "viu": "Viu",
     "vix": "ViX",
+    "streamz": "Streamz",
+    "vtmgo": "VTM GO",
     "vudu": "Vudu",
     "waipu": "waipu.tv",
     "watcha": "Watcha",
@@ -175,6 +186,7 @@ BRANDS: dict[str, str] = {
     "wavve": "Wavve",
     "xfinity": "Xfinity Stream",
     "yes": "YES",
+    "yestv": "YES TV",
     "youku": "优酷",
     "youtube": "YouTube",
     "ytv": "YTV",
@@ -183,8 +195,10 @@ BRANDS: dict[str, str] = {
 
 #: file stem -> the short service tag unshackle uses.
 #:
-#: A short uppercase tag is used in file names and shared commands rather than
-#: the full display brand. Keeping the tag table explicit makes imports stable.
+#: unshackle names a service by a short uppercase tag rather than by its brand -
+#: `DSNP`, `AMZN`, `PMPT` - and those tags turn up in file names, in shared
+#: commands and in conversation. Keeping the same ones means a name you already
+#: know still works here, and a tag written by one tool is readable by the other.
 #:
 #: Anything absent gets a derived tag (see :func:`service_tag`), which is
 #: predictable but not authoritative; add a row when the real one is known.
@@ -201,8 +215,10 @@ TAGS: dict[str, str] = {
     "amc": "AMCP",
     "apple": "ATV",
     "appletv": "ATV",
+    "arte": "ARTE",
     "atresplayer": "ATRP",
     "bbc": "iP",
+    "bahamut": "BAHA",
     "bilibili": "BILI",
     "bbcsounds": "SNDS",
     "binge": "BNGE",
@@ -215,6 +231,7 @@ TAGS: dict[str, str] = {
     "myvideo": "MYVD",
     "cbc": "GEM",
     "cbcgem": "GEM",
+    "cda": "CDA",
     "channel4": "ALL4",
     "channel5": "MY5",
     "citytv": "CTV+",
@@ -237,6 +254,7 @@ TAGS: dict[str, str] = {
     "frndlytv": "FRND",
     "fubo": "FUBO",
     "globoplay": "GLBO",
+    "goplay": "GOPLAY",
     "hallmark": "HLMK",
     "hoopla": "HOOP",
     "hulu": "HULU",
@@ -297,10 +315,12 @@ TAGS: dict[str, str] = {
     "threenow": "3NOW",
     "tnt": "TNT",
     "tubi": "TUBI",
+    "tv1001": "1001",
     "tv2play": "TV2",
     "tv4play": "TV4",
     "tvnz": "TVNZ",
-    "tvingw": "TVING",
+    "tvp": "TVP",
+    "tving": "TVING",
     "u": "UKTV",
     "unext": "UNXT",
     "usa": "USA",
@@ -311,12 +331,15 @@ TAGS: dict[str, str] = {
     "viju": "VIJU",
     "viu": "VIU",
     "vix": "VIX",
+    "streamz": "STMZ",
+    "vtmgo": "VTMGO",
     "waipu": "WAIP",
     # both would derive to WATC
     "watcha": "WTCA",
     "watchit": "WTIT",
     "wavve": "WAVE",
     "xfinity": "XFIN",
+    "yestv": "YESTV",
     "youku": "YK",
     "youtube": "YT",
     "zdf": "ZDF",
@@ -327,7 +350,7 @@ KNOWN_ACRONYMS = {
     "abc", "amc", "ard", "bbc", "cbc", "cbs", "cnn", "cw", "dstv", "espn",
     "fox", "hbo", "itv", "mgm", "mlb", "nba", "nbc", "nfl", "nhl", "npo",
     "orf", "pbs", "rte", "rtl", "sbs", "stv", "tf1", "tnt", "tod", "tsn",
-    "tva", "tvb", "ufc", "usa", "vod", "yes", "zdf",
+    "tva", "tvb", "tvp", "ufc", "usa", "vod", "yes", "zdf",
 }
 
 
@@ -353,8 +376,8 @@ def pretty_platform(raw: str) -> str:
 def service_tag(raw: str) -> str:
     """The short service tag for a stem, from the table or derived from it.
 
-    >>> service_tag("example")
-    'EXAM'
+    >>> service_tag("paramountplus")
+    'PMPT'
     >>> service_tag("somethingnew")
     'SOME'
 

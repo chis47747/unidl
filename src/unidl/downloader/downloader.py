@@ -27,15 +27,9 @@ from .embedding import (
     managed_run,
 )
 from .http_client import HttpClientError, get_global_http_client, http2_download_to_file, httpx_http2_available
-from .live_rules import (
-    is_yangshipin_catchup_cdn_url,
-    should_prefer_yangshipin_catchup_curl,
-    yangshipin_catchup_parallelism,
-)
 from .loader import DEFAULT_USER_AGENT
 from .models import SegmentInfo, StreamInfo
 from .postprocess import split_fragmented_mp4_init_media
-from .qobuz import decrypt_qobuz_file, decrypt_qobuz_segment
 from .sabr_ump import (
     SabrUmpError,
     download_sabr_ump_dvr_stream,
@@ -44,7 +38,6 @@ from .sabr_ump import (
     probe_sabr_ump_dvr_sequence_window,
 )
 from .utils import is_url, source_path, unique_path
-from .youku import YoukuTsError, decrypt_youku_segment
 
 KNOWN_OUTPUT_SUFFIXES = {
     ".aac",
@@ -71,9 +64,6 @@ _APPLE_HLS_LOW_SPEED_MIN_BYTES = 256 * 1024
 _APPLE_HLS_READ_CHUNK_SIZE = 256 * 1024
 _HEDGED_DOWNLOAD_FACTOR = 3.0
 _HEDGED_DOWNLOAD_MIN_WAIT = 5.0
-_YANGSHIPIN_CATCHUP_RESUME_ATTEMPTS = 64
-_YANGSHIPIN_CATCHUP_STALLED_ATTEMPTS = 8
-_YANGSHIPIN_CATCHUP_PROGRESS_RETRY_DELAY = 0.15
 
 _VOLATILE_RESUME_QUERY_KEYS = {
     "accesskey",
@@ -182,7 +172,7 @@ _HLS_KEY_LOCK = threading.Lock()
 _ALLOW_INSECURE_LOCALHOST_HLS_KEYS = False
 _DVR_SEQUENCE_WINDOW_CACHE: dict[tuple[str, str], tuple[int, int]] = {}
 _DVR_SEQUENCE_WINDOW_LOCK = threading.Lock()
-_HLS_SEGMENT_CIPHER_METHODS = {"AES_128", "AES_128_ECB", "CHACHA20", "YOUKU_ECB"}
+_HLS_SEGMENT_CIPHER_METHODS = {"AES_128", "AES_128_ECB", "CHACHA20"}
 _HLS_SAMPLE_ENCRYPTION_METHODS = {"CENC", "CBCS", "SAMPLE_AES", "SAMPLE_AES_CENC", "SAMPLE_AES_CTR", "BBTS"}
 # Tencent TV HLS-ENC restarts the original 8-byte-nonce ChaCha20 state at each
 # 1024-byte transport chunk. It is not one continuous stream over the whole
@@ -487,12 +477,7 @@ def download_stream(
     if total_bytes is None and len(urls) == 1 and stream.size_bytes:
         total_bytes = stream.size_bytes
     limiter = RateLimiter(max_speed) if max_speed else None
-    qobuz_frame_key = _qobuz_frame_key(stream)
-    if qobuz_frame_key and not assemble_output:
-        raise DownloadError("Qobuz frame decryption requires assembled output", url=stream.url)
-    if qobuz_frame_key:
-        downloader = "python"
-    elif downloader == "auto":
+    if downloader == "auto":
         downloader = "python"
     prefer_curl = _should_prefer_curl(stream)
     if host_limiter is None:
@@ -548,8 +533,6 @@ def download_stream(
             progress_bytes=progress_bytes,
             host_limiter=host_limiter,
         )
-        if qobuz_frame_key and urls[0].index != -1:
-            decrypt_qobuz_file(output_path, qobuz_frame_key)
         final_size = output_path.stat().st_size if output_path.exists() else size
         _emit_progress(progress, stream, 1, 1, final_size, final_size, start, done=True)
         return DownloadResult(stream=stream, path=output_path)
@@ -593,7 +576,7 @@ def download_stream(
                 _emit_progress(progress, stream, completed, len(urls), downloaded_bytes, total_bytes, start)
             if assemble_output:
                 with output_path.open("wb") as output:
-                    _copy_stream_part_to_output(part_paths[0], output, qobuz_frame_key, urls[0])
+                    _copy_stream_part_to_output(part_paths[0], output)
                 final_size = output_path.stat().st_size
             else:
                 final_size = _downloaded_part_paths_size(part_paths)
@@ -728,8 +711,8 @@ def download_stream(
             urls = _segment_urls(stream)
         if assemble_output:
             with output_path.open("wb") as output:
-                for part_path, segment in zip(part_paths, urls, strict=False):
-                    _copy_stream_part_to_output(part_path, output, qobuz_frame_key, segment)
+                for part_path, _segment in zip(part_paths, urls, strict=False):
+                    _copy_stream_part_to_output(part_path, output)
             sections = _write_section_outputs(output_path, part_paths, urls)
             final_size = output_path.stat().st_size
         else:
@@ -749,24 +732,11 @@ def _segment_urls(stream: StreamInfo) -> list[SegmentInfo]:
     return [SegmentInfo(url=stream.url, duration=stream.duration, index=0)]
 
 
-def _qobuz_frame_key(stream: StreamInfo) -> str:
-    extra = stream.extra if isinstance(stream.extra, dict) else {}
-    raw = extra.get("raw")
-    if not isinstance(raw, dict):
-        return ""
-    return str(raw.get("qobuz_frame_key") or "").strip()
-
-
 def _copy_stream_part_to_output(
     path: Path,
     output,
-    qobuz_frame_key: str = "",
-    segment: SegmentInfo | None = None,
 ) -> None:
-    if not qobuz_frame_key or (segment is not None and segment.index == -1):
-        _copy_file_to_output(path, output)
-        return
-    output.write(decrypt_qobuz_segment(path.read_bytes(), qobuz_frame_key))
+    _copy_file_to_output(path, output)
 
 
 def _downloaded_part_paths_size(part_paths: list[Path]) -> int:
@@ -1055,10 +1025,6 @@ def _initial_host_parallelism(stream: StreamInfo, segments: list[SegmentInfo], w
 
 def _host_parallelism_limits(stream: StreamInfo, segments: list[SegmentInfo], workers: int) -> tuple[int, int]:
     worker_count = max(1, int(workers or 1))
-    if segments:
-        replay_limits = yangshipin_catchup_parallelism(segments[0].url, worker_count)
-        if replay_limits is not None:
-            return replay_limits
     return worker_count, _initial_host_parallelism(stream, segments, worker_count)
 
 
@@ -1701,12 +1667,7 @@ def _segment_may_return_text_url_redirect(segment: SegmentInfo) -> bool:
 
 
 def _should_prefer_curl(stream: StreamInfo) -> bool:
-    candidates = [
-        str(getattr(stream, "url", "") or ""),
-        str(getattr(stream, "original_url", "") or ""),
-        *(str(getattr(segment, "url", "") or "") for segment in getattr(stream, "segments", []) or []),
-    ]
-    return any(should_prefer_yangshipin_catchup_curl(url) for url in candidates)
+    return False
 
 
 def _should_use_aria2c(stream: StreamInfo, segments: list[SegmentInfo], hls_crypto: HlsCrypto | None = None) -> bool:
@@ -2789,29 +2750,13 @@ def _stream_part_to_file(
     last_error: Exception | None = None
     if prefer_curl:
         permit = host_limiter.acquire(segment.url) if host_limiter else None
-        catchup = is_yangshipin_catchup_cdn_url(segment.url)
         try:
             request_headers = _segment_request_headers(segment, base_headers)
-            if catchup:
-                size = _curl_download_yangshipin_catchup_part(
-                    segment,
-                    tmp_out,
-                    headers=request_headers,
-                    retries=retries,
-                    request_timeout=request_timeout,
-                    limiter=limiter,
-                    progress_bytes=progress_bytes,
-                    part_id=part_id,
-                )
-            else:
-                size = _curl_download_to_file(segment, tmp_out, headers=request_headers, retries=retries, request_timeout=request_timeout, limiter=limiter)
+            size = _curl_download_to_file(segment, tmp_out, headers=request_headers, retries=retries, request_timeout=request_timeout, limiter=limiter)
             if not _cached_part_is_complete(tmp_out, size, segment):
                 raise DownloadError(f"Incomplete segment {_segment_label(segment)}: got {size} bytes.", url=segment.url)
             if progress_bytes:
-                if catchup:
-                    progress_bytes.complete_part(part_id)
-                else:
-                    progress_bytes.add(size)
+                progress_bytes.add(size)
             tmp_out.replace(out)
             if permit:
                 permit.success()
@@ -2820,8 +2765,6 @@ def _stream_part_to_file(
             last_error = exc
             if permit:
                 permit.failure(_is_adaptive_retryable_error(exc))
-            if catchup:
-                raise
             try:
                 tmp_out.unlink()
             except OSError:
@@ -3345,7 +3288,6 @@ def _fetch_bytes(
     last_error: Exception | None = None
     if prefer_curl:
         permit = host_limiter.acquire(current_segment.url) if host_limiter else None
-        catchup = is_yangshipin_catchup_cdn_url(current_segment.url)
         try:
             request_headers = _segment_request_headers(current_segment, base_headers)
             data = _curl_fetch_bytes(current_segment, headers=request_headers, retries=retries, request_timeout=request_timeout, limiter=limiter)
@@ -3356,8 +3298,6 @@ def _fetch_bytes(
             last_error = exc
             if permit:
                 permit.failure(_is_adaptive_retryable_error(exc))
-            if catchup:
-                raise
 
     for attempt in range(max(1, retries)):
         while True:
@@ -3510,76 +3450,6 @@ def _curl_download_to_file(
     return size
 
 
-def _curl_download_yangshipin_catchup_part(
-    segment: SegmentInfo,
-    output_path: Path,
-    *,
-    headers: dict[str, str] | None,
-    retries: int,
-    request_timeout: int,
-    limiter: RateLimiter | None,
-    progress_bytes: _PartProgress | None = None,
-    part_id: str | None = None,
-) -> int:
-    """Resume a replay TS part after this CDN closes a partial response."""
-    last_error: DownloadError | None = None
-    attempts = max(_YANGSHIPIN_CATCHUP_RESUME_ATTEMPTS, int(retries or 1))
-    stalled_attempts = 0
-    try:
-        initial_size = output_path.stat().st_size
-    except OSError:
-        initial_size = 0
-    if progress_bytes and initial_size:
-        progress_bytes.add(initial_size, part_id=part_id)
-    for attempt in range(attempts):
-        _runtime_checkpoint()
-        try:
-            before_size = output_path.stat().st_size
-        except OSError:
-            before_size = 0
-        try:
-            resume = not segment.byte_range and output_path.exists() and output_path.stat().st_size > 0
-            size = _curl_download_to_file(
-                segment,
-                output_path,
-                headers=headers,
-                retries=1,
-                request_timeout=request_timeout,
-                limiter=None,
-                resume=resume,
-            )
-            added = max(0, size - before_size)
-            if limiter and added:
-                limiter.consume(added)
-            if progress_bytes and added:
-                progress_bytes.add(added, part_id=part_id)
-            return size
-        except DownloadError as exc:
-            last_error = exc
-            try:
-                after_size = output_path.stat().st_size
-            except OSError:
-                after_size = 0
-            added = max(0, after_size - before_size)
-            if limiter and added:
-                limiter.consume(added)
-            if progress_bytes and added:
-                progress_bytes.add(added, part_id=part_id)
-            stalled_attempts = 0 if added else stalled_attempts + 1
-            if stalled_attempts >= max(
-                _YANGSHIPIN_CATCHUP_STALLED_ATTEMPTS,
-                int(retries or 1),
-            ):
-                break
-            if attempt + 1 < attempts:
-                if added:
-                    delay = _YANGSHIPIN_CATCHUP_PROGRESS_RETRY_DELAY
-                else:
-                    delay = min(1.0, 0.25 * stalled_attempts)
-                _runtime_sleep(delay)
-    raise last_error or DownloadError("Yangshipin catch-up segment download failed.", url=segment.url)
-
-
 def _run_curl(
     segment: SegmentInfo,
     headers: dict[str, str] | None,
@@ -3591,7 +3461,7 @@ def _run_curl(
     executable = shutil.which("curl")
     if not executable:
         raise DownloadError("curl fallback is unavailable.", url=segment.url)
-    catchup = is_yangshipin_catchup_cdn_url(segment.url)
+    catchup = False
     args = [
         executable,
         "-L",
@@ -3680,14 +3550,6 @@ def _apply_hls_crypto(
             return decryptor.decrypt(data, segment)
         except Exception as exc:
             raise DownloadError(f"Service HLS decryption failed: {_error_text(exc)}", url=segment.url) from exc
-    if method == "YOUKU_ECB":
-        key = hls_crypto.key if hls_crypto and hls_crypto.key else None
-        if not key:
-            raise DownloadError("Youku copyrightDRM key was not supplied.", url=segment.url)
-        try:
-            return decrypt_youku_segment(data, key)
-        except YoukuTsError as exc:
-            raise DownloadError(f"Youku copyrightDRM decryption failed: {exc}", url=segment.url) from exc
     if method in {"AES_128", "AES_128_ECB"} and len(data) % 16:
         raise DownloadError(f"HLS AES segment is incomplete or not block aligned ({len(data)} bytes).", url=segment.url)
 

@@ -2,9 +2,10 @@
 
 Two tiers, deliberately kept apart:
 
-* **service settings** - each service's own vocabulary (profiles, regions,
-  markets or other provider selectors). Declared by the service, only meaningful
-  while that service is active, and they usually change *which manifest you get*.
+* **service settings** - each service's own vocabulary (Amazon's
+  ``FHD_H264_CBR_DASH``, BBC's ``4k/1080p/720p``, Paramount's platform+region).
+  Declared by the service, only meaningful while that service is active, and
+  they usually change *which manifest you get*.
 * **track settings** - one shared vocabulary for every service
   (resolution / codec / range / audio / subs). Applied *after* the manifest is
   parsed, against the real ladder.
@@ -552,6 +553,14 @@ def service_license_settings(config: Any = None) -> list[Setting]:
         Setting("license_after_tracks", "License after final track selection", "bool", default=False,
                 inherit_global=True,
                 help="Wait for this service's final tracks, then query/license only their KIDs and PSSH values."),
+        Setting(
+            "dolby_vision_hybrid",
+            "Dolby Vision + HDR10 hybrid output",
+            "bool",
+            default=False,
+            inherit_global=True,
+            help="Combine matching selected DV and HDR10/HDR10+ video tracks with dovi_tool. Empty follows the global setting.",
+        ),
         Setting("local_vault", "Use the local key vault", "bool", default=True, inherit_global=True,
                 help="Allow this service to read local key vaults; acquired keys still use the selected write targets."),
         Setting("remote_vault", "Use remote key vaults", "bool", default=False, inherit_global=True,
@@ -617,6 +626,19 @@ GLOBAL_SETTINGS: list[Setting] = [
             "Global default for services that have not saved their own "
             "licensing policy. When enabled, licensing and vault lookup wait for "
             "the final selected encrypted tracks."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "dolby_vision_hybrid",
+        "Dolby Vision + HDR10 hybrid output",
+        "bool",
+        default=False,
+        help=(
+            "When enabled, a selected Dolby Vision video and its matching HDR10/HDR10+ "
+            "base video are combined with dovi_tool into one DV+HDR10-compatible track. "
+            "Both source tracks must be available; otherwise the ordinary selected track "
+            "is kept. Requires dovi_tool."
         ),
         visible=False,
     ),
@@ -1041,7 +1063,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "text",
         default="",
         help="What goes after the dash at the end of a file name - "
-        "Show.S01E01.1080p.SERVICE.WEB-DL-YOURTAG. Yours to choose, and left off "
+        "Show.S01E01.1080p.DSNP.WEB-DL-YOURTAG. Yours to choose, and left off "
         "entirely when empty. Films and episodes only.",
         visible=False,
     ),

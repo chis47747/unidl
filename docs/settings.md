@@ -20,7 +20,8 @@ single-file service module) into that directory, open **Settings → Services �
 Register a service**, and select it. Registration records the choice and asks
 you to restart UniDL; the restart is required for the package to be imported in
 the new process and for the registration to take effect on the homepage grid or
-global search. Homepage visibility is a separate checkbox list: an unchecked registered service remains available to
+global search. Homepage visibility is
+a separate checkbox list: an unchecked registered service remains available to
 global search but is omitted from the homepage grid.
 
 **Export manifest type** is stored independently in each registered service's
@@ -86,12 +87,13 @@ They act at different moments.
 **Service settings apply before the request** and usually change *which manifest
 you get*. A service may expose one profile or a multi-select when each selected
 profile maps to a verified API request. Core parses those service-authorized
-manifests independently, merges their track ladders and removes exact duplicate
-representations; it never invents profile names or derives URLs from shared track
-preferences. One service may expose named video profiles, another may expose a
-quality ladder or a market selector. None of these vocabularies translate into
-each other, so each service declares its own and they only appear while that
-service is active.
+manifests independently, merges their track ladders and removes duplicate
+representations by their displayed media properties (not by short-lived signed
+URLs or provider-specific representation IDs); it never invents profile names or
+derives URLs from shared track preferences. Amazon has `FHD_H264_CBR_DASH` and `4K_DV_CVBR_DASH`. BBC has
+`auto/4k/1080p/720p`. Xfinity has `sd|hd`. Paramount has platform, region and
+local market. None of these vocabularies translate into each other, so each
+service declares its own and they only appear while that service is active.
 
 **Track settings apply after parsing**, against the real ladder, and are one
 shared vocabulary for every service. `1080` means the same thing everywhere
@@ -109,7 +111,7 @@ These are two different choices and must never be represented by the same settin
    subtitle settings choose representations from the ladder that was actually
    returned. They do not choose another source URL.
 
-For example, a provider may expose `manifest_resolution`, `manifest_codec` and
+For example, Movies Anywhere exposes `manifest_resolution`, `manifest_codec` and
 `manifest_color` for the source manifest. Its shared `video_quality`,
 `video_codec` and `video_range` settings remain available for the final tracks
 inside that manifest. A 4K Dolby Vision source manifest and 1080p SDR output
@@ -126,6 +128,26 @@ reused to choose provider assets.
 
 This is also why neither a service API option nor a command-line default can
 truthfully choose a final bitrate before the returned ladder has been parsed.
+
+Aha always asks its content authorization service for the maximum 4K-capable
+DASH ladder; it has no separate source-resolution setting. That request leaves
+the Widevine security-level capability unspecified, so the selected CDM cannot
+pre-emptively reduce the manifest. Aha may still cap the response according to
+the title and subscription (4K is a Gold feature). The catalogue's `vq=4K`
+marker describes source availability, while the parsed manifest is the
+authority for the resolution actually delivered. After parsing, shared
+`video_quality=best` preselects the highest representation. Set shared
+`track_mode=auto` to accept that selection without opening the track picker;
+the selected CDM is evaluated later, when requesting the Widevine license.
+
+Aha VOD also follows the TV client's stream-concurrency lifecycle. After content
+authorization succeeds, the service opens `user/stream/create` for the stable
+device identity, renews it at the configured interval, and closes it in a
+`finally` block after the delivery finishes or is cancelled. A missing or failed
+initial create stops that delivery; a failed cleanup is reported without hiding
+the download result. Aha's current TV configuration uses a five-minute renewal
+interval. The VOD path uses this stream lease; the separate heartbeat contract
+is for live playback and is not enabled while Aha live content is unavailable.
 
 ## Global
 
@@ -153,6 +175,7 @@ truthfully choose a final bitrate before the returned ladder has been parsed.
 | `vault_write_targets` | multi-select writable vaults | all writable | Global **Store acquired keys** destinations inherited by services until overridden. `no_push` backends are omitted. |
 | `live_record` | on / off | **off** | Compatibility key controlled by **Download behavior**. In the TUI this preselects the record-vs-command question asked after final track selection; headless runs use it directly. A recording then uses the service's `live_record_limit` default unless the user changes it for that run; `00:00:00` means unlimited until stopped. See [live.md](live.md). |
 | `license_after_tracks` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. When enabled, only final selected encrypted tracks' KIDs/PSSH values are resolved; it is not a service API/profile selector. |
+| `dolby_vision_hybrid` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. For VOD only, a selected HDR10/HDR10+ base is combined with the lowest-resolution available DV layer from the same manifest or merged profile ladder using `dovi_tool`. |
 | `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty uses YAML `paths.downloads` when configured, otherwise `~/unidl_downloads`, grouped by service. No YAML editing is required; `~` is expanded and the folder is created if it does not exist. |
 | `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
@@ -258,6 +281,20 @@ With **License after final track selection** enabled, only the final selected
 encrypted tracks contribute KIDs/PSSH values to vault lookup and licensing.
 Unselected manifest renditions are not queried or licensed.
 
+**Dolby Vision hybrid output** is a separate post-download transformation, not a
+manifest profile and not a replacement for final track selection. When enabled,
+Core adds the matching DV/HDR10 ingredient to the selected ladder so both
+ingredients receive normal service-owned licence/vault handling. After both
+decrypted files finish, `ffmpeg`, `dovi_tool` and `mkvmerge` inject the DV RPU
+into the HDR10 base and pass one hybrid video to the final mux. It is disabled
+by default, ignored for live/replay streams, and safely leaves the original
+tracks alone when one layer, compatible frame rate, duration, frame count or
+HEVC data is missing. The DV input is the lowest-resolution available DV layer;
+its resolution need not match the HDR base. `dovi_tool` must be installed and available on `PATH` (or
+selected with `UNIDL_DOVI_TOOL`). The first implementation normalizes the RPU
+with dovi mode 3 and keeps the source frame geometry; it does not invent L5/L6
+crop metadata.
+
 This section is **Track output selection**. Its settings answer which parsed
 tracks native delivery core will download, keep and mux into the result. By
 themselves they are not a licence-track picker and must never silently decide a
@@ -316,13 +353,13 @@ installed engine cannot provide. See [audio.md](audio.md).
 
 ### Do not remove `drop_video` without reading this
 
-Trick-play and thumbnail ladders are video tracks with tall dimensions and can
-beat a normal video when "best" is decided on height. The default regex keeps
-them out of quality selection. Its terms are bounded so an ordinary title is
-not mistaken for a `trick` track. Existing settings containing the original
-`trick|thumbnail|image` default are upgraded at runtime. The native track
-selector keeps these auxiliary representations out of the normal quality
-choice for the same reason.
+Trick-play and thumbnail ladders are video tracks with tall dimensions. A real
+example from Paramount: a `1280x1440` thumbnail track beat the genuine `1920x1080`
+video when "best" was decided on height. The default regex keeps them out of
+quality selection. Its terms are bounded so a normal title such as `Strickland`
+is not mistaken for a `trick` track. Existing settings containing the original
+`trick|thumbnail|image` default are upgraded at runtime. The legacy scripts
+passed `-dv 'trick|thumbnail'` for the same reason.
 
 ## Chapter metadata
 
@@ -364,18 +401,20 @@ other variant's token and cookie untouched and therefore must keep
 that definitively invalidates that selected session) may clear authentication
 state.
 
-Declare as many settings as the service genuinely has. Routing, region,
-provider profile and manifest selectors are all valid service settings, but none
-is a resolution unless the provider explicitly defines it that way. Changing a
-platform/API/region selector must not sign out or delete credentials belonging
-to another variant; leave `resets_session=False`. Account versus device-code
-login is chosen from the service-home `Sign in` action and is not an implicit
-fallback from a settings change.
+Declare as many as the service genuinely has. Paramount declares three
+(`platform`, the unified `region`, and `dma`) and none of them is a resolution.
+Its `platform` and `region` rows are routing/profile selectors; changing them
+must not sign out or delete the token/cookie cache belonging to another
+Paramount+/CBS route. `region` offers `AUTO`, `US`, and the public Paramount+
+international market country codes. The old `region: intl` plus `intl_country`
+configuration is read for compatibility, but the separate country row is no
+longer shown. Account versus TV-provider login is chosen from the service-home
+`Sign in` action and is not a service setting.
 
-A service-level `manifest_profile` chooses the catalogue resource before
-playback authorization; it does not replace or shadow the shared
-`video_quality`, `video_codec` or `video_range` settings used after the returned
-manifest is parsed.
+yes+ declares `manifest_profile` with `hd` and `uhd` values. This chooses the
+yes+ catalogue resource before playback authorization; it does not replace or
+shadow the shared `video_quality`, `video_codec` or `video_range` settings used
+after the returned manifest is parsed.
 
 ## Reading
 

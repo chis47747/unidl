@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import BinaryIO
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from .embedding import current_download_runtime
 
@@ -22,6 +22,23 @@ except Exception:  # pragma: no cover - exercised in minimal dependency envs.
 
 class HttpClientError(RuntimeError):
     pass
+
+
+def _encoded_http_url(url: str) -> str:
+    """Encode raw request-target characters without rewriting signed queries."""
+    # urlsplit silently strips CR/LF/TAB; reject them before parsing instead.
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise HttpClientError("HTTP URL contains a control character")
+    parsed = urlsplit(url)
+    # Preserve delimiters, literal plus signs and existing percent escapes.
+    # parse_qs/urlencode would change duplicate parameters/order and signatures.
+    safe = "/?:@!$&'()*+,;=%[]"
+    return urlunsplit(
+        parsed._replace(
+            path=quote(parsed.path, safe=safe),
+            query=quote(parsed.query, safe=safe),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +138,7 @@ class NativeHttpClient:
         body: bytes | None = None,
     ) -> HttpResponse:
         method = method.upper()
-        current_url = url
+        current_url = _encoded_http_url(url)
         request_headers = dict(headers or {})
         current_body = body
         for _ in range(max(0, max_redirects) + 1):
@@ -138,7 +155,7 @@ class NativeHttpClient:
             response.close()
             if not location:
                 raise HttpClientError(f"Redirect response from {current_url} has no Location header.")
-            current_url = urljoin(current_url, location)
+            current_url = urljoin(current_url, _encoded_http_url(location))
             if response.status == 303:
                 method = "GET"
                 current_body = None
@@ -389,6 +406,7 @@ def http2_download_to_file(
     low_speed_min_bytes: int = 0,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, Http2DownloadResponse]:
+    url = _encoded_http_url(url)
     if _httpx is not None:
         return _httpx_download_to_file(
             url,

@@ -16,7 +16,7 @@ def test_clean_config_is_portable_and_uses_only_project_state(tmp_path, monkeypa
     import unidl
     from unidl.core.config import Config
 
-    assert unidl.__version__ == "2.0.9"
+    assert unidl.__version__ == "2.1.3"
     monkeypatch.chdir(tmp_path)
     config = Config.load(ROOT / "unidl.yaml")
     assert config.paths.home == ROOT
@@ -44,8 +44,8 @@ def test_registers_expected_service_and_drm_systems():
     from unidl import services
     from unidl.core import drm
 
-    assert services.load_all() == 1
-    assert [service.ID for service in services.registry.all()] == ["bbc"]
+    assert services.load_all() == 2
+    assert sorted(service.ID for service in services.registry.all()) == ["bbc", "movistar"]
     assert drm.ids() == ["widevine", "playready", "monalisa"]
 
 

@@ -85,6 +85,9 @@ class AuthStatus:
     label: str = "not signed in"
     detail: str = ""
     anonymous_ok: bool = False
+    #: A stale or anonymous credential can still be explicitly cleared from the
+    #: service menu even when it is not an authenticated session.
+    logout_available: bool = False
 
     @property
     def usable(self) -> bool:
@@ -329,8 +332,8 @@ class Service:
     #: Service ids used before a rename.  They remain lookup aliases and are
     #: consulted only for reading existing state/configuration.
     LEGACY_IDS: tuple[str, ...] = ()
-    #: The short uppercase service tag used in release names. Left empty means
-    #: "derive one", so a service does not have to invent a tag, but
+    #: The short uppercase service tag unshackle uses - PMPT, DSNP, AMZN. Left
+    #: empty means "derive one", so a service does not have to invent a tag, but
     #: setting it explicitly is how the real one gets recorded.
     TAG: str = ""
     ALIASES: tuple[str, ...] = ()
@@ -511,7 +514,7 @@ class Service:
 
         Single-system services have always been pinned to their declared DRM.
         MonaLisa needs the same treatment at playback time for a mixed service:
-        a mixed DRM service can also return Widevine, but a MonaLisa ticket is an unambiguous
+        iQ can also return Widevine, but a MonaLisa ticket is an unambiguous
         request for the local ``.mld`` and must not inherit the app-wide ``.wvd``.
         A device explicitly selected for this playback or this service remains
         authoritative, including when it is the wrong type and needs reporting.
@@ -553,8 +556,8 @@ class Service:
         """The security level of the CDM this service will use - ``L1``, ``SL3000``.
 
         Here rather than in a service because more than one service has to know it
-        *before* asking for a stream: a provider may hand over a manifest for a
-        ladder it will then refuse to licence to a lower-level device, and the
+        *before* asking for a stream: Disney+ and Vudu both hand over a manifest for
+        a ladder they will then refuse to licence to a lower-level device, and the
         refusal names neither the device nor the ladder. Resolved through the same
         call that will pick the device for the licence, so the answer cannot
         disagree with what is used a moment later. Empty when nothing is resolvable,
@@ -938,7 +941,7 @@ class Service:
                 # unlocks the rest of the catalogue.
                 label = "Sign in" if not status.logged_in else "Sign in again"
                 options.append(Choice(label, "login", detail=status.label))
-                if status.logged_in:
+                if status.logged_in or status.logout_available:
                     options.append(Choice("Sign out", "logout", detail=status.label))
             # Only when there is one to delete. The other way to delete it is to
             # edit unidl.yaml, which works and always will - this is here because
@@ -1221,9 +1224,9 @@ class Service:
 
         Most services leave this alone and core reads the manifest. It exists for
         services whose API contract deliberately selects a particular rendition's
-        PSSH independently of the tracks downloaded later. Such a service may
-        use a configured media playlist as the licence seed when its verified
-        response covers the required content keys.
+        PSSH independently of the tracks downloaded later. DIRECTV is the
+        first: its old client used the configured 720p video media playlist as the
+        licence seed, and that one licence returned every content key.
 
         ``tracks`` is Core's encrypted licence inventory: the full parsed ladder
         by default, or the selected encrypted tracks when the user explicitly
@@ -1512,7 +1515,7 @@ class ServiceRegistry:
         """Resolve only a service ID, optionally including declared old IDs.
 
         Portable state uses identifiers rather than human-facing search aliases
-        or tags. Keeping this lookup narrow lets an old export survive a rename
+        or tags.  Keeping this lookup narrow lets an old export survive a rename
         without allowing an arbitrary display alias to stand in for its owner.
         """
         wanted = str(key or "").strip().lower()
@@ -1597,7 +1600,7 @@ class ServiceRegistry:
             settings=settings,
             # A service's own folder under ``paths.tokens``, and nothing else. Its
             # own, because a hundred sessions in one directory is a pile rather than
-            # a layout: "where is my service login" should be answerable by looking,
+            # a layout: "where is my Rakuten login" should be answerable by looking,
             # and a service cannot reach another's state by naming its file. And
             # only that, because ``cache`` is for what unidl can fetch again and
             # nothing outside the project is read at all.

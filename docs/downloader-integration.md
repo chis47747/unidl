@@ -1,114 +1,133 @@
-# Native downloader integration
+# Downloader integration lab
 
-UniDL's downloader is an in-process engine behind the Core delivery contract.
-Services prepare an authorized Playback; Core parses the source, presents track
-selection, resolves keys, downloads segments, decrypts, writes sidecars and
-muxes the final file.
+This checkout is an isolated integration lab.  It does not share a worktree or
+Git branch with either active source checkout.
+
+## Baselines
+
+| component | source checkout | committed baseline | integrated at |
+|-----------|-----------------|--------------------|---------------|
+| UniDL | `/Users/chrischou/unidl` | `511ef6b` (`main`) | repository root |
+| historical downloader baseline | imported into this lab before integration | `c9191d5` (`sabr`) | `src/unidl/downloader` |
+
+Uncommitted files from either source checkout are deliberately absent.  They
+must first be committed in their owning checkout and then be merged or imported
+explicitly.  This prevents the integration work from copying half-written
+service or downloader changes and prevents this lab from writing back to the
+applications currently in use.
+
+## Native package phase
+
+The downloader implementation now lives inside the `unidl` distribution as
+`unidl.downloader`.  A fresh install contains one application and has no
+external downloader dependency, editable checkout, Python import, or downloader
+subprocess. The production session parses and executes through the typed Core
+contract. The same installed `unidl` executable owns the optional native
+`list`/`download` media commands used by exported commands.
+
+No account login, service extraction, CDM, licence transport or key acquisition
+moves into the downloader.  Those remain UniDL responsibilities.  The embedded
+downloader continues to receive manifests, selected tracks and raw keys only.
+
+The native implementation accepts public `DownloadHooks`. Live KID
+rotation is delivered through a typed request to the host; UniDL no longer
+replaces `sys.stdin` or monkey-patches `_prompt_for_live_key`.  Invoking the
+native `unidl download` command without hooks retains its terminal prompt.
+The same hook object reports final media, subtitle and metadata paths after
+cleanup, so the typed backend no longer has to infer successful output names.
+It also publishes normalized VOD/live track progress and accepts an independent
+cancellation predicate.  Native transfer callbacks and live manifest waits
+check that predicate; cancellation no longer depends on stdout being written or
+on the TUI's ANSI screen adapter seeing another frame.
+Panel width is supplied by a context-local callback. Resizing is observed on the
+next render without replacing module globals, changing ``COLUMNS`` or serializing
+otherwise independent downloads behind a global lock.
+When the TUI supplies a progress consumer, it disables the native engine's console
+progress and renders those typed events itself.  The standalone CLI keeps its
+current ANSI progress display because `console_progress` defaults to enabled.
+
+The TUI exposes a stateful **Pause / Resume** control that holds the same
+delivery job: workers wait between segments or live refreshes, the screen stays
+put, and Resume continues. Back, the first Quit and skip still signal the Core
+cancellation token. Resume on a finished/cancelled row still retries from
+verified parts. The TUI never types into a CLI prompt to achieve either
+operation.
+
+Several provider profiles can still produce one native delivery plan. A service
+opts in with `Playback.merge_manifests` and supplies fully authorized variants
+through `manifest_variants`; Core parses each request separately and the backend
+builds a deduplicated, JSON-backed manifest. The combined source is used by the
+picker, execution, saved command and export so their indexes cannot drift.
+
+## Target boundary
+
+`unidl.core.delivery` owns the host-facing contract:
+
+- immutable source, output and plan values;
+- structured progress, log, stage and output events;
+- a cancellation token checked by the execution path;
+- an explicit live-key callback;
+- a structured result with exact output artefacts and a typed failure.
+
+`src/unidl/downloader` is the implementation. The TUI consumes Core events
+directly; only the backend implementation reaches its internal execution API.
+Core does not construct argv, capture ANSI output, replace process-wide streams,
+or patch private downloader functions. Unknown service delivery switches fail
+at plan construction instead of crossing the boundary as arbitrary arguments.
+
+## Script manifest URLs and request encoding
+
+Do not treat the URL suffix as the response format. Script endpoints such as
+`getm3u8.jsp` are manifest candidates even if HEAD is unsupported or the server
+uses `text/plain`; inspect the response body before building tracks. A failed
+candidate fetch must report its error, not silently become a single video segment.
+Known direct-media extensions retain their direct-download path.
+
+The native HTTP transports percent-encode raw spaces and UTF-8 characters in
+paths and query strings, including redirect targets. Existing percent escapes,
+literal plus signs, duplicate parameters and parameter order are preserved;
+never decode and rebuild a signed query to fix a space. Raw control characters
+are rejected before URL parsing rather than silently stripped. This encoding
+belongs to the download transport and does not change service authentication.
+
+## HLS initialization-section key scope
+
+For whole-segment HLS encryption (such as AES-128), an `EXT-X-MAP`
+initialization section retains the key and IV in effect at its declaration.
+A later `EXT-X-KEY` must not retroactively encrypt a clear MAP, including after
+`METHOD=NONE`. A MAP declared under an active AES key still goes through normal
+decryption and ciphertext validation. Do not infer that a response is clear
+merely because its length is not a multiple of the AES block size.
+
+The compatibility path that associates trailing CMAF MAPs with later
+sample-encryption metadata (SAMPLE-AES/CBCS/CENC) is separate from whole-file
+AES decryption and remains supported.
 
 ## Service-staged XML subtitles
 
-External subtitles in `Playback.mux_imports` bypass downloaded-track conversion.
-The common mux preparation step converts `.xml`, `.ttml` and `.dfxp` files to
-temporary SRT using UniDL's native converter before FFmpeg/mkvmerge sees them.
-This handles BBC EBU-TT/IMSC subtitles without requiring the optional `subby`.
+External subtitle files in `Playback.mux_imports` bypass downloaded-track
+conversion. The shared mux preparation step therefore converts `.xml`, `.ttml`
+and `.dfxp` inputs to temporary SRT files with UniDL's native subtitle converter
+before passing them to FFmpeg or mkvmerge. This also covers BBC EBU-TT/IMSC
+subtitles when the optional `subby` helper is absent or fails.
 
-Original subtitles remain unchanged. Timing, text and input metadata are
-preserved, but SRT does not retain TTML styling or positioning. Short per-job
-temporary names avoid repeating long release names in Windows paths. Temporary
-files are cleaned up after success, failure or cancellation. Invalid subtitles
-produce a preparation error rather than being silently omitted; downloaded
-media remains available. Existing SRT/VTT and audio/video inputs are unchanged.
+The original XML remains untouched; timing, text, language, name, disposition
+and delay are retained. SRT does not preserve TTML styling or screen positioning.
+Conversion uses short, per-job filenames to avoid repeating long release names
+in Windows paths. Temporary files are removed on success, preparation failure,
+cancellation or mux failure. Invalid subtitles fail with a subtitle-preparation
+error rather than being silently discarded; downloaded media remains available.
+Existing SRT/VTT and audio/video inputs keep their normal path.
 
-## Supported source families
+## Migration gates
 
-The native parser accepts:
-
-- MPEG-DASH MPD, including CENC and PlayReady protection data;
-- HLS master and media playlists, including AES-128, CENC/CBCS and live reload;
-- ISM/Smooth Streaming manifests and initialization ranges;
-- UniDL JSON track manifests;
-- direct MP4, WebM, MP3/AAC and other supported media URLs;
-- SABR/UMP sources exposed by compatible service adapters.
-
-A service should pass the source URL or inline manifest and the headers required
-for that source. It must not download segments or duplicate parser logic.
-
-## Delivery contract
-
-The host-facing contract is in unidl.core.delivery. It accepts a typed
-DeliveryPlan, selected output settings and a structured event receiver. Events
-cover:
-
-- manifest and track discovery;
-- selected tracks and encrypted KID inventory;
-- vault hits, licence requests and returned keys;
-- segment progress, estimated size and retry state;
-- live refresh, key rotation, pause/resume and cancellation;
-- sidecar, decrypt and mux progress;
-- final output paths and errors.
-
-The TUI renders these events. A headless caller can supply its own receiver or
-save the same data in a command/export artifact.
-
-## VOD pipeline
-
-1. Service authorizes one or more manifests and yields Playback.
-2. Core parses all authorized variants and deduplicates tracks when requested.
-3. Core builds the encrypted inventory and runs the service DRM plan.
-4. The key vault is consulted; missing keys use the service's own licence path.
-5. The shared track picker selects video, audio and subtitle output tracks.
-6. Native delivery downloads, decrypts, writes sidecars and muxes.
-7. Optional chapters, lyrics, cover art and ID3 metadata are applied.
-
-Output naming and metadata are derived from the tracks selected for download, not
-from the provider profile used to obtain the manifest or licence seed.
-
-## Live pipeline
-
-1. Service yields Playback(is_live=True) with an authorized refreshable source.
-2. Core parses the master and asks for output tracks.
-3. Core asks for recording mode, replay/DVR window and duration.
-4. The live engine refreshes playlists, downloads new segments and reports
-   structured progress.
-5. A service-local live_key_pssh hook may resolve a genuinely new KID.
-6. Stop, Back or Esc cancels promptly; duration 00:00:00 means unlimited.
-7. Core finalizes the container and performs optional post-processing.
-
-Real-time merge and pipe-mux are selected by delivery options and source
-capabilities. A service should not force a mux mode by changing output tracks.
-
-## Keys and DRM ownership
-
-The native engine never invents a licence endpoint. Core creates CDM challenges,
-parses licence responses and normalizes content keys; the service provides the
-transport and authentication. Every service that needs a licence implements its
-own transport in its package.
-
-For PlayReady, Core can deduplicate all distinct PSSH/WRM identities and merge
-all returned content keys. HLS services whose master omits init data should expose
-a service-owned licence-track/profile setting and provide the matching media
-playlist or init data.
-
-The downloader receives only the keys for the current Playback. Vault writes,
-remote-CDM calls and service token handling remain explicit and auditable.
-
-## Native API boundary
-
-The public boundary is the DownloaderBackend protocol in
-unidl.core.delivery. Core constructs a DeliveryPlan, calls backend.parse() once,
-then calls backend.run(plan, hooks). Service code should yield Playback and let
-the session controller build that plan; it should not import downloader
-internals or start a second worker.
-
-## Verification
-
-Run the project checks:
-
-~~~console
-python -m pytest -q
-python -m ruff check src tests
-python -m compileall -q src
-~~~
-
-For a provider integration, add local manifest fixtures and a redacted service
-test that verifies the complete Playback-to-output path.
+1. One UniDL distribution contains the service layer and download engine; no
+   second downloader package is installed or imported.
+2. A typed backend can parse and execute without callers constructing argv.
+3. Progress, final paths, errors and live-key requests are structured events.
+4. Cancellation is checked in network/download workers, not at the next print.
+5. Known service delivery switches are decoded into typed plan fields; unknown
+   switches fail at plan construction instead of crossing the boundary.
+6. ANSI/stdin/private-function compatibility shims are removed from Core.
+7. VOD, audio-only, JSON, HLS, DASH, ISM, live, SABR, VGC and special HLS
+   parity tests pass before the original source checkouts are retired.

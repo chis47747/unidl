@@ -6,10 +6,11 @@ UniDL has two deliberately separate export paths:
   parser.  When the source service is installed, the native import may retain
   that service's delivery hooks.
 * **Third-party exports** are adapted into Core's neutral playback model and are
-  always delivered by the generic downloader. The adapter recognises current
-  Unshackle v2 files as well as the legacy track and series schemas described
-  below. It is intentionally named `third_party_exports.py` so other downloader
-  formats can be added without weakening the native reader.
+  always delivered by the generic downloader. The adapter recognises the shared
+  `kind: mediaexport` v1 format, current Unshackle v2 files, and the legacy track
+  and series schemas described below. It is intentionally named
+  `third_party_exports.py` so other downloader formats can be added without
+  weakening the native reader.
 
 ## Security and ownership boundary
 
@@ -31,6 +32,19 @@ and is never silently converted into a proxy.  Choose a proxy explicitly in
 UniDL's settings when a signed manifest still requires the source region.
 
 ## Manifest handling
+
+The settled shared `mediaexport` fields are imported without service code:
+title metadata, the primary and extra manifests (identified by their complete
+URLs), non-sensitive manifest headers, DRM/PSSH hints, KID:key pairs, chapters,
+and URL-bearing side-load tracks. `Cookie` and `Authorization` headers are
+discarded. A shared export whose service tag happens to match an installed
+service still stays in the generic import context.
+
+HLS AES URI-key records and frozen `segments[]` delivery are intentionally not
+enabled yet. Their IV, initialization-section and per-segment semantics are still
+being finalized in the shared format. UniDL does not silently treat those records
+as a normal service manifest or request a new licence; such a title must be
+re-exported in a currently supported form.
 
 The adapter keeps the source that was already resolved by the exporter. In
 addition to current Unshackle v2 files, it accepts the older exports found in

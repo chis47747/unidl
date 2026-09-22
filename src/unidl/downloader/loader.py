@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import gzip
 import http.client
-import shutil
 import subprocess  # noqa: F401 - retained as the module's patch seam for hosts/tests
-import tempfile
 import time
 import zlib
 from dataclasses import dataclass
@@ -12,9 +10,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
-from .embedding import current_download_runtime, managed_run
+from .embedding import current_download_runtime
 from .http_client import HttpClientError, get_global_http_client
-from .live_rules import is_yangshipin_catchup_cdn_url
 from .utils import is_file_url, is_url, source_path
 
 DEFAULT_USER_AGENT = (
@@ -65,14 +62,6 @@ def normalize_headers(headers: list[str] | None = None) -> dict[str, str]:
 
 def load_text(source: str, headers: dict[str, str] | None = None, timeout: float = 20, retries: int = 3) -> Resource:
     if is_url(source):
-        catchup = is_yangshipin_catchup_cdn_url(source)
-        if catchup:
-            try:
-                return _load_text_with_curl(source, headers=headers, timeout=timeout, retries=retries)
-            except (OSError, HttpClientError) as exc:
-                # Do not send this CDN back through the slower generic client;
-                # it is the source of the long hangs this transport avoids.
-                raise LoadError(f"Failed to fetch Yangshipin catch-up manifest: {exc}") from exc
         last_error: Exception | None = None
         for attempt in range(max(1, retries)):
             try:
@@ -87,16 +76,6 @@ def load_text(source: str, headers: dict[str, str] | None = None, timeout: float
                 last_error = exc
                 if attempt + 1 < retries:
                     _runtime_sleep(min(1 + attempt, 3))
-        if _should_retry_youku_manifest_with_curl(source, last_error):
-            try:
-                return _load_text_with_curl(
-                    source,
-                    headers=headers,
-                    timeout=timeout,
-                    retries=retries,
-                )
-            except (OSError, HttpClientError):
-                pass
         raise LoadError(f"Failed to fetch {source}: {last_error}") from last_error
 
     path = source_path(source)
@@ -188,76 +167,6 @@ def _request_headers(headers: dict[str, str] | None = None) -> dict[str, str]:
     request_headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "*/*", "Accept-Encoding": "gzip, deflate"}
     request_headers.update(headers or {})
     return request_headers
-
-
-def _should_retry_youku_manifest_with_curl(
-    source: str,
-    error: BaseException | None,
-) -> bool:
-    host = (urlparse(source).hostname or "").lower()
-    if host != "ott.cibntv.net" and not host.endswith(".ott.cibntv.net"):
-        return False
-    message = str(error or "").lower()
-    return any(
-        marker in message
-        for marker in (
-            "remote end closed",
-            "remote disconnected",
-            "connection reset",
-            "unexpected eof",
-        )
-    )
-
-
-def _load_text_with_curl(
-    source: str,
-    *,
-    headers: dict[str, str] | None,
-    timeout: float,
-    retries: int,
-) -> Resource:
-    executable = shutil.which("curl")
-    if not executable:
-        raise OSError("curl is unavailable")
-    catchup = is_yangshipin_catchup_cdn_url(source)
-    with tempfile.TemporaryDirectory(prefix="unidown_manifest_") as temp_dir:
-        root = Path(temp_dir)
-        body_path = root / "body"
-        args = [
-            executable,
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            *(["--noproxy", "*"] if catchup else []),
-            "--max-time",
-            str(min(max(1, int(timeout)), 20) if catchup else max(1, int(timeout))),
-            "--connect-timeout",
-            str(min(max(1, int(timeout)), 10) if catchup else max(1, int(timeout))),
-            "--retry",
-            str(max(0, int(retries) - 1)),
-            "--retry-delay",
-            "1",
-            "--retry-all-errors",
-            "-o",
-            str(body_path),
-            "-w",
-            "%{url_effective}",
-        ]
-        if catchup:
-            args.extend(["--speed-limit", "16384", "--speed-time", "10"])
-        for key, value in _request_headers(headers).items():
-            args.extend(["-H", f"{key}: {value}"])
-        args.append(source)
-        result = managed_run(args, capture_output=True, check=False)
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
-            raise HttpClientError(f"curl manifest request failed: {detail or f'exit {result.returncode}'}")
-        data = body_path.read_bytes()
-        charset = "utf-8"
-        text = data.decode(charset, errors="replace")
-        final_url = result.stdout.decode("utf-8", errors="replace").strip() or source
-        return Resource(source=source, final_url=final_url, text=text, bytes_data=data, headers={})
 
 
 def _decode_content(data: bytes, encoding: str | None) -> bytes:

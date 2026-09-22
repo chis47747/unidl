@@ -26,7 +26,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from . import __version__, display
-from .applemusic_decrypt import decrypt_apple_music_fmp4_parts
 from .audio import (
     audio_id3_metadata,
     audio_metadata_signature,
@@ -38,7 +37,6 @@ from .bbts import decrypt_bbts_file
 from .cenc_fragment import CencFragmentKeyError, fragment_cenc_key_ids_from_bytes
 from .chapters import ChapterFileError, load_chapters_file
 from .console import Palette, color_enabled, paint
-from .deezer import BF_CBC_STRIPE, decrypt_deezer_file, normalize_deezer_cipher
 from .downloader import (
     DownloadError,
     HlsCrypto,
@@ -64,6 +62,7 @@ from .embedding import (
     managed_popen,
     managed_run,
 )
+from .hybrid import process_hybrid_tracks
 from .live import (
     LiveProgressUpdate,
     LiveRecordOptions,
@@ -78,22 +77,17 @@ from .live_rules import (
     child_request_header_warnings,
     child_url_error_tip,
     child_url_params,
-    decrypt_tencentvideo_cenc_parts,
     iqiyi_separate_audio_mux_media_type,
     live_pipe_input_offsets_seconds,
     live_pipe_matroska_options,
     live_pipe_media_part_contains_init,
     live_pipe_mux_disabled_reason,
-    mark_yangshipin_casting_streams,
     postprocess_audio_vivid,
     should_append_child_url_params,
     should_finalize_live_pipe_matroska_output,
     should_finalize_live_pipe_matroska_output_to_mp4,
     should_preserve_audio_vivid_source_container,
     should_treat_live_stream_as_fragmented_mp4,
-    tencentvideo_separate_audio_custom_hls_applies,
-    tencentvideo_separate_audio_mux_media_type,
-    yangshipin_casting_live_pipe_map_specs,
 )
 from .loader import LoadError, normalize_headers
 from .models import SegmentInfo
@@ -121,6 +115,7 @@ from .postprocess import (
     restamp_fragmented_mp4_timestamps,
     split_fragmented_mp4_init_media,
 )
+from .sample_aes import decrypt_sample_aes_parts, uses_legacy_sample_aes
 from .selection import SelectionOptions, select_streams
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import (
@@ -394,7 +389,7 @@ def _build_parser(
         "--decryption-engine",
         choices=["auto", "internal", "mp4decrypt", "packager", "MP4DECRYPT", "SHAKA_PACKAGER"],
         default="auto",
-        help="Decryption engine. Compatibility aliases are accepted, but all decryption uses the internal engine.",
+        help="Decryption engine. External names are accepted for old scripts but all decryption uses the internal engine.",
     )
     g_crypt.add_argument("--no-decrypt", action="store_true", help="Skip decryption even if stream is marked encrypted.")
     g_mux.add_argument("--repack", action="store_true", help="Run ffmpeg -c copy after decryption/download.")
@@ -405,7 +400,7 @@ def _build_parser(
     g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge"], default="auto")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
     g_net.add_argument("--custom-range", help="Only download selected media segment range, e.g. 1-100,120-160.")
-    g_crypt.add_argument("--custom-hls-method", choices=["AES_128", "AES_128_ECB", "BBTS", "CENC", "CHACHA20", "NONE", "SAMPLE_AES", "SAMPLE_AES_CTR", "UNKNOWN", "YOUKU_ECB"])
+    g_crypt.add_argument("--custom-hls-method", choices=["AES_128", "AES_128_ECB", "BBTS", "CENC", "CHACHA20", "NONE", "SAMPLE_AES", "SAMPLE_AES_CTR", "UNKNOWN"])
     g_crypt.add_argument("--custom-hls-key", help="Custom HLS key as FILE, HEX, or Base64.")
     g_crypt.add_argument("--custom-hls-iv", help="Custom HLS IV as FILE, HEX, or Base64.")
     g_crypt.add_argument("--allow-hls-multi-ext-map", action="store_true", help="Allow multiple EXT-X-MAP sections. Enabled by default in UniDL.")
@@ -818,7 +813,6 @@ def _download(args: argparse.Namespace) -> int:
             _append_input_params(streams, args.input)
         _filter_ad_segments(streams, args.ad_keyword, args=args, colors=colors)
         streams = _sort_streams(_drop_streams(streams, args))
-    _apply_apple_music_stream_context(streams, args)
     _checkpoint_embedding(args)
     apply_audio_vivid_policy(streams, bool(getattr(args, "decode_audio_vivid", False)))
     filter_options = _selection_options(args)
@@ -852,7 +846,6 @@ def _download(args: argparse.Namespace) -> int:
     if args.append_url_params:
         _append_input_params(hydrated, args.input)
     _filter_ad_segments(hydrated, args.ad_keyword, args=args, colors=colors)
-    mark_yangshipin_casting_streams(hydrated, headers)
     hydrated = _replace_youtube_json_live_direct_with_hls(hydrated, args, headers, colors=colors)
     _validate_audio_format_request(hydrated, args)
     if getattr(args, "audio_metadata_file", None):
@@ -1088,6 +1081,17 @@ def _download(args: argparse.Namespace) -> int:
             intermediate_paths.extend(item.cleanup_paths)
 
     downloaded_tracks = _with_audio_vivid_companions(downloaded_tracks)
+    hybrid_enabled = bool(getattr(args, "service_context", {}).get("unidl_hybrid_dv_hdr10"))
+    if hybrid_enabled:
+        try:
+            downloaded_tracks = process_hybrid_tracks(
+                downloaded_tracks,
+                enabled=True,
+                temp_dir=getattr(args, "tmp_dir", None),
+            )
+            _log_line(args, "Dolby Vision hybrid: combined matching DV and HDR10 video tracks")
+        except Exception as exc:
+            raise RuntimeError(f"Dolby Vision hybrid processing failed: {exc}") from exc
     downloaded_paths = [track.path for track in downloaded_tracks]
     intermediate_paths = [
         path for track in downloaded_tracks for path in track.cleanup_paths
@@ -1931,17 +1935,6 @@ def _download_selected_stream(
     if cached is not None:
         cached_path = cached.path
         cleanup_paths = list(cached.cleanup_paths)
-        deezer = _deezer_transport_context(stream)
-        if deezer and not args.no_decrypt and not deezer.get("decrypted"):
-            with status.spinning("Cached ✓", "Decrypting Deezer {spinner}"):
-                cached_path = decrypt_deezer_file(
-                    cached_path,
-                    str(deezer["track_id"]),
-                    deezer["cipher"],
-                    extension=str(deezer.get("extension") or ""),
-                )
-            deezer["decrypted"] = True
-            status.update("Cached ✓", "Decrypted ✓")
         audio_result = postprocess_audio_vivid(
             cached_path,
             stream,
@@ -1984,7 +1977,7 @@ def _download_selected_stream(
             headers=headers,
             workers=effective_workers,
             retries=args.retries,
-            keep_temp=args.keep_temp or _stream_needs_fragment_parts(stream) or (_stream_uses_webm_container(stream) and stream.encrypted and not args.no_decrypt),
+            keep_temp=args.keep_temp or _stream_needs_fragment_parts(stream) or (uses_legacy_sample_aes(stream) and not args.no_decrypt) or (_stream_uses_webm_container(stream) and stream.encrypted and not args.no_decrypt),
             downloader=args.downloader,
             progress=progress,
             temp_dir=_task_temp_subdir(args, "vod"),
@@ -2009,53 +2002,12 @@ def _download_selected_stream(
             progress_display.finish()
     current_path = result.path
     cleanup_paths = [current_path]
-    deezer = _deezer_transport_context(stream)
-    if deezer and not args.no_decrypt and not deezer.get("decrypted"):
-        with status.spinning("Downloaded ✓", "Decrypting Deezer {spinner}"):
-            current_path = decrypt_deezer_file(
-                current_path,
-                str(deezer["track_id"]),
-                deezer["cipher"],
-                extension=str(deezer.get("extension") or ""),
-            )
-        deezer["decrypted"] = True
-        status.set_path(current_path)
-        status.update("Downloaded ✓", "Deezer clear ✓")
-        _log_line(args, f"Deezer transport decrypted: {current_path}")
     if _is_sabr_stream(stream):
         _apply_sniffed_sabr_container_from_path(stream, current_path)
     status.set_path(current_path)
     status.update("Downloaded ✓")
     _log_line(args, f"Downloaded: {current_path}")
     result_temp_dir = result.temp_dir
-    tencentvideo_cenc = False
-    if not args.no_decrypt and result.parts:
-        with status.spinning("Downloaded ✓", "Decrypting {spinner}"):
-            compatible_path = decrypt_tencentvideo_cenc_parts(
-                stream,
-                result.parts,
-                stream.segments,
-                keys,
-                current_path.with_suffix(f".dec{current_path.suffix}"),
-                temp_dir=_task_temp_subdir(args, "postprocess"),
-            )
-        if compatible_path is not None:
-            current_path = compatible_path
-            tencentvideo_cenc = True
-            if current_path not in cleanup_paths:
-                cleanup_paths.append(current_path)
-            clear_count = int(stream.extra.get("tencentvideo_cenc_clear_fragments") or 0)
-            encrypted_count = int(stream.extra.get("tencentvideo_cenc_encrypted_fragments") or 0)
-            emit(
-                f"{paint('Tencent:', Palette.yellow, colors)} "
-                f"TV CENC sample entries handled: {clear_count} clear, {encrypted_count} decrypted."
-            )
-            status.set_path(current_path)
-            status.update("Downloaded ✓", "Decrypted ✓")
-            _log_line(
-                args,
-                f"Tencent Video CENC compatibility: {clear_count} clear, {encrypted_count} decrypted",
-            )
     if _should_finalize_clear_hls_sections(stream, result, hls_crypto):
         with status.spinning("Downloaded ✓", "Finalizing {spinner}"):
             current_path = _finalize_clear_hls_sections(stream, result, current_path)
@@ -2072,32 +2024,6 @@ def _download_selected_stream(
                 current_path.with_suffix(".dec.ts"),
                 _bbts_key_hex(keys, hls_crypto, stream),
             )
-        _cleanup_replaced_intermediate(previous_path, current_path, args, colors)
-        if current_path not in cleanup_paths:
-            cleanup_paths.append(current_path)
-        status.update("Downloaded ✓", "Decrypted ✓")
-        _log_line(args, f"Decrypted: {current_path}")
-    elif _apple_music_foothill_context(args) and not args.no_decrypt:
-        previous_path = current_path
-        decrypt_context = _decrypt_event_context(original_index, stream)
-        decrypt_events, decrypt_event = _new_decrypt_event_recorder(args, decrypt_context)
-        foothill = _apple_music_foothill_context(args)
-        try:
-            with status.spinning("Downloaded ✓", "Decrypting {spinner}"):
-                current_path = decrypt_apple_music_fmp4_parts(
-                    result.parts or [],
-                    stream.segments,
-                    helper_path=str(foothill["helper"]),
-                    context_keys=foothill["contexts"],
-                    default_context_key=foothill["default_context"],
-                    stream_type="audio" if foothill["track_type"] == 0 else "video",
-                    output_path=current_path.with_suffix(f".dec{current_path.suffix}"),
-                    event_callback=decrypt_event,
-                )
-        except Exception:
-            _flush_track_decrypt_events(status, decrypt_events, emit, colors, decrypt_context)
-            raise
-        _flush_track_decrypt_events(status, decrypt_events, emit, colors, decrypt_context)
         _cleanup_replaced_intermediate(previous_path, current_path, args, colors)
         if current_path not in cleanup_paths:
             cleanup_paths.append(current_path)
@@ -2127,7 +2053,7 @@ def _download_selected_stream(
             cleanup_paths.append(current_path)
         status.update("Downloaded ✓", "Decrypted ✓")
         _log_line(args, f"Decrypted: {current_path}")
-    elif _stream_needs_external_decryption(stream, hls_crypto) and not args.no_decrypt and not tencentvideo_cenc:
+    elif _stream_needs_external_decryption(stream, hls_crypto) and not args.no_decrypt:
         previous_path = current_path
         decrypt_context = _decrypt_event_context(original_index, stream)
         decrypt_events, decrypt_event = _new_decrypt_event_recorder(args, decrypt_context)
@@ -2135,7 +2061,14 @@ def _download_selected_stream(
             with status.spinning("Downloaded ✓", "Decrypting {spinner}"):
                 stream_type = "audio" if stream.media_type == "audio" else "video"
                 decrypter = _decrypter_for_stream(args.decrypter, stream)
-                if _should_decrypt_fragmented_parts(stream, result):
+                if uses_legacy_sample_aes(stream):
+                    current_path = decrypt_sample_aes_parts(
+                        result.parts or ([current_path] if len(stream.segments) == 1 else []), stream, keys,
+                        current_path.with_suffix(f".dec{current_path.suffix}"),
+                        temp_dir=_task_temp_subdir(args, "postprocess"),
+                        event_callback=decrypt_event,
+                    )
+                elif _should_decrypt_fragmented_parts(stream, result):
                     current_path = decrypt_fragmented_mp4_parts(
                         result.parts or [],
                         stream.segments,
@@ -2183,7 +2116,8 @@ def _download_selected_stream(
                         expected_kids=_stream_key_ids(stream),
                         event_callback=decrypt_event,
                     )
-                _normalize_hls_video_sample_timing(current_path, stream)
+                if not uses_legacy_sample_aes(stream):
+                    _normalize_hls_video_sample_timing(current_path, stream)
         except Exception:
             _flush_track_decrypt_events(status, decrypt_events, emit, colors, decrypt_context)
             raise
@@ -2279,6 +2213,8 @@ def _should_skip_assembled_download_output(stream, args, hls_crypto) -> bool:
 
 
 def _stream_can_decrypt_from_parts_without_assembled_output(stream) -> bool:
+    if uses_legacy_sample_aes(stream):
+        return True
     if not _stream_needs_fragment_parts(stream):
         return False
     if _fragmented_stream_can_decrypt_as_whole_file(stream):
@@ -2411,6 +2347,8 @@ def _decrypt_webm_output(
 def _download_parts_needed_for_postprocess(stream, result, hls_crypto, args) -> bool:
     if getattr(args, "no_decrypt", False):
         return False
+    if uses_legacy_sample_aes(stream):
+        return True
     if _stream_uses_webm_container(stream) and _stream_needs_external_decryption(stream, hls_crypto):
         return _should_decrypt_webm_parts(stream, result)
     if not _stream_needs_external_decryption(stream, hls_crypto):
@@ -2672,7 +2610,7 @@ def _stream_prefers_matroska_live_pipe(stream) -> bool:
     return "DV" in video_range
 
 
-_HLS_SEGMENT_CRYPTO_SCHEMES = {"AES_128", "AES_128_ECB", "CHACHA20", "YOUKU_ECB"}
+_HLS_SEGMENT_CRYPTO_SCHEMES = {"AES_128", "AES_128_ECB", "CHACHA20", "SIGMA"}
 _AUDIO_CODEC_LABELS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "Opus"}
 _FRAGMENTED_MP4_EXTS = {"m4s", "mp4", "m4a", "m4v", "cmfv", "cmfa", "mp4a", "mp4v"}
 _JSON_FMP4_PART_DECRYPT_MIN_SEGMENTS = 512
@@ -2740,8 +2678,6 @@ def _stream_has_muxed_audio(stream) -> bool:
 
 
 def _live_pipe_map_specs(stream, input_index: int) -> list[str]:
-    if mapped := yangshipin_casting_live_pipe_map_specs(stream, input_index):
-        return mapped
     if _stream_has_muxed_audio(stream):
         return [f"{input_index}:v?", f"{input_index}:a?"]
     return [f"{input_index}:0"]
@@ -2836,79 +2772,6 @@ def _stream_needs_external_decryption(stream, hls_crypto: HlsCrypto | None) -> b
     if _stream_uses_hls_segment_crypto(stream):
         return False
     return True
-
-
-def _apple_music_foothill_context(args):
-    raw = getattr(args, "service_context", None)
-    if not isinstance(raw, dict):
-        return None
-    music = raw.get("apple_music")
-    if not isinstance(music, dict):
-        return None
-    helper = str(music.get("foothill_helper") or "").strip()
-    contexts = music.get("foothill_context_keys")
-    if not helper or not isinstance(contexts, dict):
-        return None
-    normalized = {
-        str(key): str(value)
-        for key, value in contexts.items()
-        if str(key).strip() and str(value).strip()
-    }
-    try:
-        track_type = int(music.get("foothill_track_type") or 0)
-    except (TypeError, ValueError):
-        track_type = 0
-    if track_type not in {0, 1}:
-        track_type = 0
-    default_context = str(music.get("foothill_default_context_key") or "").strip()
-    if not default_context:
-        default_context = next(iter(normalized.values()), "")
-    return {
-        "helper": helper,
-        "contexts": normalized,
-        "default_context": default_context,
-        "track_type": track_type,
-    } if normalized else None
-
-
-def _deezer_transport_context(stream) -> dict[str, object] | None:
-    """Read the Deezer transport marker carried by a JSON audio track."""
-    extra = getattr(stream, "extra", None)
-    raw = extra.get("raw") if isinstance(extra, dict) else None
-    value = raw.get("deezer") if isinstance(raw, dict) else None
-    if not isinstance(value, dict):
-        return None
-    track_id = str(value.get("track_id") or value.get("trackId") or "").strip()
-    cipher = normalize_deezer_cipher(value.get("cipher"))
-    if not track_id or cipher not in {"NONE", BF_CBC_STRIPE}:
-        return None
-    value["track_id"] = track_id
-    value["cipher"] = cipher
-    value["extension"] = str(value.get("extension") or "").strip().lower().lstrip(".")
-    value["decrypted"] = bool(value.get("decrypted"))
-    return value
-
-
-def _apply_apple_music_stream_context(streams, args) -> None:
-    """Restore Apple Music's audio/video type after parsing its ranged fMP4 URL."""
-    raw = getattr(args, "service_context", None)
-    music = raw.get("apple_music") if isinstance(raw, dict) else None
-    if not isinstance(music, dict):
-        return
-    try:
-        track_type = int(music.get("foothill_track_type") or 0)
-    except (TypeError, ValueError):
-        return
-    if track_type not in {0, 1}:
-        return
-    for stream in streams:
-        if getattr(stream, "media_type", None) in {"subtitle", "subtitles", "text"}:
-            continue
-        if getattr(stream, "manifest_type", None) != "hls":
-            continue
-        stream.media_type = "audio" if track_type == 0 else "video"
-        if track_type == 0:
-            stream.extra["apple_music_audio_only"] = True
 
 
 def _ensure_hls_segment_crypto_ready(streams, hls_crypto: HlsCrypto | None) -> None:
@@ -4768,11 +4631,6 @@ def _validate_audio_format_request(streams, args: argparse.Namespace) -> None:
         raise ValueError(f"--audio-format {output_format} live recording cannot be combined with --live-pipe-mux.")
     if getattr(args, "no_decrypt", False) and any(getattr(stream, "encrypted", False) for stream in audio_streams):
         raise ValueError(f"--audio-format {output_format} cannot transcode encrypted audio with --no-decrypt.")
-    if getattr(args, "no_decrypt", False) and any(
-        (_deezer_transport_context(stream) or {}).get("cipher") == BF_CBC_STRIPE
-        for stream in audio_streams
-    ):
-        raise ValueError(f"--audio-format {output_format} cannot transcode Deezer stripe audio with --no-decrypt.")
 
 
 def _apply_audio_metadata_file(streams, input_path: str | Path) -> dict:
@@ -7532,17 +7390,13 @@ def _custom_hls_crypto(args: argparse.Namespace) -> HlsCrypto | None:
     decryptor = getattr(args, "hls_decryptor", None)
     if not method and not key_value and not iv_value and decryptor is None:
         return None
-    method = method or "AES_128"
+    method = method or ("SIGMA" if decryptor is not None else "AES_128")
     key = _decode_custom_bytes(key_value, "custom HLS key") if key_value else None
     iv = _decode_custom_bytes(iv_value, "custom HLS IV") if iv_value else None
     return HlsCrypto(method=method, key=key, iv=iv, decryptor=decryptor)
 
 
 def _hls_crypto_for_stream(stream, hls_crypto: HlsCrypto | None) -> HlsCrypto | None:
-    if hls_crypto is None:
-        return None
-    if not tencentvideo_separate_audio_custom_hls_applies(stream, hls_crypto.method):
-        return None
     return hls_crypto
 
 
@@ -7635,7 +7489,6 @@ def _display_hls_scheme(scheme: str) -> str:
     return {
         "AES_128": "AES-128",
         "AES_128_ECB": "AES-128-ECB",
-        "YOUKU_ECB": "YOUKU-ECB",
         "SAMPLE_AES": "SAMPLE-AES",
         "SAMPLE_AES_CTR": "SAMPLE-AES-CTR",
     }.get(scheme, scheme.replace("_", "-"))
@@ -8335,10 +8188,7 @@ def _mux_input_for_track(
         delay_ms=delay_ms,
         trim_start_ms=trim_start_ms,
         media_type=getattr(stream, "media_type", None),
-        track_type_filter=(
-            tencentvideo_separate_audio_mux_media_type(stream)
-            or iqiyi_separate_audio_mux_media_type(stream, selected_streams)
-        ),
+        track_type_filter=iqiyi_separate_audio_mux_media_type(stream, selected_streams),
         codecs=getattr(stream, "codecs", None),
     )
 

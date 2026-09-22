@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.3] - 2026-09-22
+
+### Shared exports and public downloader scope
+
+- Added the shared mediaexport v1 reader and generic third-party import path.
+- Kept imported exports isolated from service sessions, licence transports and
+  service-specific authentication.
+- Improved manifest URL, header and key validation during export import.
+- Removed optional public-build bindings for Apple Music decrypt, Qobuz,
+  Youku and Deezer, plus Tencent/Yangshipin live-specific transport rules.
+- Retained YouTube, iQIYI and the common DASH/HLS/ISM download paths.
+
 ## [2.1.2] - 2026-09-18
 
 ### First launch and download locations

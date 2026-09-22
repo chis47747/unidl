@@ -3,9 +3,10 @@
 Three sections, in order of how specific they are:
 
 1. **Global** - what happens on pick, command export, debug. Same everywhere.
-2. **<Service>** - that service's own vocabulary: profiles, regions, markets
-   and manifest selectors. Only shown when a service is active, and services
-   can declare as many of these as they need; there is no fixed set.
+2. **<Service>** - that service's own vocabulary: Amazon's profile strings,
+   BBC's resolution names, Paramount's platform / region / market. Only shown
+   when a service is active, and services can declare as many of these as they
+   need; there is no fixed set.
 3. **Tracks and output** - the shared quality vocabulary, applied against the
    real ladder after the manifest is parsed.
 
@@ -401,7 +402,7 @@ class SettingsScreen(Screen):
             scope = self.service.settings
             service_note = tr("settings.note.this_service")
             policy_keys = {
-                "license_after_tracks", "local_vault", "remote_vault",
+                        "license_after_tracks", "dolby_vision_hybrid", "local_vault", "remote_vault",
                 "remote_vault_auto_lookup", "remote_vault_auto_store",
                 "vault_read_targets", "vault_write_targets",
             }
@@ -417,6 +418,7 @@ class SettingsScreen(Screen):
                     spec for spec in scope.specs
                     if spec.key in {
                         "license_after_tracks",
+                        "dolby_vision_hybrid",
                         "local_vault",
                         "remote_vault",
                         "remote_vault_auto_lookup",

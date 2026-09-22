@@ -207,6 +207,10 @@ class TokenStore:
     def delete(self, name: str) -> bool:
         return self.remove(name)
 
+    def clear(self, name: str) -> bool:
+        """Alias for remove to support callers using clear()."""
+        return self.remove(name)
+
     def remove(self, name: str) -> bool:
         """Delete a cached token. Returns whether there was one to delete."""
         own = self.path(name)

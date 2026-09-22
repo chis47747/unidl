@@ -81,12 +81,7 @@ class _ChapterPolicyScreen(ModalScreen[None]):
 
 
 class _RegistrationEditor(ModalScreen[str | None]):
-    """Show source packages and allow one unregistered package to be enabled."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+b", "cancel", "Back", show=False),
-    ]
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
 
     def __init__(self, sources, registered: set[str]) -> None:
         super().__init__()
@@ -105,10 +100,10 @@ class _RegistrationEditor(ModalScreen[str | None]):
         options = self.query_one("#service-registration-list", OptionList)
         for index, source in enumerate(self.sources):
             if source.service_id in self.registered:
-                text = f"  [$dim]✓  {visual_markup(source.name)}  ({source.service_id})[/]"
+                text = f"  [$dim]✓  {source.name}  ({source.service_id})[/]"
                 options.add_option(Option(text, id=f"registered-{index}", disabled=True))
             else:
-                text = f"  [$accent]＋  {visual_markup(source.name)}  ({source.service_id})[/]"
+                text = f"  [$accent]＋  {source.name}  ({source.service_id})[/]"
                 options.add_option(Option(text, id=f"available-{index}"))
         if not self.sources:
             options.add_option(Option(f"  [$dim]{tr('service.register.empty')}[/]", disabled=True))
@@ -122,11 +117,10 @@ class _RegistrationEditor(ModalScreen[str | None]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         ident = str(event.option.id or "")
-        if not ident.startswith("available-"):
-            return
-        index = int(ident.partition("-")[2])
-        if 0 <= index < len(self.sources):
-            self.dismiss(self.sources[index].service_id)
+        if ident.startswith("available-"):
+            index = int(ident.partition("-")[2])
+            if 0 <= index < len(self.sources):
+                self.dismiss(self.sources[index].service_id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -261,7 +255,7 @@ class ServicesManagerScreen(Screen[None]):
     def __init__(self, globals_scope: Settings):
         super().__init__()
         self.globals = globals_scope
-        self._rows = ("chapters", "license", "register", "home", "export")
+        self._rows = ("chapters", "license", "hybrid", "register", "home", "export")
         self._sources = []
 
     def compose(self) -> ComposeResult:
@@ -312,6 +306,7 @@ class ServicesManagerScreen(Screen[None]):
         rows = [
             ("chapters", tr('service.chapters.action', default='Chapter metadata by service'), f"[$dim]{tr('service.chapters.summary', default='Independent on/off per registered service')}[/]"),
             ("license", tr('service.license.action', default='License after final track selection'), f"[$dim]{setting_value(self.globals.spec_by_key['license_after_tracks'], self.globals)}[/]"),
+            ("hybrid", tr('service.hybrid.action', default='Dolby Vision + HDR10 hybrid output'), f"[$dim]{setting_value(self.globals.spec_by_key['dolby_vision_hybrid'], self.globals)}[/]"),
             ("register", tr('service.register.action'), f"[$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
             ("home", tr('service.home.action'), f"[$dim]{tr('service.home.summary', shown=shown, registered=count)}[/]"),
             (
@@ -330,6 +325,7 @@ class ServicesManagerScreen(Screen[None]):
         keys = {
             "chapters": "service.chapters.help",
             "license": "service.license.help",
+            "hybrid": "service.hybrid.help",
             "register": "service.register.help",
             "home": "service.home.help",
             "export": "service.export.help",
@@ -361,6 +357,15 @@ class ServicesManagerScreen(Screen[None]):
             )
             self.rebuild()
             return
+        if ident == "hybrid":
+            spec = self.globals.spec_by_key["dolby_vision_hybrid"]
+            self.globals.set("dolby_vision_hybrid", not bool(self.globals.get("dolby_vision_hybrid")))
+            self.app.notify(
+                tr("settings.changed", label=setting_label(spec), value=setting_value(spec, self.globals)),
+                timeout=4,
+            )
+            self.rebuild()
+            return
         self._refresh_sources()
         if ident == "register":
             registered = service_catalog.registered_ids(self.app.settings_store)
@@ -371,11 +376,7 @@ class ServicesManagerScreen(Screen[None]):
                 source = next((item for item in self._sources if item.service_id == service_id), None)
                 service_catalog.update_registration(self.app.settings_store, service_id, True)
                 name = source.name if source else service_id
-                self.app.notify(
-                    tr("service.register.done", name=name),
-                    title=tr("service.register.title"),
-                    timeout=10,
-                )
+                self.app.notify(tr("service.register.done", name=name), title=tr("service.register.title"), timeout=10)
                 self.rebuild()
 
             self.app.push_screen(_RegistrationEditor(self._sources, registered), registered_done)
@@ -383,14 +384,7 @@ class ServicesManagerScreen(Screen[None]):
         if ident == "home":
             registered = service_catalog.registered_ids(self.app.settings_store)
             sources = [item for item in self._sources if item.service_id in registered]
-            setting = Setting(
-                "home_services",
-                tr("service.home.title"),
-                kind="multi",
-                options=[SettingOption(item.service_id, item.name) for item in sources],
-                default=(),
-                help=tr("service.home.help"),
-            )
+            setting = Setting("home_services", tr("service.home.title"), kind="multi", options=[SettingOption(item.service_id, item.name) for item in sources], default=(), help=tr("service.home.help"))
             from .settings_screen import _MultiChoiceEditor
 
             def home_done(value: Any) -> None:
