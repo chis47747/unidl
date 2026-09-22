@@ -44,8 +44,8 @@ def test_registers_expected_service_and_drm_systems():
     from unidl import services
     from unidl.core import drm
 
-    assert services.load_all() == 2
-    assert sorted(service.ID for service in services.registry.all()) == ["bbc", "movistar"]
+    assert services.load_all() == 1
+    assert [service.ID for service in services.registry.all()] == ["bbc"]
     assert drm.ids() == ["widevine", "playready", "monalisa"]
 
 

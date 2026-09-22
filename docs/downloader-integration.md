@@ -1,22 +1,10 @@
-# Downloader integration lab
+# Native downloader integration
 
-This checkout is an isolated integration lab.  It does not share a worktree or
-Git branch with either active source checkout.
+UniDL's downloader is an in-process engine behind the Core delivery contract.
+Services prepare authorized playback information; Core handles selection and
+passes a typed delivery plan to the downloader. No external downloader process
+or separate checkout is required.
 
-## Baselines
-
-| component | source checkout | committed baseline | integrated at |
-|-----------|-----------------|--------------------|---------------|
-| UniDL | `/Users/chrischou/unidl` | `511ef6b` (`main`) | repository root |
-| historical downloader baseline | imported into this lab before integration | `c9191d5` (`sabr`) | `src/unidl/downloader` |
-
-Uncommitted files from either source checkout are deliberately absent.  They
-must first be committed in their owning checkout and then be merged or imported
-explicitly.  This prevents the integration work from copying half-written
-service or downloader changes and prevents this lab from writing back to the
-applications currently in use.
-
-## Native package phase
 
 The downloader implementation now lives inside the `unidl` distribution as
 `unidl.downloader`.  A fresh install contains one application and has no

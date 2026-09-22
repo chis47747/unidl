@@ -22,8 +22,6 @@ class AudioVividPolicyResult:
     warning: str = ""
 
 
-
-
 def apply_audio_vivid_policy(streams, enabled: bool) -> None:
     if not enabled:
         return
@@ -262,16 +260,6 @@ def should_treat_live_stream_as_fragmented_mp4(stream) -> bool:
     return _is_youtube_json_direct_live_stream(stream) and not _stream_uses_webm_container(stream)
 
 
-
-
-
-
-
-
-
-
-
-
 def live_pipe_media_part_contains_init(stream, segment=None) -> bool:
     if _is_sabr_ump_live_stream(stream):
         if _stream_uses_webm_container(stream):
@@ -316,8 +304,6 @@ def live_pipe_matroska_options(streams, output_container: str | None) -> list[st
         str(64 * 1024),
     ])
     return options
-
-
 
 
 def should_finalize_live_pipe_matroska_output(streams, output_container: str | None) -> bool:
@@ -393,22 +379,6 @@ def _is_vgc_stream(stream) -> bool:
     return isinstance(extra, dict) and bool(extra.get("vgc"))
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _is_kan_medone_dash_hevc_live_stream(stream) -> bool:
     if getattr(stream, "manifest_type", None) != "dash" or not getattr(stream, "is_live", False):
         return False
@@ -460,12 +430,6 @@ def _is_audio_vivid_policy_muxed_hls(stream) -> bool:
     if (getattr(stream, "extension", None) or "").lower().lstrip(".") != "ts":
         return False
     return True
-
-
-
-
-
-
 
 
 def _json_stream_has_init_range(stream) -> bool:

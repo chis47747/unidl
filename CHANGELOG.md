@@ -8,6 +8,13 @@
 - Kept imported exports isolated from service sessions, licence transports and
   service-specific authentication.
 - Improved manifest URL, header and key validation during export import.
+- Reject conflicting content keys and unsupported critical extensions without
+  silently falling back to another source. Shared HLS AES URI records and frozen
+  segment extensions remain deferred pending the format agreement.
+- Preserve HLS MAP key scope, recognize script-based manifest endpoints and
+  encode URL spaces without rebuilding signed query parameters.
+- Add native legacy TS/AAC SAMPLE-AES handling and optional Dolby Vision + HDR10
+  hybrid output with global/per-service controls and source compatibility checks.
 - Removed optional public-build bindings for Apple Music decrypt, Qobuz,
   Youku and Deezer, plus Tencent/Yangshipin live-specific transport rules.
 - Retained YouTube, iQIYI and the common DASH/HLS/ISM download paths.

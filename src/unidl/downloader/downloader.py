@@ -3461,26 +3461,22 @@ def _run_curl(
     executable = shutil.which("curl")
     if not executable:
         raise DownloadError("curl fallback is unavailable.", url=segment.url)
-    catchup = False
     args = [
         executable,
         "-L",
         "--fail",
         "--silent",
         "--show-error",
-        *(["--noproxy", "*"] if catchup else []),
         "--max-time",
-        str(min(max(1, request_timeout), 20) if catchup else max(1, request_timeout)),
+        str(max(1, request_timeout)),
         "--connect-timeout",
-        str(min(max(1, request_timeout), 10) if catchup else max(1, request_timeout)),
+        str(max(1, request_timeout)),
         "--retry",
         str(max(0, retries - 1)),
         "--retry-delay",
         "1",
         "--retry-all-errors",
     ]
-    if catchup:
-        args.extend(["--speed-limit", "16384", "--speed-time", "10"])
     if resume:
         if output_path is None:
             raise DownloadError("curl resume needs a file target.", url=segment.url)
