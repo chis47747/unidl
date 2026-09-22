@@ -564,7 +564,7 @@ class Engine:
     def playback_input(self, playback: Playback) -> str:
         """Return the concrete input handed to UniDL.
 
-        Services such as Netflix and YouTube receive an adaptive track inventory
+        Some services receive an adaptive track inventory
         rather than an MPD/HLS URL.  ``Playback`` keeps that inventory as a dict,
         while UniDL deliberately accepts JSON through the same file-oriented
         input as every other manifest.  Materialising it here keeps services out
@@ -1039,7 +1039,7 @@ class Engine:
         elif drm.system == WIDEVINE:
             # Widevine v1 PSSH boxes can carry several KIDs even when the
             # UniDL stream metadata exposes only the first one. Service-owned
-            # flows such as Sling may keep additional per-playlist PSSH values
+            # flows may keep additional per-playlist PSSH values
             # in their private context, so include those before deciding that
             # a remote vault hit covers the whole title.
             try:
@@ -1102,7 +1102,7 @@ class Engine:
             return []
         # ``license_track_kids`` normally contains the same ids as the parsed
         # streams, but a service may replace it in ``prepare_drm`` when its media
-        # and licence protocols spell the same KID differently. Netflix
+        # and licence protocols spell the same KID differently. A service's
         # PlayReady Web is the important case: JSON/MP4 carries a little-endian
         # fragment GUID while its WRM header, licence response and stored vault
         # row use the canonical UUID. Looking up the stream spelling made every
@@ -1635,7 +1635,7 @@ class Engine:
             # applies to local-only policies as well as remote-enabled ones.
             if inventory_tracks is not None and settings is not None and self.vault_reads(settings):
                 # A self-owned service may leave init data empty until the
-                # manifest is read (Apple/Sling HLS is a common example).  Give
+                # manifest is read before the service exchange. Give
                 # the registry extractor one chance to populate KIDs before the
                 # vault query, without taking ownership of the service's
                 # subsequent license exchange.

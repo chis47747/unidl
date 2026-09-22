@@ -31,8 +31,7 @@ before. **All media manifests** replaces that entry in the export with UniDL's
 complete parsed video/audio/subtitle inventory, including finite segment URLs,
 byte ranges, encryption fields and generated init data. Import can then open the
 ladder without requesting the original master again. This is useful for services
-whose master URL expires almost immediately, such as friDay, or within minutes,
-such as Canal+ France.
+whose master URL expires within seconds or minutes.
 
 The export choice is a third setting boundary, separate from both provider
 manifest profile and final track selection. Media export records every parsed
@@ -90,9 +89,10 @@ profile maps to a verified API request. Core parses those service-authorized
 manifests independently, merges their track ladders and removes duplicate
 representations by their displayed media properties (not by short-lived signed
 URLs or provider-specific representation IDs); it never invents profile names or
-derives URLs from shared track preferences. Amazon has `FHD_H264_CBR_DASH` and `4K_DV_CVBR_DASH`. BBC has
-`auto/4k/1080p/720p`. Xfinity has `sd|hd`. Paramount has platform, region and
-local market. None of these vocabularies translate into each other, so each
+derives URLs from shared track preferences. The example service has `hd/uhd`
+manifest profiles; BBC has `auto/4k/1080p/720p`. Other service packages may
+declare platform, region or local-market choices. These vocabularies do not
+automatically translate into each other, so each
 service declares its own and they only appear while that service is active.
 
 **Track settings apply after parsing**, against the real ladder, and are one
@@ -111,7 +111,7 @@ These are two different choices and must never be represented by the same settin
    subtitle settings choose representations from the ladder that was actually
    returned. They do not choose another source URL.
 
-For example, Movies Anywhere exposes `manifest_resolution`, `manifest_codec` and
+For example, a service may expose `manifest_resolution`, `manifest_codec` and
 `manifest_color` for the source manifest. Its shared `video_quality`,
 `video_codec` and `video_range` settings remain available for the final tracks
 inside that manifest. A 4K Dolby Vision source manifest and 1080p SDR output
@@ -129,25 +129,17 @@ reused to choose provider assets.
 This is also why neither a service API option nor a command-line default can
 truthfully choose a final bitrate before the returned ladder has been parsed.
 
-Aha always asks its content authorization service for the maximum 4K-capable
-DASH ladder; it has no separate source-resolution setting. That request leaves
-the Widevine security-level capability unspecified, so the selected CDM cannot
-pre-emptively reduce the manifest. Aha may still cap the response according to
-the title and subscription (4K is a Gold feature). The catalogue's `vq=4K`
-marker describes source availability, while the parsed manifest is the
-authority for the resolution actually delivered. After parsing, shared
-`video_quality=best` preselects the highest representation. Set shared
-`track_mode=auto` to accept that selection without opening the track picker;
-the selected CDM is evaluated later, when requesting the Widevine license.
+A provider may return its full authorized ladder without exposing a separate
+source-resolution setting. The parsed manifest, not a catalogue quality badge,
+is the authority for the resolution actually delivered. Shared
+`video_quality=best` preselects the highest matching representation;
+`track_mode=auto` accepts that selection without opening the track picker.
+Provider entitlement and CDM requirements remain independent constraints.
 
-Aha VOD also follows the TV client's stream-concurrency lifecycle. After content
-authorization succeeds, the service opens `user/stream/create` for the stable
-device identity, renews it at the configured interval, and closes it in a
-`finally` block after the delivery finishes or is cancelled. A missing or failed
-initial create stops that delivery; a failed cleanup is reported without hiding
-the download result. Aha's current TV configuration uses a five-minute renewal
-interval. The VOD path uses this stream lease; the separate heartbeat contract
-is for live playback and is not enabled while Aha live content is unavailable.
+If playback creates a provider-side session, that service must own its renewal
+and close it after delivery or cancellation. See
+[Playback lifecycle](playback-lifecycle.md); no particular session endpoint or
+heartbeat interval is part of the shared settings contract.
 
 ## Global
 
@@ -354,7 +346,7 @@ installed engine cannot provide. See [audio.md](audio.md).
 ### Do not remove `drop_video` without reading this
 
 Trick-play and thumbnail ladders are video tracks with tall dimensions. A real
-example from Paramount: a `1280x1440` thumbnail track beat the genuine `1920x1080`
+example: a `1280x1440` thumbnail track can beat the genuine `1920x1080`
 video when "best" was decided on height. The default regex keeps them out of
 quality selection. Its terms are bounded so a normal title such as `Strickland`
 is not mistaken for a `trick` track. Existing settings containing the original
@@ -401,20 +393,16 @@ other variant's token and cookie untouched and therefore must keep
 that definitively invalidates that selected session) may clear authentication
 state.
 
-Declare as many as the service genuinely has. Paramount declares three
-(`platform`, the unified `region`, and `dma`) and none of them is a resolution.
-Its `platform` and `region` rows are routing/profile selectors; changing them
-must not sign out or delete the token/cookie cache belonging to another
-Paramount+/CBS route. `region` offers `AUTO`, `US`, and the public Paramount+
-international market country codes. The old `region: intl` plus `intl_country`
-configuration is read for compatibility, but the separate country row is no
-longer shown. Account versus TV-provider login is chosen from the service-home
-`Sign in` action and is not a service setting.
+Declare only settings that the service genuinely supports. `platform`, `region`
+and `dma`, when present, are routing/profile selectors rather than output
+resolution settings. Switching them must preserve each route's independent
+token and cookie cache. Account versus TV-provider login belongs to the
+service-home `Sign in` action.
 
-yes+ declares `manifest_profile` with `hd` and `uhd` values. This chooses the
-yes+ catalogue resource before playback authorization; it does not replace or
-shadow the shared `video_quality`, `video_codec` or `video_range` settings used
-after the returned manifest is parsed.
+The public example service declares `manifest_profile` with `hd` and `uhd`
+values. This chooses a provider source before playback authorization; it does
+not replace the shared `video_quality`, `video_codec` or `video_range` settings
+used after parsing the returned manifest.
 
 ## Reading
 

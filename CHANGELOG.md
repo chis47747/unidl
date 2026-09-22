@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.1.4] - 2026-09-22
+
+### Public readiness and documentation
+
+- Classify readiness gaps as core (red), global capability (yellow), or
+  optional enhancement (blue); fully ready installations are green.
+- Include CDM devices and Dolby Vision Hybrid tools in the readiness report,
+  with status translations in all six interface languages.
+- Document the dependency tiers and explain which capabilities are required
+  for the base application, DRM playback, or optional enhancements.
+- Replace unpublished service implementation examples, internal service
+  names, and device-specific paths with public-package references and portable
+  placeholders.
+- Refresh the public installation, configuration, vault, troubleshooting, and
+  downloader documentation to match the released package.
+
 ## [2.1.3] - 2026-09-22
 
 ### Shared exports and public downloader scope
@@ -15,9 +31,9 @@
   encode URL spaces without rebuilding signed query parameters.
 - Add native legacy TS/AAC SAMPLE-AES handling and optional Dolby Vision + HDR10
   hybrid output with global/per-service controls and source compatibility checks.
-- Removed optional public-build bindings for Apple Music decrypt, Qobuz,
-  Youku and Deezer, plus Tencent/Yangshipin live-specific transport rules.
-- Retained YouTube, iQIYI and the common DASH/HLS/ISM download paths.
+- Removed unshipped service-specific decryption and live transport bindings.
+- Retained generic export compatibility and common DASH/HLS/ISM download paths;
+  format compatibility does not imply that a provider service is bundled.
 
 ## [2.1.2] - 2026-09-18
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.1.3"
+version = "2.1.4"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -19,7 +19,7 @@ dependencies = [
     "textual>=0.80",
     "pywidevine>=1.8",
     # 0.8.1 is the first line that coexists with pywidevine; 0.8.5 adds signed
-    # challenge CustomData used by Peacock while retaining the newer PSSH API.
+    # challenge CustomData while retaining the newer PSSH API.
     "pyplayready>=0.8.5",
     # MonaLisa devices execute a local WebAssembly module.
     "wasmtime>=20",

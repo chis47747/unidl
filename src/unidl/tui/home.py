@@ -353,8 +353,19 @@ class HomeScreen(Screen):
                 self._set_chip, "chip-ready", f"[$muted]{unknown}[/]", unknown
             )
             return
-        colour = "$bad" if not report.ready else ("$warn" if report.missing else "$ok")
-        summary = report.summary()
+        status = report.status
+        if status == "missing":
+            colour = "$bad"
+            summary = tr("home.chip.ready_missing", count=len(report.blocking))
+        elif status == "global":
+            colour = "$warn"
+            summary = tr("home.chip.ready_global", count=len(report.global_missing))
+        elif status == "partial":
+            colour = "$manifest"
+            summary = tr("home.chip.ready_partial")
+        else:
+            colour = "$ok"
+            summary = tr("home.chip.ready")
         self.app.call_from_thread(
             self._set_chip, "chip-ready", f"[{colour}]{summary}[/]", summary
         )

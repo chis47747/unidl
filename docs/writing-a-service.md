@@ -16,20 +16,21 @@ than produce an incorrectly aligned stream. The DV source is intentionally the
 lowest-resolution available DV layer; it does not need to match the HDR base
 resolution because only its RPU metadata is used.
 
-Two things to read alongside this:
+Three things to read alongside this:
 
-- `src/unidl/services/EXAMPLE/` — the reference service. Every hook, every
+- `src/unidl/services/example/` — the reference service. Every hook, every
   declaration, and a comment on each saying why it exists and what breaks without
   it. It is not registered, so it never appears in the platform list. Copy the
-  folder, rename it, delete what you do not need. `scripts/template_check.py`
-  keeps it from drifting away from the real API.
-- `src/unidl/services/paramount/` — a real one, doing Widevine and PlayReady.
-  `services/bbcsounds/` is the audio-only shape and `services/iq/` is the one with
-  a third DRM system and a local helper.
+  folder, rename it, and delete what you do not need. The service tests and
+  registry validation keep it aligned with the public API.
+- `src/unidl/services/bbciplayer/` — the public native service, including
+  optional helper declarations and Widevine playback.
+- `src/unidl/services/example/` — the intentionally incomplete scaffold; it is
+  not registered and never appears on the platform list.
 
 ## Start from the template
 
-    cp -r src/unidl/services/EXAMPLE src/unidl/services/mysvc
+    cp -r src/unidl/services/example src/unidl/services/mysvc
 
 Then edit `ID`, `NAME`, `TAG`, and delete the hooks you do not implement. A
 service shipped in the build may use the code-level `@registry.register`
@@ -532,7 +533,7 @@ because it was requested earlier. Clear duplicate `playback.keys`/cached-key
 state between independent exchanges so one successful profile cannot suppress
 the next one.
 
-Movies Anywhere is the concrete example: `manifest_resolution`,
+For services that expose source choices, `manifest_resolution`,
 `manifest_codec` and `manifest_color` choose the source family, while the shared
 track settings choose the representations inside the selected MPD. Tests should
 set deliberately different values for all applicable phases and assert the
@@ -603,7 +604,7 @@ menu is how a bug becomes a mystery.
 Two consequences worth knowing:
 
 - **Derive your error from `RuntimeError`.** `class ExampleError(RuntimeError)` -
-  the template does this and `scripts/template_check.py` asserts the rule holds.
+  the template does this and the service tests assert the rule holds.
 - **If you write your own `home()` menu loop** instead of using the inherited one,
   you take on the recovery too, because a generator that raised cannot be resumed
   from outside. Put it beside the `except Back: continue` you already have:
@@ -643,8 +644,8 @@ authorization selector. Give each family its own file or managed cookie profile,
 set the selector's `resets_session=False`, and route read, refresh and logout from
 the selected family without inspecting or clearing the other family. Playback
 must carry its family in `DrmInfo.context`; licence routing follows that recorded
-context rather than whichever setting happens to be selected later. Tencent Video
-is the reference for a Web-cookie client and TV-QR client that coexist this way.
+context rather than whichever setting happens to be selected later. A service
+with multiple independent client families should keep those profiles separate.
 
 This rule also applies when the setting is labelled **platform**, **API version**,
 **region**, **delivery** or **profile**. Selecting another route is not signing
@@ -657,7 +658,7 @@ documented policy; it must not be used as a side effect of changing a selector.
 
 Sign out must write an empty or tombstone state, rather than only deleting, when a
 missing file would be read as "never signed in" and silently re-enter a flow the
-user just left. Xfinity and Rakuten are the reference implementations.
+user just left. Keep the selected route's state independently addressable.
 
 ## Cookies
 

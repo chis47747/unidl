@@ -2,8 +2,8 @@
 
 Two tiers, deliberately kept apart:
 
-* **service settings** - each service's own vocabulary (Amazon's
-  ``FHD_H264_CBR_DASH``, BBC's ``4k/1080p/720p``, Paramount's platform+region).
+* **service settings** - each service's own vocabulary (for example a
+  provider's manifest profile or market selector).
   Declared by the service, only meaningful while that service is active, and
   they usually change *which manifest you get*.
 * **track settings** - one shared vocabulary for every service

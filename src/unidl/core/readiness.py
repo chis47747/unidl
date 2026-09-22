@@ -17,10 +17,18 @@ Grouped, because the groups have different consequences:
 * **tools** - an executable some service shells out to
 * **assets** - a file or module a service needs alongside its code
 * **folders** - where things are written, and whether they can be
+
+Each item also has an impact level independent of its group: ``core`` (red and
+blocking), ``global`` (yellow, such as DRM libraries/devices), or
+``enhancement`` (blue, such as service helpers and Dolby Vision Hybrid tools).
+Only a report with no missing item at any level is fully ``ready``.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +44,23 @@ GROUP_LABEL = {
     "assets": "Files and modules services need",
     "folders": "Where things are kept",
 }
+
+# These are the small set of imports the application itself needs before a
+# service can even be opened.  Service-specific imports are deliberately not in
+# this list: a missing service helper is an incomplete optional capability, not
+# a broken UniDL installation.
+CORE_IMPORTS = (
+    ("textual", "Textual TUI"),
+    ("yaml", "PyYAML"),
+    ("requests", "Requests HTTP client"),
+    ("cryptography", "Cryptography backend"),
+    ("Crypto", "PyCryptodome backend"),
+)
+
+CORE = "core"
+GLOBAL = "global"
+ENHANCEMENT = "enhancement"
+LEVELS = (CORE, GLOBAL, ENHANCEMENT)
 
 
 @dataclass(frozen=True)
@@ -53,12 +78,28 @@ class Item:
     without: str = ""
     #: the services that asked for it, for a helper nothing else explains
     needed_by: tuple[str, ...] = ()
-    #: a missing one of these stops something dead rather than degrading it
+    #: whether the declaring service considers this helper mandatory for its own
+    #: feature (does not change the application-wide dependency level)
     required: bool = False
+    #: impact scope, independent from whether a service declares a helper as
+    #: required for its own feature.  This is what drives the readiness colours.
+    level: str = GLOBAL
 
     @property
     def blocking(self) -> bool:
-        return self.required and not self.ok
+        # ``required=True`` was the pre-level API.  Keep it meaningful for
+        # callers constructing a plain Item, while all built-in service helpers
+        # explicitly use ENHANCEMENT and therefore stay blue.
+        return (self.level == CORE or (self.level == GLOBAL and self.required)) and not self.ok
+
+    @property
+    def severity(self) -> int:
+        """The severity used by the home chip (higher is worse)."""
+        if self.ok:
+            return 0
+        if self.blocking:
+            return 3
+        return {ENHANCEMENT: 1, GLOBAL: 2, CORE: 3}.get(self.level, 2)
 
 
 @dataclass
@@ -76,19 +117,43 @@ class Report:
     def blocking(self) -> list[Item]:
         return [item for item in self.items if item.blocking]
 
+    def missing_at(self, level: str) -> list[Item]:
+        return [item for item in self.items if item.level == level and not item.ok]
+
+    @property
+    def global_missing(self) -> list[Item]:
+        return self.missing_at(GLOBAL)
+
+    @property
+    def enhancement_missing(self) -> list[Item]:
+        return self.missing_at(ENHANCEMENT)
+
+    @property
+    def status(self) -> str:
+        """``missing``, ``global``, ``partial`` or ``ready`` for UI clients."""
+        if self.blocking:
+            return "missing"
+        if self.global_missing:
+            return "global"
+        if self.enhancement_missing:
+            return "partial"
+        return "ready"
+
     def summary(self) -> str:
         """One line for the status chip: what is wrong, or that nothing is."""
-        blocking = len(self.blocking)
-        if blocking:
-            return f"{blocking} missing" if blocking > 1 else "1 missing"
-        optional = len([item for item in self.missing if item.group != "folders"])
-        if optional:
-            return f"{optional} optional missing"
+        if self.blocking:
+            count = len(self.blocking)
+            return f"{count} missing" if count > 1 else "1 missing"
+        if self.global_missing:
+            count = len(self.global_missing)
+            return f"{count} global missing"
+        if self.enhancement_missing:
+            return "partial ready"
         return "ready"
 
     @property
     def ready(self) -> bool:
-        return not self.blocking
+        return self.status == "ready"
 
 
 def _declared(registry) -> dict[str, tuple[Helper, list[str]]]:
@@ -118,6 +183,72 @@ def _drm_items() -> list[Item]:
                 detail=f"{system.suffix} devices" if system.available else "library not installed",
                 hint="" if system.available else system.install_hint,
                 without="cannot be selected as the DRM system",
+                level=GLOBAL,
+            )
+        )
+    return items
+
+
+def _module_items() -> list[Item]:
+    """Check imports needed by UniDL itself, without importing service code."""
+    items: list[Item] = []
+    for module, label in CORE_IMPORTS:
+        try:
+            available = importlib.util.find_spec(module) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            available = False
+        items.append(
+            Item(
+                group="tools",
+                label=label,
+                ok=available,
+                detail="installed" if available else f"Python module {module!r} is not importable",
+                hint=f"python -m pip install {module}",
+                without="the UniDL application cannot provide its normal TUI or downloader runtime",
+                level=CORE,
+            )
+        )
+    return items
+
+
+def _cdm_items(config) -> list[Item]:
+    """Show the global DRM device capability separately from its Python library.
+
+    A remote CDM counts as a device.  This keeps a machine that intentionally
+    uses a remote CDM from being reported as incomplete just because its local
+    ``cdm/`` folder is empty.
+    """
+    try:
+        devices = [
+            *drm_registry.discover(config.cdm_roots()),
+            *drm_registry.remote_devices(config.remote_cdms),
+        ]
+    except Exception:  # noqa: BLE001 - a malformed optional config is not fatal
+        devices = []
+    by_system = {system.id: 0 for system in drm_registry.all_systems()}
+    for device in devices:
+        if device.system in by_system and device.usable:
+            by_system[device.system] += 1
+
+    items: list[Item] = []
+    for system in drm_registry.all_systems():
+        count = by_system.get(system.id, 0)
+        # A device row is useful once the local library can consume it, or when
+        # a remote device is configured.  Otherwise the library row already
+        # explains the missing global capability and a second row would only
+        # repeat the same problem.
+        has_remote = any(device.system == system.id and device.is_remote for device in devices)
+        if not system.available and not has_remote:
+            continue
+        items.append(
+            Item(
+                group="drm",
+                label=f"{system.label} CDM device",
+                ok=count > 0,
+                detail=f"{count} local/remote device(s) configured" if count else "no local or remote device configured",
+                hint=f"Put a {system.suffix} device in {getattr(config.paths, 'cdm', '~/.unidl/cdm')} or configure a remote CDM",
+                without=f"{system.label} protected playback and licensing",
+                level=GLOBAL,
             )
         )
     return items
@@ -143,6 +274,53 @@ def _helper_items(config, registry, resolver: HelperResolver) -> list[Item]:
                 without=helper.degrades_to,
                 needed_by=tuple(sorted(services)),
                 required=helper.required,
+                level=ENHANCEMENT,
+            )
+        )
+    return items
+
+
+def _which(names: tuple[str, ...]) -> str | None:
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _hybrid_items() -> list[Item]:
+    """Optional Hybrid prerequisites, kept visible without making them global."""
+    candidates = {
+        "dovi_tool": ("dovi_tool", "dovi_tool.exe"),
+        "ffmpeg (Hybrid)": ("ffmpeg",),
+        "ffprobe (Hybrid)": ("ffprobe",),
+        "mkvmerge (Hybrid)": ("mkvmerge",),
+    }
+    items: list[Item] = []
+    for label, names in candidates.items():
+        found = _which(names)
+        if not found and label == "dovi_tool":
+            for env_name in ("UNIDL_DOVI_TOOL", "DOVI_TOOL"):
+                value = os.environ.get(env_name)
+                if value and Path(value).is_file():
+                    found = value
+                    break
+            if not found:
+                for value in (Path.home() / "dovi_tool", Path.home() / "dovi_tool.exe"):
+                    if value.is_file():
+                        found = str(value)
+                        break
+        items.append(
+            Item(
+                group="tools",
+                label=label,
+                ok=bool(found),
+                detail=str(found) if found else "not found",
+                hint="Install dovi_tool and its ffmpeg/mkvmerge companions for Hybrid output"
+                if label == "dovi_tool"
+                else "Install the tool to enable Dolby Vision Hybrid output",
+                without="Dolby Vision + HDR10 Hybrid output",
+                level=ENHANCEMENT,
             )
         )
     return items
@@ -173,6 +351,10 @@ def _folder_items(config) -> list[Item]:
                 ok=writable,
                 detail=str(target) + ("" if exists else "  (not created yet)"),
                 without=what if writable else "cannot be written to",
+                # Finished downloads and command files are part of the basic
+                # delivery path.  Token/export/CDM/helper/vault locations are
+                # setup capabilities and remain yellow when unavailable.
+                level=CORE if label in {"Downloads", "Commands"} else GLOBAL,
             )
         )
     return items
@@ -182,7 +364,13 @@ def _writable(path: Path) -> bool:
     import os
 
     try:
-        return os.access(path, os.W_OK)
+        # Paths are created lazily.  Check the nearest existing ancestor rather
+        # than declaring a fresh install broken simply because ``downloads/``
+        # has not been created yet.
+        candidate = path
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
+        return os.access(candidate, os.W_OK)
     except OSError:
         return False
 
@@ -232,11 +420,28 @@ def survey(config, registry=None, *, fresh: bool = False) -> Report:
         registry = default_registry
     resolver = _resolver_for(config, fresh)
     items = (
-        _drm_items() + _helper_items(config, registry, resolver) + _folder_items(config)
+        _module_items()
+        + _drm_items()
+        + _cdm_items(config)
+        + _helper_items(config, registry, resolver)
+        + _hybrid_items()
+        + _folder_items(config)
     )
     order = {name: index for index, name in enumerate(GROUPS)}
-    items.sort(key=lambda item: (order.get(item.group, 99), not item.blocking, item.label.lower()))
+    items.sort(key=lambda item: (order.get(item.group, 99), -item.severity, item.label.lower()))
     return Report(items=items)
 
 
-__all__ = ["GROUPS", "GROUP_LABEL", "Item", "Report", "forget", "survey"]
+__all__ = [
+    "CORE",
+    "CORE_IMPORTS",
+    "ENHANCEMENT",
+    "GLOBAL",
+    "GROUPS",
+    "GROUP_LABEL",
+    "LEVELS",
+    "Item",
+    "Report",
+    "forget",
+    "survey",
+]

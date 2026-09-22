@@ -24,12 +24,16 @@ from ..core.i18n import tr
 from .bidi import visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 
-#: state -> (glyph, palette role). Three states, not two: a missing optional tool
-#: costs a feature, a missing required one stops a service, and drawing both in red
-#: makes the report look broken when it is merely incomplete.
+#: state -> (glyph, palette role).  Core runtime gaps are red, global DRM setup
+#: gaps are yellow, and service/Hybrid enhancements are blue.
 MARK_OK = ("✓", "ok")
 MARK_BLOCKING = ("✗", "error")
-MARK_OPTIONAL = ("·", "warn")
+MARK_GLOBAL = ("·", "warn")
+MARK_ENHANCEMENT = ("+", "manifest")
+# Compatibility name for extensions that imported the old two-state marker.
+# Optional now means an enhancement (blue); global capability gaps have their
+# explicit ``MARK_GLOBAL`` marker.
+MARK_OPTIONAL = MARK_ENHANCEMENT
 
 
 #: The label column. Wide enough for platform labels and every asset name
@@ -49,7 +53,11 @@ def _first_line(text: str) -> str:
 def mark_for(item: readiness.Item) -> tuple[str, str]:
     if item.ok:
         return MARK_OK
-    return MARK_BLOCKING if item.required else MARK_OPTIONAL
+    if item.blocking:
+        return MARK_BLOCKING
+    if item.level == readiness.ENHANCEMENT:
+        return MARK_ENHANCEMENT
+    return MARK_GLOBAL
 
 
 class ReadinessScreen(Screen[None]):
@@ -95,16 +103,14 @@ class ReadinessScreen(Screen[None]):
         head = Text()
         head.append(tr("ready.head"), style=f"bold {palette.accent}")
         head.append("  ·  ", style=palette.dim)
-        blocking = report.blocking
-        if blocking:
-            head.append(tr("ready.missing", count=len(blocking)), style=palette.error)
+        if report.status == "missing":
+            head.append(tr("ready.missing", count=len(report.blocking)), style=palette.error)
+        elif report.status == "global":
+            head.append(tr("ready.global_missing", count=len(report.global_missing)), style=palette.warn)
+        elif report.status == "partial":
+            head.append(tr("ready.partial", count=len(report.enhancement_missing)), style=palette.manifest)
         else:
-            optional = [item for item in report.missing if item.group != "folders"]
-            extra = tr("ready.optional", count=len(optional)) if optional else ""
-            head.append(
-                tr("ready.ok") + extra,
-                style=palette.ok if not optional else palette.fg,
-            )
+            head.append(tr("ready.ok"), style=palette.ok)
         self.query_one("#ready-head", Static).update(head)
 
         body = self.query_one("#ready-body", VerticalScroll)

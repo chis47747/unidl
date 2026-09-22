@@ -12,6 +12,7 @@ and extending the project.
 - [Settings](settings.md) — global, service and output-track preferences.
 - [Requirements and installation](requirements.md) — supported Python versions,
   external tools, package installs and runtime data.
+- [Readiness](readiness.md) — core, global and optional-enhancement dependencies.
 - [Publishing](publishing.md) — PyPI tokens, trusted publishing and GitHub
   account switching.
 - [Changelog](../CHANGELOG.md) — public release notes.

@@ -1718,7 +1718,7 @@ class SessionController:
             # Use the installed service's canonical namespace for output paths,
             # settings and any artefacts written during import.  The document may
             # legitimately carry an older ID which was needed only to find this
-            # service (for example Peacock's former ``pcock`` namespace).
+            # service's former namespace.
             playback.title.service = str(
                 getattr(self.service, "_EXPORT_SOURCE_ID", self.service.ID)
                 or self.service.ID

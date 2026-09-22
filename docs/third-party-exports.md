@@ -15,8 +15,8 @@ UniDL has two deliberately separate export paths:
 ## Security and ownership boundary
 
 A third-party file is data, not a service session.  Its service label is retained
-for naming and display only.  Even if it says `service: amazon`, `service:
-disney`, or another installed ID, importing it does **not**:
+for naming and display only. Even if it contains a provider/service identifier,
+importing it does **not**:
 
 * instantiate or query that service's code;
 * read that service's cookies, token, account or helper state; or

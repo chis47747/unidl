@@ -120,9 +120,9 @@ are applied to explicit searches.
 
 ## Service-specific quality settings
 
-MGM+ keeps manifest resolution (`720`, `1080`, or `2160`) separate from its
-independent `CBCS`/`CENC` choice. Amazon VOD keeps its ApplePlayer 4K request
-profile and `CBR`/`CVBR` bitrate adaptation choice separate as well. The shared
+The public example service exposes a `manifest_profile` (`hd` or `uhd`)
+independently of its `license_profile`. A provider can also declare independent
+codec, encryption or bitrate-adaptation source choices. The shared
 `video_quality` setting is applied only after a returned manifest is parsed; it
 does not choose which manifest profile a service requests.
 

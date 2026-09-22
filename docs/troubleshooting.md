@@ -40,8 +40,11 @@ A declared helper is missing. Install it, or point at it explicitly:
 
 ```yaml
 helpers:
-  java: /opt/homebrew/opt/openjdk/bin/java
+  java: /path/to/java
 ```
+
+Use a portable path in shared configuration, or put Java on `PATH`; do not
+commit a machine-specific installation path.
 
 Required helpers are checked when you try to enter the service; the setup
 notification contains its install hints. See

@@ -98,8 +98,8 @@ KID is still sent to that service's licence endpoint. Init-data discovery runs
 before the final all-cached decision when a manifest can hide additional KIDs
 (for example an HLS media playlist or a Widevine v1 PSSH).
 
-This ordering also applies when a service declares `USES.drm = self` (for
-example Apple, YouTube and Sling) and local or remote lookup is enabled.
+This ordering also applies when a service declares `USES.drm = self`
+and local or remote lookup is enabled.
 Immediately before its service-owned `get_keys()` call, Core performs the same
 local-first/remote-second lookup using the KIDs already present in the parsed
 inventory. A complete hit skips that service's licence request; a partial hit is

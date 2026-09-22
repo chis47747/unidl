@@ -51,11 +51,11 @@ UNIDOWN_AUDIO_VIVID_DECODER_ARGS='-if {input} -of {output}' \
 The template is tokenized without a shell and must contain both `{input}` and
 `{output}`.
 
-## Yangshipin integration
+## Service integration
 
-The Yangshipin service enables `--decode-audio-vivid` on both VOD and live
-downloads. The policy reads the downloaded container rather than inferring an
-audio codec from the requested definition or channel name:
+A service that enables `--decode-audio-vivid` can use the same policy for VOD and
+live downloads. The policy reads the downloaded container rather than inferring
+an audio codec from the requested definition or channel name:
 
 - MPEG-TS uses its PMT stream type and registration descriptor.
 - MP4/M4A uses the audio sample entry (`mp4a`, `ac-3`, `ec-3`, or `av3a`).

@@ -3,8 +3,8 @@
 Three sections, in order of how specific they are:
 
 1. **Global** - what happens on pick, command export, debug. Same everywhere.
-2. **<Service>** - that service's own vocabulary: Amazon's profile strings,
-   BBC's resolution names, Paramount's platform / region / market. Only shown
+2. **<Service>** - that service's own vocabulary: provider profile, region or
+   market names. Only shown
    when a service is active, and services can declare as many of these as they
    need; there is no fixed set.
 3. **Tracks and output** - the shared quality vocabulary, applied against the
