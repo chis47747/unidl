@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import BinaryIO
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
+from ..core.diagnostics import current_recorder
 from .embedding import current_download_runtime
 
 try:  # Optional fast path for environments that ship httpx with HTTP/2 support.
@@ -142,7 +143,31 @@ class NativeHttpClient:
         request_headers = dict(headers or {})
         current_body = body
         for _ in range(max(0, max_redirects) + 1):
-            response = self._request_once(method, current_url, request_headers, timeout, current_body)
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.record_request(method, current_url, request_headers, current_body)
+            started = time.monotonic()
+            try:
+                response = self._request_once(method, current_url, request_headers, timeout, current_body)
+            except Exception as exc:
+                if recorder is not None:
+                    recorder.record_response(
+                        method,
+                        current_url,
+                        None,
+                        request_body=current_body,
+                        elapsed=time.monotonic() - started,
+                        error=exc,
+                    )
+                raise
+            if recorder is not None:
+                recorder.record_response(
+                    method,
+                    current_url,
+                    response,
+                    request_body=current_body,
+                    elapsed=time.monotonic() - started,
+                )
             if response.status not in {301, 302, 303, 307, 308}:
                 if response.status >= 400:
                     detail = f"HTTP Error {response.status}: {response.reason}"

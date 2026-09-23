@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
+from ..core.diagnostics import safe_log_text
 from . import __version__, display
 from .audio import (
     audio_id3_metadata,
@@ -7251,7 +7252,8 @@ def _log_line(args: argparse.Namespace, message: str) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     with log_path.open("a", encoding="utf-8") as file:
-        file.write(f"[{timestamp}] {message}\n")
+        for line in safe_log_text(message).splitlines() or [""]:
+            file.write(f"[{timestamp}] {line}\n")
 
 
 def _write_meta_json(output_dir: Path, save_name: str | None, streams, selected) -> Path:

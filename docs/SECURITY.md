@@ -30,8 +30,11 @@ codebase. There is not yet a separately maintained long-term-support release.
   committing.
 - Never commit `tokens/`, `cdm/`, `db/`, `cookies/`, `helpers/`, command exports,
   logs, `.wvd`, `.prd`, `.mld`, wasm device modules or browser cookie exports.
-- Debug mode can record full URLs, headers and response previews. Review and
-  redact a log before sharing it.
+- Debug mode keeps signed manifest URLs and content keys visible for diagnosis.
+  API headers, account fields, cookies and bearer tokens are redacted; license
+  challenge/response bodies are recorded only after a failed license request.
+  Review a log before sharing it because signed manifests and content keys are
+  still sensitive and may grant access to media.
 - A `PartnerAuthorization` URL is a single-use bearer secret. Transfer it only
   through core's in-memory handoff, consume it immediately, and never render,
   log, serialize, queue or persist it. See

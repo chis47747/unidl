@@ -126,7 +126,7 @@
   "update.note.media_types": "Script-based manifest URLs and URL spaces are handled without rebuilding signed queries.",
   "update.note.documentation": "HLS initialization sections retain their original AES key scope; legacy TS/AAC SAMPLE-AES downloads are supported.",
   "update.note.clipboard": "Optional Dolby Vision + HDR10 hybrid output is configurable globally and per service; matching sources and external tools are required.",
-  "update.note.update_checker": "UniDL v2.1.4 adds tiered readiness checks, public dependency documentation and portable public-package guidance.",
+  "update.note.update_checker": "UniDL v2.1.5 adds timestamped debug diagnostics, credential-safe request tracing and safer multi-title imports.",
   "update.close_hint": "esc / x closes this window",
   "home.chip.config": "config",
   "home.chip.config_create": "create",

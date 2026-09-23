@@ -7,11 +7,14 @@ never touch implementation details and the TUI never builds command lines by han
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import math
 import re
 import threading
+import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -51,6 +54,7 @@ from .delivery import (
 from .delivery import (
     LiveKeyRequest as CoreLiveKeyRequest,
 )
+from .diagnostics import DebugRecorder, activate, safe_log_text
 from .playback import Playback, normalize_live_record_limit
 from .secureio import atomic_write_text, locked_path, private_directory, private_file
 from .settings import Settings, normalize_drop_video_pattern
@@ -513,7 +517,19 @@ class Engine:
         vault_collection: vaults.Vaults | None = None,
     ):
         self.config = config
-        self.log: LineSink = log or (lambda _line: None)
+        self._log_sink: LineSink = log or (lambda _line: None)
+        # A download can be embedded in Textual (and more than one task may be
+        # queued).  Keep the diagnostic destination context-local instead of
+        # swapping ``self.log`` for the duration of a run; swapping a shared
+        # Engine's callback would make one task's URLs/headers land in another
+        # task's log.  The normal TUI sink remains unchanged.
+        self._debug_log_path: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+            "unidl_debug_log_path", default=None
+        )
+        self._debug_task_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "unidl_debug_task_id", default=""
+        )
+        self._debug_log_lock = threading.RLock()
         #: UniDL's native downloader implementation. Core execution below speaks
         #: only in DeliveryPlan/DeliveryEvent/DeliveryResult values.
         self.downloader = NativeDownloaderBackend()
@@ -541,6 +557,74 @@ class Engine:
         # A shared TUI collection was built before this Engine got its live log
         # sink. Route later backend diagnostics to the current delivery screen.
         self.vaults.log = lambda line: self.log(line)
+
+    @property
+    def log(self) -> LineSink:
+        """The public log callback, retaining the debug-file wrapper."""
+        return self._emit_log
+
+    @log.setter
+    def log(self, sink: LineSink | None) -> None:
+        # A few service/session paths replace ``engine.log`` after construction.
+        # Keep that supported, but change only the host sink; replacing the
+        # wrapper itself would silently disable debug persistence in the TUI.
+        self._log_sink = sink or (lambda _line: None)
+
+    def _emit_log(self, line: str) -> None:
+        """Send a line to the host and, in debug mode, persist full diagnostics.
+
+        The native downloader already writes its lower-level progress to the
+        path in ``DownloadOptions.log_file_path``.  Core messages (service
+        requests, DRM/vault decisions and manifest probing) used to bypass that
+        path entirely, which made the debug switch appear ineffective.  Keep
+        this deliberately independent of the TUI so headless and embedded runs
+        receive the same evidence.
+        """
+        # A few offline/service tests construct ``Engine`` with
+        # ``object.__new__`` and install only the public ``log`` callback.  Keep
+        # that lightweight construction compatible with the diagnostic wrapper.
+        sink = getattr(self, "_log_sink", None)
+        if sink is not None:
+            sink(line)
+        path_var = getattr(self, "_debug_log_path", None)
+        if path_var is None:
+            return
+        path = path_var.get()
+        if path is None:
+            return
+        self._append_debug_line(path, line)
+
+    def _append_debug_line(self, path: Path, line: str) -> None:
+        """Append one or more diagnostic lines, tolerating unavailable storage."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            text = safe_log_text(line).replace("\r\n", "\n").replace("\r", "\n")
+            with self._debug_log_lock, path.open("a", encoding="utf-8") as file:
+                for entry in text.splitlines() or [""]:
+                    task = self._debug_task_id.get()
+                    marker = f" [{task}]" if task else ""
+                    file.write(f"[{stamp}]{marker} {entry}\n")
+        except OSError:
+            # Diagnostics must never make an otherwise valid download fail (for
+            # example, a read-only logs directory on a portable installation).
+            return
+
+    def _debug_log_start(self, path: Path, playback: Playback) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._debug_log_lock, path.open("a", encoding="utf-8") as file:
+            task = self._debug_task_id.get()
+            marker = f" [{task}]" if task else ""
+            file.write(f"[{stamp}]{marker} UniDL debug task start: {playback.save_name}\n")
+
+    def _debug_log_end(self, path: Path, result: DownloadResult) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        status = "ok" if result.ok else ("cancelled" if result.cancelled else "failed")
+        task = self._debug_task_id.get()
+        marker = f" [{task}]" if task else ""
+        with self._debug_log_lock, path.open("a", encoding="utf-8") as file:
+            file.write(f"[{stamp}]{marker} UniDL debug task end: {status}\n")
 
     def shutdown_active_download(self) -> None:
         """Immediately release the native delivery owned by this engine."""
@@ -2736,7 +2820,10 @@ class Engine:
             vgc_keep_opaque=overrides.vgc_keep_opaque,
             temp_dir=self.config.paths.temp,
             log_file=(
-                self.config.paths.logs / f"{playback.save_name}.log"
+                (
+                    self._debug_log_path.get()
+                    or self.config.paths.logs / f"{playback.save_name}.log"
+                )
                 if debug
                 else None
             ),
@@ -2842,7 +2929,14 @@ class Engine:
             write_meta_json=debug,
             keep_temp=debug or bool(settings.get("keep_temp", False)),
             no_del_after_done=debug or not bool(settings.get("delete_temp_after_done", True)),
-            log_file_path=str(self.config.paths.logs / f"{playback.save_name}.log") if debug else None,
+            log_file_path=(
+                str(
+                    self._debug_log_path.get()
+                    or self.config.paths.logs / f"{playback.save_name}.log"
+                )
+                if debug
+                else None
+            ),
         )
         if drm is not None:
             options.custom_hls_key = drm.hls_key
@@ -3121,12 +3215,54 @@ class Engine:
         same run continues when it is cleared.
         """
         command = self.command_for(playback, settings, tracks)
+        debug_recorder = None
+        debug_context = None
+        debug_path = (
+            self.config.paths.logs
+            / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', playback.save_name)[:100]}_"
+            f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.log"
+            if bool(settings.get("debug", False))
+            else None
+        )
+        debug_token = None
+        task_token = None
+        if debug_path is not None:
+            # Create the file before network/DRM work starts.  This makes a
+            # failed manifest or licence preparation diagnosable too, rather
+            # than only successful downloads producing a log.
+            debug_token = self._debug_log_path.set(debug_path)
+            task_id = debug_path.stem.rsplit("_", 1)[-1]
+            task_token = self._debug_task_id.set(task_id)
+            debug_recorder = DebugRecorder(debug_path, session_id=task_id)
+            debug_context = activate(debug_recorder)
+            debug_context.__enter__()
+            try:
+                self._debug_log_start(debug_path, playback)
+            except OSError:
+                # A read-only diagnostics directory must not prevent a download.
+                pass
+            # Make the active diagnostics destination visible in the TUI.  The
+            # actual file still contains the lower-level downloader output and
+            # sensitive request details; this line is only a pointer.
+            self.log(f"debug log: {debug_path}")
         where = self.save_dir(settings, playback.title.service)
         where.mkdir(parents=True, exist_ok=True)
 
         if cancel is not None and cancel.is_set():
             # asked to stop before it even started, which happens to the rest of
             # a batch when one is cancelled
+            if debug_path is not None and debug_token is not None:
+                try:
+                    self._debug_log_end(debug_path, DownloadResult(CANCELLED_EXIT, where, command))
+                except OSError:
+                    pass
+                self._debug_log_path.reset(debug_token)
+                if task_token is not None:
+                    self._debug_task_id.reset(task_token)
+                if debug_context is not None:
+                    debug_context.__exit__(None, None, None)
+                if debug_recorder is not None:
+                    debug_recorder.close()
             return DownloadResult(CANCELLED_EXIT, where, command)
 
         progress_screen: _StructuredProgressScreen | None = None
@@ -3173,6 +3309,12 @@ class Engine:
                         progress_screen.status(lines)
                         return
                     for line in lines:
+                        # Downloader callbacks may run on its worker threads;
+                        # ContextVar state is intentionally not inherited by
+                        # those threads.  Persist the callback explicitly so
+                        # their detailed messages are not lost from debug logs.
+                        if debug_path is not None and self._debug_log_path.get() is None:
+                            self._append_debug_line(debug_path, line)
                         self.log(line)
                     return
                 if isinstance(event, (StageEvent, ArtifactEvent)):
@@ -3212,12 +3354,26 @@ class Engine:
         finally:
             if progress_screen is not None:
                 progress_screen.finish()
-            if debug_log := (
-                self.config.paths.logs / f"{playback.save_name}.log"
-                if settings.get("debug", False)
-                else None
-            ):
-                private_file(debug_log)
+            if debug_path is not None:
+                result_status = DownloadResult(
+                    exit_code=exit_code,
+                    output_dir=where,
+                    command=command,
+                    failure=failure,
+                )
+                try:
+                    self._debug_log_end(debug_path, result_status)
+                    private_file(debug_path)
+                except OSError:
+                    pass
+                if debug_token is not None:
+                    self._debug_log_path.reset(debug_token)
+                if task_token is not None:
+                    self._debug_task_id.reset(task_token)
+                if debug_context is not None:
+                    debug_context.__exit__(None, None, None)
+                if debug_recorder is not None:
+                    debug_recorder.close()
         return DownloadResult(
             exit_code=exit_code,
             output_dir=where,

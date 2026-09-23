@@ -23,6 +23,7 @@ import asyncio
 import re
 import threading
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ from unidl.downloader.utils import pretty_codec
 
 from ..core import chapters as chapter_model
 from ..core import exports, naming
+from ..core.diagnostics import DebugRecorder, activate, current_recorder
 from ..core.engine import Engine, TrackSet
 from ..core.flow import (
     SCOPE_DELIVERY,
@@ -825,6 +827,9 @@ class SessionController:
         state = logline.normalise(level)
         if state == "info" and self.job_running:
             state = logline.LIVE_STATE
+        recorder = current_recorder()
+        if recorder is not None:
+            recorder.log(message, event=f"tui.{state}")
         self.emit_line(LogLine(body=str(message), state=state))
 
     def post_field(self, label: str, value: str, role: str) -> None:
@@ -837,6 +842,9 @@ class SessionController:
         they have always had while the dot in front of them stays plain: a field
         states a value, it does not report progress.
         """
+        recorder = current_recorder()
+        if recorder is not None:
+            recorder.log(f"{label}: {value}", event="tui.field")
         self.emit_line(LogLine(body=str(value), label=str(label), role=role))
 
     def emit_line(self, renderable: Any) -> None:
@@ -1600,6 +1608,33 @@ class SessionController:
             self._worker_finished()
 
     def _drive(self) -> None:
+        """Run a service flow, adding a session diagnostic log when enabled."""
+        if not self.settings.get("debug"):
+            return self._drive_impl()
+        safe_service = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self.service.ID or "service"))
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = self.engine.config.paths.logs / f"session_{safe_service}_{stamp}_{uuid.uuid4().hex[:8]}.log"
+        recorder = DebugRecorder(path)
+        with activate(recorder):
+            recorder.log(
+                f"session start service={self.service.ID} name={self.service.NAME}",
+                event="session.start",
+            )
+            recorder.log(
+                "diagnostics policy: credentials redacted; signed manifests and content keys retained; "
+                "license payloads retained only after failure",
+                event="session.start",
+            )
+            try:
+                return self._drive_impl()
+            except BaseException as exc:
+                recorder.record_exception("session aborted", exc)
+                raise
+            finally:
+                recorder.log("session end", event="session.end")
+                recorder.close()
+
+    def _drive_impl(self) -> None:
         """Run the service flow to completion. Worker thread."""
         presenter = TextualPresenter(self)
         # interactive: a person is answering these, which is what lets an entry
@@ -1648,7 +1683,11 @@ class SessionController:
             if self.settings.get("debug"):
                 import traceback
 
-                for line in traceback.format_exc().splitlines():
+                trace = traceback.format_exc()
+                recorder = current_recorder()
+                if recorder is not None:
+                    recorder.log(trace, event="exception.traceback")
+                for line in trace.splitlines():
                     self.post_log(line)
         finally:
             self.engine.live_key_input = None

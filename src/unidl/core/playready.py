@@ -301,10 +301,19 @@ def get_keys(
             wrm_header,
             custom_data=custom_data,
         )
-        response = transport(challenge)
-        if not response:
-            raise PlayReadyUnavailable("License server returned an empty response")
-        cdm.parse_license(session_id, response)
+        response = None
+        try:
+            response = transport(challenge)
+            if not response:
+                raise PlayReadyUnavailable("License server returned an empty response")
+            cdm.parse_license(session_id, response)
+        except Exception as exc:
+            from .diagnostics import current_recorder
+
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.record_license_failure(challenge, response, exc)
+            raise
         keys = [f"{key.key_id.hex}:{key.key.hex()}" for key in cdm.get_keys(session_id)]
         if not keys:
             raise PlayReadyUnavailable("License parsed but contained no content keys")

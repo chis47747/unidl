@@ -103,10 +103,19 @@ def get_keys(
             raise CdmError(f"Invalid PSSH: {exc}") from exc
 
         challenge = cdm.get_license_challenge(session_id, pssh_obj)
-        response = transport(challenge)
-        if not response:
-            raise CdmError("License server returned an empty response")
-        cdm.parse_license(session_id, response)
+        response = None
+        try:
+            response = transport(challenge)
+            if not response:
+                raise CdmError("License server returned an empty response")
+            cdm.parse_license(session_id, response)
+        except Exception as exc:
+            from .diagnostics import current_recorder
+
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.record_license_failure(challenge, response, exc)
+            raise
 
         keys = [
             f"{key.kid.hex}:{key.key.hex()}"

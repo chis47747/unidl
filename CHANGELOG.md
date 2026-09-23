@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.1.5] - 2026-09-23
+
+### Diagnostics and safer batch handling
+
+- Added timestamped session and per-task debug diagnostics with task IDs,
+  request/response metadata, bounded response previews and full tracebacks.
+- Redact credentials, cookies and bearer tokens in diagnostics while retaining
+  signed manifest URLs and content keys; record licence challenge/response
+  payloads only when a licence exchange fails.
+- Keep debug logging active when the TUI replaces the normal log callback and
+  when downloads run concurrently.
+- Opening a multi-title export from the Home input now opens the title chooser
+  instead of silently starting the first entry.
+- Document the debug log layout and sensitive-data policy.
+
 ## [2.1.4] - 2026-09-22
 
 ### Public readiness and documentation

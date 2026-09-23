@@ -1,8 +1,13 @@
 # Troubleshooting
 
-Turn on `debug` first (`s` -> Interface & diagnostics -> Debug mode). It logs full URLs, the
-license exchange, the resolved UniDL command, keeps temp files, and writes a
-per-task log under `paths.logs`.
+Turn on `debug` first (`s` -> Interface & diagnostics -> Debug mode). It writes a
+timestamped session log and a separate timestamped per-task log under
+`paths.logs`, keeps temp files, and records the resolved UniDL command. Signed
+manifest URLs are kept intact so a short-lived manifest can be reproduced. API
+requests include redacted request headers, response status/headers and a bounded
+response preview. Account passwords, cookies, bearer tokens and similar
+credentials are redacted. Content keys remain visible for key troubleshooting;
+license challenges and responses are recorded only when a license request fails.
 
 ## Importing and registering a service package
 

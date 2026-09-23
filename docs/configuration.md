@@ -79,7 +79,7 @@ directories below are derived from it; finished downloads are the exception:
 | commands | Saved command/export text, grouped by service. |
 | exports | Re-importable resolved-title JSON documents. |
 | cache / temp | Manifest, segment and transient working data. |
-| logs | Debug and task logs. |
+| logs | Timestamped session and per-task debug logs. |
 | tokens | Service login and refresh state. |
 | cookies | Browser cookie profiles, grouped by service. |
 | cdm | Local device files, grouped by DRM system. |

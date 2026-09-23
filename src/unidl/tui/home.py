@@ -1090,6 +1090,14 @@ class HomeScreen(Screen):
             self.notify(f"{path.name}: {exc}", title="Not an export", severity="error", timeout=8)
             return True
         self.query_one("#filter", Input).value = ""
+        if len(document.entries) > 1:
+            # A path pasted into the home input follows the same explicit batch
+            # rule as the export-folder screen: never start the first title merely
+            # because it happens to be first in the JSON file.
+            from .import_screen import ExportEntryScreen
+
+            self.app.push_screen(ExportEntryScreen(document, source_name=path.name))
+            return True
         if self.app.open_import(document):
             self.notify(f"Importing {document.label()}", timeout=4)
         return True
