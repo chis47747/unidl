@@ -33,6 +33,14 @@ usually as a platform-specific service bundle alongside UniDL rather than in
 the generic `py3-none-any` UniDL wheel. Do not copy tokens, cookies, CDMs, or
 other runtime credentials into a compiled package.
 
+A service may keep several bundles together by declaring `variants_dir` in its
+root manifest. Each child directory contains its own `service.toml` and native
+extensions. UniDL selects exactly one child by the running Python ABI and
+platform, then loads the selected extension under the canonical service package
+name so relative imports retain the normal service contract. If none or more
+than one variant matches, the service is isolated and readiness reports the
+reason.
+
 Register the package from **Settings → Services → Register a service**, restart
 UniDL, and verify it with `unidl services`. A compiled-only package can keep all
 normal service settings, login flows, playback and downloader behaviour because

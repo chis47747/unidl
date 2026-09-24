@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.7] - 2026-09-24
+
+### Compiled-only service compatibility
+
+- Added ABI- and platform-aware selection for services that ship several
+  compiled-only variants in one package.
+- Load the selected native service and API extensions under their canonical
+  service namespace, preserving normal relative imports and isolating
+  incompatible variants without blocking other services.
+- Expanded compiled-service documentation with multi-variant packaging and
+  compatibility guidance.
+
 ## [2.1.6] - 2026-09-24
 
 ### DRM and chapter compatibility

@@ -126,7 +126,7 @@
   "update.note.media_types": "支援腳本形式的 manifest 位址及 URL 空格，不重建已簽署的查詢參數。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 金鑰作用域，支援舊式 TS/AAC SAMPLE-AES 下載。",
   "update.note.clipboard": "可全域或按服務啟用 Dolby Vision + HDR10 混合輸出；需要匹配的來源軌道及外部工具。",
-  "update.note.update_checker": "UniDL v2.1.6 增加 PlayReady 僅 KID 回退、音訊章節嵌入，以及具 ABI 感知的編譯服務載入。",
+  "update.note.update_checker": "UniDL v2.1.7 增加按 ABI/平台選擇編譯服務變體，並改進原生擴充功能的安全載入。",
   "update.close_hint": "按 esc / x 關閉視窗",
   "home.chip.config": "設定檔",
   "home.chip.config_create": "建立",
