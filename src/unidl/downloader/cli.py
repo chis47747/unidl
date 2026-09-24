@@ -397,7 +397,7 @@ def _build_parser(
     g_mux.add_argument("--mux", "-M", "--mux-after-done", action="store_true", help="Mux selected tracks into one output file.")
     g_mux.add_argument("--no-mux", "--skip-merge", dest="no_mux", action="store_true", help="Do not mux automatically when multiple tracks are selected.")
     g_mux.add_argument("--mux-import", action="append", help='Import external media during mux, e.g. --mux-import "path=sub.srt:lang=eng:name=English".')
-    g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final video container.")
+    g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final audio or video container.")
     g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge"], default="auto")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
     g_net.add_argument("--custom-range", help="Only download selected media segment range, e.g. 1-100,120-160.")
@@ -836,8 +836,14 @@ def _download(args: argparse.Namespace) -> int:
         return 1
     selected = _replace_direct_audio_with_matching_sabr_audio(selected, streams)
     hydrated = [_hydrate_stream(stream, headers=headers, no_probe=args.no_probe, base_url=args.base_url) for stream in selected]
-    if chapter_records and not any(stream.media_type == "video" for stream in hydrated):
-        raise ChapterFileError("Chapter metadata requires at least one selected video track.")
+    if (
+        chapter_records
+        and not getattr(args, "no_mux", False)
+        and not any(stream.media_type in {"audio", "video"} for stream in hydrated)
+    ):
+        raise ChapterFileError(
+            "Chapter metadata requires at least one selected audio or video track."
+        )
     if getattr(args, "dash_full_base_url", False):
         converted = _apply_dash_full_base_url_mode(hydrated, headers=headers, no_probe=args.no_probe, colors=colors)
         if not converted:
@@ -4720,6 +4726,7 @@ def _transcode_audio_output(
         output_path=output_path,
         metadata=audio_id3_metadata(stream),
         cover_path=_audio_cover_path(stream, args, headers),
+        chapters_file=getattr(args, "chapters_file", None),
         copy_audio=(
             output_format == "mp3" and _stream_is_mp3_audio(stream)
         ) or (
@@ -8007,10 +8014,12 @@ def _should_mux_after_download(args: argparse.Namespace, mux_imports: list, down
         return False
     if getattr(args, "mux", False) or mux_imports:
         return True
-    if getattr(args, "chapters_file", None) and any(
-        getattr(stream, "media_type", None) == "video" for stream in selected_streams
-    ):
-        return True
+    if getattr(args, "chapters_file", None):
+        media_types = {getattr(stream, "media_type", None) for stream in selected_streams}
+        if "video" in media_types:
+            return True
+        if "audio" in media_types and not getattr(args, "audio_format", None):
+            return True
     if getattr(args, "mux_format", None) and not _only_subtitle_streams(selected_streams):
         return True
     if getattr(args, "audio_format", None) and not any(

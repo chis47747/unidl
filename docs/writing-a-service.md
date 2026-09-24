@@ -336,14 +336,6 @@ An empty tuple means the app-wide DRM choice applies. One item is a fact about
 the service and overrides the app-wide preference. Several items add a
 service-scoped `drm_system` setting. The order is the service's preference.
 
-ChinaDRM is currently a shared protocol with service-owned provision identity,
-not a globally registered device system. A ChinaDRM service uses
-`Capabilities().with_self("drm")`, pins `DrmInfo.system` to `CHINADRM`, keeps its
-provision cache and HTTP session under that service, and uses the neutral codec
-from `unidl.core.chinadrm`. Do not add it to `DRM_SYSTEMS` or reuse another
-service's provision material. The complete contract is in
-[chinadrm.md](chinadrm.md).
-
 There is no default licence POST. Every networked DRM service implements its own
 transport, even when the endpoint accepts a raw challenge. Core owns CDM loading,
 challenge creation, licence parsing and key extraction; the service owns the URL,
@@ -758,10 +750,37 @@ for diagnostics and for the platform list; they do not select alternate
 hooks. Use `login()`/`auth_status()`, the flow entry points, `Playback`, and
 `save_name()` directly regardless of those fields.
 
-In particular, there is no `get_tracks()` hook. A local `.json` manifest path
-may be supplied as `manifest_url`, because native delivery core can parse that input. The
-`Playback.json_manifest` dictionary field exists in the model but the current
-delivery controller skips it; do not use it for a native service yet.
+There is no `get_tracks()` hook that lets a service replace Core's parser. A
+service may, however, implement `filter_tracks(playback, tracks, log)` after
+the manifest has been parsed. Return an iterable containing only the existing
+`StreamInfo` objects that should be exposed to automatic selection and the
+interactive track picker, or return `None` to keep the complete ladder:
+
+```python
+def filter_tracks(self, playback, tracks, log):
+    del playback, log
+    return [
+        stream
+        for stream in tracks.streams
+        if not (
+            stream.media_type == "audio"
+            and str(stream.role or "").casefold() == "audio description"
+        )
+    ]
+```
+
+This is an output filter only. Core keeps `tracks.streams` unchanged for DRM,
+vault lookup and export provenance; the returned subset is available as
+`tracks.selectable_streams`. Do not create replacement stream objects, perform
+licensing, or remove entries from `tracks.streams`. Use `role`, `name`,
+`language` and `extra` together when a provider's Audio Description metadata
+is inconsistent. `name` is a display label, not a language field, so changing
+it to `und` is not a reliable way to affect automatic selection.
+
+A local `.json` manifest path may be supplied as `manifest_url`, because native
+delivery core can parse that input. The `Playback.json_manifest` dictionary
+field exists in the model but the current delivery controller skips it; do not
+use it for a native service yet.
 
 ## Playback and concurrency sessions
 

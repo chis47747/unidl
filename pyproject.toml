@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.1.5"
+version = "2.1.6"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,9 @@ Repository = "https://github.com/chis47747/unidl"
 Issues = "https://github.com/chis47747/unidl/issues"
 
 [project.optional-dependencies]
+compiled = [
+    "Cython>=3.0,<4",
+]
 dev = [
     "build>=1.2",
     "pytest>=8.0",

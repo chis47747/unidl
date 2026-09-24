@@ -23,6 +23,14 @@ On a minimal distribution with no packages, Home shows the directory path and
 the same Settings route. A CDM warning can appear at the same time; it is
 independent, and only becomes relevant when a service requests DRM keys.
 
+If the package is **compiled-only**, readiness may show a blue enhancement item
+such as `Python ABI cpython-312 is not supported` or `platform windows-x86_64 is
+not supported`. This means the service bundle was built for a different Python
+ABI or operating system; install the matching native bundle. UniDL deliberately
+does not fall back to source code (there may be none), and it keeps the rest of
+the application running. See [compiled-only services](compiled-services.md) for
+the manifest fields and build matrix.
+
 ## Only native services appear on the main screen
 
 Only services that are both loaded and user-registered appear on the main

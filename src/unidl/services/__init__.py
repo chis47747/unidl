@@ -7,13 +7,17 @@ module makes service discovery deterministic for the TUI, CLI and headless
 tests.
 """
 
+import logging
 from importlib import import_module
 from types import ModuleType
 
+from ..core.compiled_service import CompiledServiceError, register_compiled_services
 from ..core.service import Service, registry
-from ..core.service_catalog import discover_sources
+from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, discover_sources
 
-__all__ = []
+__all__ = ["compiled_service_errors"]
+
+_COMPILED_SERVICE_ERRORS: dict[str, str] = {}
 
 
 def _register_module_services(module: ModuleType) -> None:
@@ -51,10 +55,29 @@ def load_all(config=None) -> int:
     registered from the TUI may rely on the loader's class discovery instead.
     """
     for source in discover_sources():
-        module = import_module(f"{__name__}.{source.package}")
-        _register_module_services(module)
+        if source.implementation == COMPILED_ONLY_IMPLEMENTATION:
+            _COMPILED_SERVICE_ERRORS.pop(source.service_id, None)
+            try:
+                register_compiled_services(
+                    f"{__name__}.{source.package}",
+                    manifest_path=source.manifest or source.path,
+                )
+            except CompiledServiceError as exc:
+                _COMPILED_SERVICE_ERRORS[source.service_id] = str(exc)
+                logging.getLogger(__name__).warning(
+                    "compiled-only service %s is unavailable: %s", source.service_id, exc
+                )
+        else:
+            module = import_module(f"{__name__}.{source.package}")
+            _register_module_services(module)
     # Declaration validation only needs class metadata and setting keys.  The
     # config-dependent device option lists are built lazily when a service is
     # opened; resolving every local WVD/PRD here made startup needlessly slow.
     registry.validate()
     return len(registry.all())
+
+
+def compiled_service_errors() -> dict[str, str]:
+    """Return compiled-only services that failed without stopping UniDL."""
+
+    return dict(_COMPILED_SERVICE_ERRORS)

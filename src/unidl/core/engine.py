@@ -456,6 +456,16 @@ class TrackSet:
     #: parsed and merged into this ladder. This is provenance metadata only;
     #: Hybrid also supports a single manifest containing both layers.
     merged_profiles: bool = False
+    #: The output-visible subset supplied by a service's post-parse filter.
+    #: Keep the complete ``streams`` ladder intact for DRM, vault lookup and
+    #: export provenance; only selection and the interactive picker use this
+    #: view. ``None`` means that every parsed stream is visible.
+    output_streams: list[StreamInfo] | None = field(default=None, repr=False)
+
+    @property
+    def selectable_streams(self) -> list[StreamInfo]:
+        """Streams eligible for output selection and the track picker."""
+        return self.streams if self.output_streams is None else self.output_streams
 
     @property
     def video(self) -> list[StreamInfo]:
@@ -470,9 +480,12 @@ class TrackSet:
         return [s for s in self.streams if s.media_type in {"subtitle", "subtitles", "text"}]
 
     def summary(self) -> str:
+        streams = self.selectable_streams
         return (
-            f"{len(self.selected)} selected / {len(self.streams)} total | "
-            f"{len(self.video)} video | {len(self.audio)} audio | {len(self.subtitles)} subtitle"
+            f"{len(self.selected)} selected / {len(streams)} total | "
+            f"{sum(s.media_type == 'video' for s in streams)} video | "
+            f"{sum(s.media_type == 'audio' for s in streams)} audio | "
+            f"{sum(s.media_type in {'subtitle', 'subtitles', 'text'} for s in streams)} subtitle"
         )
 
 
@@ -1931,10 +1944,12 @@ class Engine:
             for stream in streams
             if id(stream) in tracks.origins
         }
+        visible_ids = {id(stream) for stream in tracks.selectable_streams}
         return TrackSet(
             streams=streams,
             selected=encrypted,
             origins=origins,
+            output_streams=[stream for stream in streams if id(stream) in visible_ids],
             merged_profiles=tracks.merged_profiles,
         )
 
@@ -2040,10 +2055,14 @@ class Engine:
                 )
             manifest = self._parse_playback_manifest(playback, settings)
             streams = self.downloader.streams(manifest)
-            return TrackSet(
-                streams=streams,
-                manifest=manifest,
-                origins={id(stream): playback for stream in streams},
+            return self._apply_track_filter(
+                playback,
+                TrackSet(
+                    streams=streams,
+                    manifest=manifest,
+                    origins={id(stream): playback for stream in streams},
+                ),
+                service,
             )
 
         # A third-party export may combine a typed JSON source (resolved HLS
@@ -2094,10 +2113,14 @@ class Engine:
         if len(manifests) == 1:
             streams = self.downloader.streams(manifests[0])
             origin = successful_variants[0]
-            return TrackSet(
-                streams=streams,
-                manifest=manifests[0],
-                origins={id(stream): origin for stream in streams},
+            return self._apply_track_filter(
+                playback,
+                TrackSet(
+                    streams=streams,
+                    manifest=manifests[0],
+                    origins={id(stream): origin for stream in streams},
+                ),
+                service,
             )
 
         merged = self.downloader.merge(manifests)
@@ -2115,11 +2138,15 @@ class Engine:
             f"merged {len(manifests)} authorized manifests into "
             f"{len(streams)} distinct tracks"
         )
-        return TrackSet(
-            streams=streams,
-            manifest=merged,
-            origins=origins,
-            merged_profiles=len(manifests) > 1,
+        return self._apply_track_filter(
+            playback,
+            TrackSet(
+                streams=streams,
+                manifest=merged,
+                origins=origins,
+                merged_profiles=len(manifests) > 1,
+            ),
+            service,
         )
 
     def _parse_manifest_segments(
@@ -2158,7 +2185,11 @@ class Engine:
             f"merged {len(manifests)} authorized timeline windows into "
             f"{max((stream.segments_count for stream in streams), default=0)} segments"
         )
-        return TrackSet(streams=streams, manifest=merged, origins=origins)
+        return self._apply_track_filter(
+            playback,
+            TrackSet(streams=streams, manifest=merged, origins=origins),
+            service,
+        )
 
     def _parse_playback_manifest(
         self,
@@ -2209,6 +2240,31 @@ class Engine:
             raise last_error
         raise ValueError("Playback did not provide a usable manifest URL")
 
+    def _apply_track_filter(self, playback: Playback, tracks: TrackSet, service) -> TrackSet:
+        """Apply a service's output-only track filter without shrinking DRM data."""
+        if service is None:
+            return tracks
+        filter_tracks = getattr(service, "filter_tracks", None)
+        if not callable(filter_tracks):
+            return tracks
+        visible = filter_tracks(playback, tracks, self.log)
+        if visible is None:
+            return tracks
+        visible = list(visible)
+        known = {id(stream) for stream in tracks.streams}
+        foreign = [stream for stream in visible if id(stream) not in known]
+        if foreign:
+            raise ValueError(
+                "service track filter returned a stream that did not come from "
+                "the parsed manifest"
+            )
+        tracks.output_streams = visible
+        self.log(
+            f"service track filter: {len(visible)} of {len(tracks.streams)} "
+            "streams available for output"
+        )
+        return tracks
+
     @staticmethod
     def _apply_video_range_hint(playback: Playback, streams: Sequence[StreamInfo]) -> None:
         hint = str(playback.video_range_hint or "").strip().upper()
@@ -2238,7 +2294,7 @@ class Engine:
         """Apply shared Track output selection to an already parsed ladder."""
         kwargs = {"strict": True} if playback.strict_track_selection else {}
         tracks.selected = self.auto_select(
-            tracks.streams,
+            tracks.selectable_streams,
             settings,
             audio_only=playback.audio_only,
             quality_override=playback.video_quality_hint,
@@ -2269,7 +2325,7 @@ class Engine:
     def ensure_hybrid_tracks(tracks: TrackSet, selected: Sequence[StreamInfo]) -> list[StreamInfo]:
         """Add matching HDR base/DV ingredients when hybrid output is enabled."""
         chosen_ids = {id(stream) for stream in selected}
-        videos = [stream for stream in tracks.streams if stream.media_type == "video" and not stream.is_live]
+        videos = [stream for stream in tracks.selectable_streams if stream.media_type == "video" and not stream.is_live]
         dv = [stream for stream in videos if "DV" in str(stream.video_range or "").upper() and "HDR10" not in str(stream.video_range or "").upper()]
         hdr = [stream for stream in videos if str(stream.video_range or "").upper() in {"HDR10", "HDR10+", "HDR"}]
         # The DV layer is metadata only. Use the lowest available DV rendition,
@@ -2287,7 +2343,7 @@ class Engine:
             chosen_ids.add(id(max(hdr, key=lambda item: item.bandwidth or 0)))
         else:
             return list(selected)
-        return [stream for stream in tracks.streams if id(stream) in chosen_ids]
+        return [stream for stream in tracks.selectable_streams if id(stream) in chosen_ids]
 
     def load_tracks(
         self,

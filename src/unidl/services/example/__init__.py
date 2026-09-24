@@ -183,6 +183,17 @@ class Example(Service):
             note="Example Service playback scaffold",
         )
 
+    def filter_tracks(self, playback, tracks, log):
+        """Optionally hide provider-specific tracks from output selection.
+
+        Core keeps ``tracks.streams`` intact for DRM, vault lookup and exports.
+        Return only existing stream objects here; the returned list becomes
+        ``tracks.selectable_streams`` for automatic selection and the picker.
+        Returning ``None`` keeps every parsed stream visible.
+        """
+        del playback, tracks, log
+        return None
+
     # ------------------------------------------------------------------- DRM
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
         """Send a Widevine challenge through this service's own API client.

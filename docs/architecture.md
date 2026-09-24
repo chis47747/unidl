@@ -32,6 +32,16 @@ automatically. A newly discovered package is selected in **Settings → Services
 equivalent ways to register a service; the TUI route does not require a decorator
 inside the package.
 
+Service implementations may be distributed as source packages or as
+**compiled-only** packages. A compiled-only package contains `service.toml` and
+ABI/platform-specific Python extension modules, but no service source. The
+loader validates the declared Python ABI, operating system/architecture and
+UniDL version before importing it. An incompatible package is isolated and
+reported as an enhancement-level readiness item; it never prevents source
+services or the TUI from starting. A provider must build one artifact for each
+supported Python ABI and platform—one macOS/Python 3.13 build is not a portable
+Windows or Linux package.
+
 Three things cross it, and only three.
 
 **1. The native delivery core.** Called through `core/delivery.py` and

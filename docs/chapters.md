@@ -78,9 +78,9 @@ enabled by default. Turning it off skips the sidecar/mux input while keeping the
 chapters in the report, command metadata and export. `--no-mux` continues to mean
 no container metadata is written.
 
-Chapters are currently metadata for finite video delivery. Live services may show
-them in the report, but a live pipe mux is not retroactively rewritten with a
-static chapter file.
+Chapters are metadata for finite audio and video delivery. Live services may
+show them in the report, but a live pipe mux is not retroactively rewritten with
+a static chapter file.
 
 ## What a service must test
 

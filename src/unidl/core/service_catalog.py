@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,9 @@ from .settings import SettingsStore
 GLOBAL_SCOPE = "@global"
 REGISTERED_KEY = "registered_services"
 HOME_KEY = "home_services"
+SOURCE_IMPLEMENTATION = "source"
+COMPILED_ONLY_IMPLEMENTATION = "compiled-only"
+SUPPORTED_IMPLEMENTATIONS = frozenset({SOURCE_IMPLEMENTATION, COMPILED_ONLY_IMPLEMENTATION})
 
 # A cheap textual gate avoids compiling large API/helper modules that cannot
 # contain a service declaration.  ``__init__.py`` and the conventional
@@ -40,12 +44,39 @@ class ServiceSource:
     name: str
     package: str
     path: Path
+    implementation: str = SOURCE_IMPLEMENTATION
+    module: str = ""
+    manifest: Path | None = None
 
 
 def source_root() -> Path:
     """The package's ``services`` directory in a checkout or installation."""
 
     return Path(__file__).resolve().parents[1] / "services"
+
+
+def _manifest_metadata(path: Path, package_name: str) -> ServiceSource | None:
+    try:
+        with path.open("rb") as stream:
+            data = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    service_id = str(data.get("id", "") or "").strip().lower()
+    name = str(data.get("name", "") or "").strip()
+    implementation = str(data.get("implementation", SOURCE_IMPLEMENTATION) or SOURCE_IMPLEMENTATION).strip().lower()
+    if not service_id or not name or implementation not in SUPPORTED_IMPLEMENTATIONS:
+        return None
+    return ServiceSource(
+        service_id,
+        name,
+        package_name,
+        path,
+        implementation=implementation,
+        module=str(data.get("module", "") or "").strip(),
+        manifest=path,
+    )
 
 
 def _literal_string(node: ast.AST | None) -> str:
@@ -123,6 +154,11 @@ def discover_sources(root: Path | None = None) -> list[ServiceSource]:
         if entry.is_dir():
             signature_parts.append((str(entry), stat.st_mtime_ns, stat.st_size))
             candidates = entry.glob("*.py")
+            candidates = tuple(candidates) + tuple(entry.glob("*.so")) + tuple(entry.glob("*.pyd"))
+            manifest = entry / "service.toml"
+            if manifest.is_file():
+                manifest_stat = manifest.stat()
+                signature_parts.append((str(manifest), manifest_stat.st_mtime_ns, manifest_stat.st_size))
         elif entry.is_file() and entry.suffix.casefold() == ".py":
             signature_parts.append((str(entry), stat.st_mtime_ns, stat.st_size))
             candidates = (entry,)
@@ -148,11 +184,19 @@ def discover_sources(root: Path | None = None) -> list[ServiceSource]:
         if package.is_dir():
             package_name = package.name
             files = sorted(package.glob("*.py"), key=lambda path: path.name.casefold())
+            manifest = package / "service.toml"
         elif package.is_file() and package.suffix.casefold() == ".py":
             package_name = package.stem
             files = [package]
+            manifest = None
         else:
             continue
+        if manifest is not None and manifest.is_file():
+            metadata = _manifest_metadata(manifest, package_name)
+            if metadata is not None:
+                found.setdefault(metadata.service_id, metadata)
+                if metadata.implementation == COMPILED_ONLY_IMPLEMENTATION:
+                    continue
         for path in files:
             try:
                 source = path.read_text("utf-8")
@@ -324,8 +368,11 @@ def update_export_manifest_type(
 
 __all__ = [
     "HOME_KEY",
+    "COMPILED_ONLY_IMPLEMENTATION",
     "REGISTERED_KEY",
+    "SOURCE_IMPLEMENTATION",
     "ServiceSource",
+    "SUPPORTED_IMPLEMENTATIONS",
     "discover_sources",
     "merge_registry_sources",
     "ensure_state",

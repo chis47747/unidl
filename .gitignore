@@ -7,6 +7,7 @@ test/
 tests/
 src/unidl/services/*/*.so
 src/unidl/services/*/*.pyd
+src/unidl/services/amc/
 dist/
 build/
 .pytest_cache/

@@ -126,7 +126,7 @@
   "update.note.media_types": "Processa manifestos servidos por scripts e espaços nas URLs sem reconstruir parâmetros assinados.",
   "update.note.documentation": "As seções iniciais HLS preservam seu escopo AES; suporte ao SAMPLE-AES TS/AAC clássico.",
   "update.note.clipboard": "Saída híbrida Dolby Vision + HDR10 configurável globalmente ou por serviço; requer fontes compatíveis e ferramentas externas.",
-  "update.note.update_checker": "UniDL v2.1.5 adiciona diagnósticos com data e hora, rastreamento que protege credenciais e importações de vários títulos mais seguras.",
+  "update.note.update_checker": "UniDL v2.1.6 adiciona fallback PlayReady apenas com KID, capítulos de áudio e carregamento de serviços compilados por ABI.",
   "update.close_hint": "esc / x fecha esta janela",
   "home.chip.config": "configuração",
   "home.chip.config_create": "criar",

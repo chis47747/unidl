@@ -163,7 +163,7 @@ def tracks_panel(save_name: str, tracks: TrackSet) -> Panel:
     """
     chosen = {id(stream) for stream in tracks.selected}
     rows: list[str | tuple[str, str]] = []
-    for stream in tracks.streams:
+    for stream in tracks.selectable_streams:
         mark = TAKEN if id(stream) in chosen else LEFT
         rows.append(f"{mark}  {stream.format_line()}")
     return Panel(
@@ -2055,15 +2055,18 @@ class SessionController:
         # knowing them lets the vault answer without a license exchange.
         try:
             self.post_status(tr("delivery.status.parsing_manifest"))
-            tracks = (
-                self.engine.parse_tracks(
+            try:
+                tracks = self.engine.parse_tracks(
                     playback,
                     self.settings,
                     service=self.service,
                 )
-                if playback.merge_manifests or playback.merge_manifest_segments
-                else self.engine.parse_tracks(playback, self.settings)
-            )
+            except TypeError as exc:
+                # Keep lightweight Engine doubles that still implement the
+                # pre-filter two-argument contract working.
+                if "unexpected keyword argument 'service'" not in str(exc):
+                    raise
+                tracks = self.engine.parse_tracks(playback, self.settings)
         except Exception as exc:
             self.post_error(
                 "Could not read the manifest",
@@ -2090,6 +2093,13 @@ class SessionController:
                 "warning",
             )
             return SKIPPED, "manifest had no tracks"
+
+        if not tracks.selectable_streams:
+            self.post_log(
+                "the service track filter removed every output track",
+                "warning",
+            )
+            return SKIPPED, "service track filter left no output tracks"
 
         if self.cancel_requested:
             # asked to stop while the manifest was being read: nothing below this
@@ -2863,15 +2873,16 @@ class SessionController:
         playback: Playback,
     ) -> list | None:
         chosen_ids = {id(stream) for stream in tracks.selected}
+        visible = tracks.selectable_streams
         choices = [
             Choice(
                 stream.format_line(),
                 stream,
                 highlights=_track_highlights(stream),
             )
-            for stream in tracks.streams
+            for stream in visible
         ]
-        preselected = [index for index, stream in enumerate(tracks.streams) if id(stream) in chosen_ids]
+        preselected = [index for index, stream in enumerate(visible) if id(stream) in chosen_ids]
         ask = ctx.pick(
             f"Tracks · {playback.save_name}",
             choices,

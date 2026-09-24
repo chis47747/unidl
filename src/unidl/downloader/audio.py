@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,7 @@ def transcode_audio(
     output_path: str | Path | None = None,
     metadata: dict[str, str] | None = None,
     cover_path: str | Path | None = None,
+    chapters_file: str | Path | None = None,
     copy_audio: bool = False,
 ) -> Path:
     target_format = str(output_format or "").strip().lower()
@@ -204,58 +206,81 @@ def transcode_audio(
     if output.resolve() == input_path.resolve():
         output = unique_path(input_path.with_name(f"{input_path.stem}.converted{suffix}"))
     output.parent.mkdir(parents=True, exist_ok=True)
-    args = [executable, "-hide_banner", "-nostdin", "-y", "-i", str(input_path)]
     cover = Path(cover_path) if cover_path else None
-    if cover is not None:
-        args.extend(["-i", str(cover)])
-    args.extend(["-map", "0:a:0"])
-    if cover is not None:
-        args.extend(
-            [
-                "-map",
-                "1:v:0",
-                "-c:v",
-                "mjpeg",
-                "-q:v",
-                "2",
-                "-disposition:v:0",
-                "attached_pic",
-                "-metadata:s:v:0",
-                "title=Album cover",
-                "-metadata:s:v:0",
-                "comment=Cover (front)",
-            ]
-        )
-    else:
-        args.append("-vn")
-    args.extend(["-sn", "-dn", "-map_metadata", "0"])
-    for name, value in (metadata or {}).items():
-        if value:
-            args.extend(["-metadata", f"{name}={value}"])
-    if copy_audio or target_format == "m4a":
-        args.extend(["-c:a", "copy"])
-    elif target_format == "flac":
-        args.extend(["-c:a", "flac"])
-    elif target_format == "alac":
-        args.extend(["-c:a", "alac"])
-    else:
-        args.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
-    if target_format == "mp3":
-        args.extend(["-id3v2_version", "3"])
-    elif target_format == "m4a":
-        # The extension selects ffmpeg's legacy ``ipod`` muxer, which rejects
-        # E-AC-3 even though the MP4 container supports it. Force the modern MP4
-        # muxer while retaining the ordinary player-friendly .m4a extension.
-        args.extend(["-f", "mp4"])
-    args.append(str(output))
-    labels = {
-        "mp3": "MP3 audio transcoding",
-        "flac": "FLAC audio conversion",
-        "alac": "ALAC audio conversion",
-        "m4a": "M4A audio remux",
-    }
-    _run_external(args, labels[target_format])
-    return output
+    chapter_temp_dir: Path | None = None
+    try:
+        args = [executable, "-hide_banner", "-nostdin", "-y", "-i", str(input_path)]
+        next_input = 1
+        if cover is not None:
+            args.extend(["-i", str(cover)])
+            next_input += 1
+        chapter_input: int | None = None
+        if chapters_file:
+            from .chapters import load_chapters_file, write_ffmetadata
+
+            chapters = load_chapters_file(chapters_file)
+            if chapters:
+                chapter_temp_dir = Path(
+                    tempfile.mkdtemp(prefix=f"{output.stem}_chapters_", dir=str(output.parent))
+                )
+                chapter_path = write_ffmetadata(
+                    chapters, chapter_temp_dir / "chapters.ffmeta"
+                )
+                chapter_input = next_input
+                args.extend(["-f", "ffmetadata", "-i", str(chapter_path)])
+        args.extend(["-map", "0:a:0"])
+        if cover is not None:
+            args.extend(
+                [
+                    "-map",
+                    "1:v:0",
+                    "-c:v",
+                    "mjpeg",
+                    "-q:v",
+                    "2",
+                    "-disposition:v:0",
+                    "attached_pic",
+                    "-metadata:s:v:0",
+                    "title=Album cover",
+                    "-metadata:s:v:0",
+                    "comment=Cover (front)",
+                ]
+            )
+        else:
+            args.append("-vn")
+        args.extend(["-sn", "-dn", "-map_metadata", "0"])
+        if chapter_input is not None:
+            args.extend(["-map_chapters", str(chapter_input)])
+        for name, value in (metadata or {}).items():
+            if value:
+                args.extend(["-metadata", f"{name}={value}"])
+        if copy_audio or target_format == "m4a":
+            args.extend(["-c:a", "copy"])
+        elif target_format == "flac":
+            args.extend(["-c:a", "flac"])
+        elif target_format == "alac":
+            args.extend(["-c:a", "alac"])
+        else:
+            args.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
+        if target_format == "mp3":
+            args.extend(["-id3v2_version", "3"])
+        elif target_format == "m4a":
+            # The extension selects ffmpeg's legacy ``ipod`` muxer, which rejects
+            # E-AC-3 even though the MP4 container supports it. Force the modern MP4
+            # muxer while retaining the ordinary player-friendly .m4a extension.
+            args.extend(["-f", "mp4"])
+        args.append(str(output))
+        labels = {
+            "mp3": "MP3 audio transcoding",
+            "flac": "FLAC audio conversion",
+            "alac": "ALAC audio conversion",
+            "m4a": "M4A audio remux",
+        }
+        _run_external(args, labels[target_format])
+        return output
+    finally:
+        if chapter_temp_dir is not None:
+            shutil.rmtree(chapter_temp_dir, ignore_errors=True)
 
 
 def _metadata_value(value: Any) -> str | None:

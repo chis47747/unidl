@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
@@ -46,6 +46,11 @@ from .settings import (
     service_license_settings,
 )
 from .titles import Title
+
+if TYPE_CHECKING:
+    from unidl.downloader.models import StreamInfo
+
+    from .engine import TrackSet
 
 CORE = "core"
 SELF = "self"
@@ -1176,6 +1181,27 @@ class Service:
         """
         del playback, log
         return ()
+
+    def filter_tracks(
+        self,
+        playback: Playback,
+        tracks: TrackSet,
+        log: Callable[[str], None],
+    ) -> Iterable[StreamInfo] | None:
+        """Return the output-visible subset of a parsed track ladder.
+
+        Core keeps ``tracks.streams`` as the complete parsed ladder for DRM,
+        vault lookup, and export provenance. A service may return an iterable
+        containing only the streams it wants exposed to automatic selection and
+        the interactive track picker. Returning ``None`` preserves the full
+        ladder.
+
+        This hook must not manufacture new stream objects or perform licensing;
+        it is an output policy only. Use ``stream.role``, ``stream.name``,
+        ``stream.language`` and ``stream.extra`` for provider-specific metadata.
+        """
+        del playback, tracks, log
+        return None
 
     def save_name(self, title: Title) -> str:
         """Override only when ``USES.naming == 'self'``."""

@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.1.6] - 2026-09-24
+
+### DRM and chapter compatibility
+
+- Added a PlayReady KID-only PSSH fallback that builds the minimal WRMHEADER
+  needed by licence services when a manifest omits a full PRO payload.
+- Added `chapters_file` support to audio conversion, so chapter metadata can be
+  embedded in MP3, M4A, FLAC and ALAC output as well as video containers.
+- Kept chapter validation and automatic mux decisions consistent for selected
+  audio and video tracks.
+
+### Service loading and packaging
+
+- Added ABI/platform-aware compiled-only service registration and readiness
+  reporting without requiring private service source code in the release.
+- Standardized the public release-note format and kept package metadata and
+  documentation aligned with the shipped feature set.
+
 ## [2.1.5] - 2026-09-23
 
 ### Diagnostics and safer batch handling

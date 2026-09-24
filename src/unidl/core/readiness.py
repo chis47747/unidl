@@ -360,6 +360,30 @@ def _folder_items(config) -> list[Item]:
     return items
 
 
+def _compiled_service_items() -> list[Item]:
+    """Report compiled-only services that could not load on this runtime."""
+
+    try:
+        from ..services import compiled_service_errors
+
+        failures = compiled_service_errors()
+    except (ImportError, AttributeError):
+        failures = {}
+    return [
+        Item(
+            group="assets",
+            label=f"Compiled service · {service_id}",
+            ok=False,
+            detail=reason,
+            hint="Install the service package built for this Python ABI and platform",
+            without="that service's compiled implementation",
+            needed_by=(service_id,),
+            level=ENHANCEMENT,
+        )
+        for service_id, reason in sorted(failures.items())
+    ]
+
+
 def _writable(path: Path) -> bool:
     import os
 
@@ -425,6 +449,7 @@ def survey(config, registry=None, *, fresh: bool = False) -> Report:
         + _cdm_items(config)
         + _helper_items(config, registry, resolver)
         + _hybrid_items()
+        + _compiled_service_items()
         + _folder_items(config)
     )
     order = {name: index for index, name in enumerate(GROUPS)}

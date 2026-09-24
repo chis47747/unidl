@@ -37,7 +37,7 @@ from pathlib import Path
 
 INSTALL_HINT = (
     "PlayReady needs pyplayready 0.8.5 or newer: python -m pip install pyplayready\n"
-    "    then configure a .prd device under paths.cdm in unidl.yaml"
+    "    then put a .prd device in ~/.unidl/cdm/playready/"
 )
 
 #: PlayReady's system id in a DASH manifest
@@ -83,19 +83,98 @@ def wrm_header_from_mpd(manifest_text: str | bytes) -> str | None:
         root = ElementTree.fromstring(text)
     except ElementTree.ParseError:
         return None
+    # A few DASH packagers emit a version-1 PlayReady PSSH with a KID list but
+    # an empty data payload. That
+    # is enough to identify the content key, but it is not enough for
+    # ``pyplayready.PSSH`` to unpack into a WRMHEADER.  Keep the normal PRO/PSSH
+    # extraction above as the source of truth, then use the declared KID only as
+    # a standards-compatible v4.0 header fallback below.
+    playready_present = False
+    candidate_kids: list[str] = []
+
     for node in root.iter():
         tag = node.tag.rsplit("}", 1)[-1].lower()
-        if tag not in {"pro", "pssh"} or not (node.text or "").strip():
+        if tag in {"pro", "pssh"} and (node.text or "").strip():
+            try:
+                blob = base64.b64decode(node.text.strip())
+            except (ValueError, TypeError, binascii.Error):
+                blob = b""
+            if blob:
+                decoded = blob.decode("utf-16-le", "ignore")
+                found = _WRM_HEADER.search(decoded)
+                if found:
+                    return found.group(0)
+
+        scheme = str(node.attrib.get("schemeIdUri") or "").strip().lower()
+        if scheme == PLAYREADY_SCHEME_ID:
+            playready_present = True
+        for key, value in node.attrib.items():
+            if key.rsplit("}", 1)[-1].lower() != "default_kid":
+                continue
+            for raw in re.split(r"[\s,]+", str(value)):
+                kid = _canonical_uuid(raw)
+                if kid and kid not in candidate_kids:
+                    candidate_kids.append(kid)
+
+    # ``default_KID`` is normally attached to the common
+    # ``urn:mpeg:dash:mp4protection:2011`` ContentProtection node, so the
+    # PlayReady sibling may have been visited before it.  Do a second pass for
+    # the PlayReady scheme and recover KIDs from v1 PSSH boxes too.
+    for node in root.iter():
+        scheme = str(node.attrib.get("schemeIdUri") or "").strip().lower()
+        if scheme != PLAYREADY_SCHEME_ID:
             continue
-        try:
-            blob = base64.b64decode(node.text.strip())
-        except (ValueError, TypeError):
-            continue
-        decoded = blob.decode("utf-16-le", "ignore")
-        found = _WRM_HEADER.search(decoded)
-        if found:
-            return found.group(0)
+        playready_present = True
+        for child in node:
+            tag = child.tag.rsplit("}", 1)[-1].lower()
+            if tag not in {"pro", "pssh"} or not (child.text or "").strip():
+                continue
+            for kid in _kids_from_playready_object(child.text.strip()):
+                if kid not in candidate_kids:
+                    candidate_kids.append(kid)
+
+    if playready_present and candidate_kids:
+        return _minimal_wrm_header(candidate_kids[0])
     return None
+
+
+def _canonical_uuid(value: str) -> str:
+    """Return a UUID string in canonical form, or an empty string."""
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _kids_from_playready_object(value: str) -> list[str]:
+    """Read KIDs from a v1 PlayReady PSSH even when its data payload is empty."""
+    try:
+        blob = base64.b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, binascii.Error):
+        return []
+    if len(blob) < 32 or blob[4:8] != b"pssh" or blob[8] != 1:
+        return []
+    system_id = blob[12:28].hex()
+    if system_id != PLAYREADY_SCHEME_ID.rsplit(":", 1)[-1].replace("-", ""):
+        return []
+    count = int.from_bytes(blob[28:32], "big")
+    end = 32 + count * 16
+    if end > len(blob):
+        return []
+    return [
+        str(uuid.UUID(bytes=blob[offset : offset + 16]))
+        for offset in range(32, end, 16)
+    ]
+
+
+def _minimal_wrm_header(kid: str) -> str:
+    """Render the v4.0 header accepted by services that publish KID-only PSSH."""
+    value = base64.b64encode(uuid.UUID(kid).bytes_le).decode("ascii")
+    return (
+        '<WRMHEADER xmlns="http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader" '
+        'version="4.0.0.0"><DATA><PROTECTINFO><KEYLEN>16</KEYLEN>'
+        f"<ALGID>AESCTR</ALGID></PROTECTINFO><KID>{value}</KID></DATA></WRMHEADER>"
+    )
 
 
 #: The SOAPAction every PlayReady licence server expects. Without it most return
