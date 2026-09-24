@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+AGENTS.md
+test/
+tests/
+src/unidl/services/*/*.so
+src/unidl/services/*/*.pyd
 dist/
 build/
 .pytest_cache/
