@@ -784,6 +784,133 @@ class Engine:
                     return payloads
         return payloads
 
+    def reconcile_audio_channels(self, playback: Playback, tracks: TrackSet) -> None:
+        """Prefer the selected MP4 init channel count over stale DASH metadata.
+
+        A few origins publish an incorrect ``AudioChannelConfiguration`` while
+        their fragmented MP4 ``mp4a`` sample entry is accurate.  Probe only the
+        selected audio initializations, so ordinary manifests do not incur a
+        request for every unselected rendition and true mono tracks remain mono.
+        This is descriptive metadata only; media bytes and selection are unchanged.
+        """
+        from unidl.downloader.mp4_metadata import audio_channel_count_from_init
+
+        proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
+        for stream in tracks.selected:
+            if stream.media_type != "audio":
+                continue
+            if stream.extra.get("_audio_channels_reconciled"):
+                continue
+            stream.extra["_audio_channels_reconciled"] = True
+            initialization = next((segment for segment in stream.segments if segment.index == -1), None)
+            if initialization is None:
+                continue
+            payload = bytes(initialization.data or b"")
+            if not payload and initialization.url.startswith(("http://", "https://")):
+                headers = dict(playback.headers)
+                if initialization.byte_range:
+                    headers["Range"] = f"bytes={initialization.byte_range[0]}-{initialization.byte_range[1]}"
+                else:
+                    headers["Range"] = "bytes=0-65535"
+                try:
+                    response = requests.get(
+                        initialization.url,
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    payload = response.content[:65_536]
+                except requests.RequestException as exc:
+                    self.log(f"audio channel metadata probe skipped: {exc}")
+                    continue
+            count = audio_channel_count_from_init(payload)
+            if count is None:
+                continue
+            declared = str(stream.channels or "").strip()
+            if declared == str(count):
+                continue
+            if declared:
+                stream.extra["channels_manifest"] = declared
+            stream.extra["channels_source"] = "MP4 init sample entry"
+            stream.channels = str(count)
+            self.log(
+                f"audio channel metadata corrected: DASH={declared or 'unknown'}, MP4 init={count}"
+            )
+
+    def measure_video_bitrates(self, playback: Playback, tracks: TrackSet) -> None:
+        """Measure selected video bitrate from response sizes without downloading media.
+
+        Manifest ``bandwidth`` is a provider estimate. For the final selected
+        video tracks, use the response's Content-Range or Content-Length and
+        the segment duration. Range requests are capped to a small prefix, so a
+        one-segment VOD is never downloaded in full just to measure its bitrate.
+        """
+        proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
+        for stream in tracks.selected:
+            if stream.media_type != "video" or stream.extra.get("_video_bitrate_measured"):
+                continue
+            stream.extra["_video_bitrate_measured"] = True
+            media_segments = [
+                segment
+                for segment in stream.segments
+                if segment.index != -1
+                and segment.url.startswith(("http://", "https://"))
+            ]
+            fallback_duration = (
+                float(stream.duration) / len(media_segments)
+                if len(media_segments) > 1 and stream.duration and stream.duration > 0
+                else None
+            )
+            samples = [
+                (segment, float(segment.duration or fallback_duration or 0))
+                for segment in media_segments[:3]
+                if (segment.duration or fallback_duration or 0) > 0
+            ]
+            if not samples:
+                continue
+            total_bytes = 0
+            total_duration = 0.0
+            for segment, duration in samples:
+                headers = dict(playback.headers)
+                expected_range = None
+                if segment.byte_range:
+                    start, end = segment.byte_range
+                    expected_range = max(0, end - start + 1)
+                    headers["Range"] = f"bytes={start}-{end}"
+                else:
+                    headers["Range"] = "bytes=0-1048575"
+                try:
+                    with requests.get(
+                        segment.url,
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=30,
+                        stream=True,
+                    ) as response:
+                        response.raise_for_status()
+                        content_range = response.headers.get("Content-Range", "")
+                        total_match = re.search(r"/(\d+)\s*$", content_range)
+                        if expected_range:
+                            measured_size = expected_range
+                        elif total_match:
+                            measured_size = int(total_match.group(1))
+                        elif response.status_code == 200:
+                            raw_length = response.headers.get("Content-Length", "")
+                            measured_size = int(raw_length) if raw_length.isdigit() else 0
+                        else:
+                            measured_size = 0
+                except requests.RequestException as exc:
+                    self.log(f"video bitrate probe skipped: {exc}")
+                    break
+                if not measured_size:
+                    break
+                total_bytes += measured_size
+                total_duration += duration
+            if total_bytes and total_duration > 0:
+                stream.extra["actual_bitrate"] = round(total_bytes * 8 / total_duration)
+                stream.extra["actual_bitrate_source"] = "media segment response size"
+
     @staticmethod
     def _apply_playback_drm_hint(
         playback: Playback,

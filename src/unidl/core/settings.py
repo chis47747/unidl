@@ -628,6 +628,18 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     Setting(
+        "fetch_actual_bitrate",
+        "Fetch actual video bitrate",
+        "bool",
+        default=True,
+        help=(
+            "After the final video tracks are selected and the download screen is "
+            "open, sample media response sizes to show an actual bitrate. Turning "
+            "this off keeps the manifest bitrate only and skips the probe."
+        ),
+        visible=False,
+    ),
+    Setting(
         "license_after_tracks",
         "License after final track selection",
         "bool",

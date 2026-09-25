@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from unidl.downloader.utils import pretty_codec
+from unidl.downloader.utils import format_bitrate, pretty_codec
 
 from ..core import chapters as chapter_model
 from ..core import exports, naming
@@ -150,6 +150,14 @@ def _track_highlights(stream: object) -> tuple[tuple[str, str], ...]:
         or extra.get("audio_vivid_detected")
     ):
         add("Audio Vivid", "audio-vivid")
+    actual_bitrate = extra.get("actual_bitrate")
+    if actual_bitrate:
+        try:
+            label = format_bitrate(int(actual_bitrate))
+        except (TypeError, ValueError):
+            label = None
+        if label:
+            add(f"actual {label}", "ok")
     return tuple(highlights)
 
 
@@ -2229,6 +2237,9 @@ class SessionController:
         except Exception as exc:
             self.post_error("Could not select output tracks", str(exc), "Check Track settings.")
             return FAILED, "track selection failed"
+        reconcile = getattr(getattr(self, "engine", None), "reconcile_audio_channels", None)
+        if callable(reconcile):
+            reconcile(playback, tracks)
         self.post_log(f"tracks: {tracks.summary()}")
 
         interactive = self.settings.get("track_mode") == "interactive"
@@ -2408,6 +2419,11 @@ class SessionController:
         # progress is painted and where the queue lives.  Back remains navigation;
         # an active transfer is cancelled as the screen returns to its parent.
         self.app.call_from_thread(self._open_delivery, playback, tracks)
+        measure_bitrates = getattr(getattr(self, "engine", None), "measure_video_bitrates", None)
+        if callable(measure_bitrates) and bool(self.settings.get("fetch_actual_bitrate", True)):
+            self.post_status("measuring selected video bitrate")
+            measure_bitrates(playback, tracks)
+            self.app.call_from_thread(self._refresh_delivery, playback, tracks)
         self._set_live_frame_mode(playback.is_live)
         self.post_status(tr("delivery.status.downloading_name", name=playback.save_name))
         if self.delivery is not None:
@@ -2702,6 +2718,9 @@ class SessionController:
         The queue row is renamed with it, so the row, the log, the command file and
         the file on disk are all one string rather than four nearly-identical ones.
         """
+        reconcile = getattr(getattr(self, "engine", None), "reconcile_audio_channels", None)
+        if callable(reconcile):
+            reconcile(playback, tracks)
         before = playback.save_name
         release_tag = getattr(self.service, "release_tag", None)
         platform = release_tag() if callable(release_tag) else self.service.tag()
@@ -2748,6 +2767,11 @@ class SessionController:
         """Bring UniDL's screen up, just before it has something to show."""
         screen = await self.delivery_screen()
         screen.describe(playback, tracks)
+
+    async def _refresh_delivery(self, playback: Playback, tracks: TrackSet) -> None:
+        """Refresh the delivery card after the selected-track probes finish."""
+        screen = await self.delivery_screen()
+        screen.describe(playback, tracks, reset_clock=False)
 
     async def _present_card(self, panel: Panel) -> None:
         """Put a finished artefact on screen 3 and hold the flow at it. UI thread.

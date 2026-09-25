@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.1.9] - 2026-09-25
+
+### Playback metadata
+
+- Added optional actual video bitrate sampling for the selected video tracks.
+- Corrected audio channel metadata from the selected MP4 initialization segment
+  when a manifest reports a stale channel count.
+- Refreshed the download details view after the metadata probes complete.
+
+### Remote CDM and live recording
+
+- Fixed PlayReady remote CDMs being omitted from service-level CDM choices when
+  older configuration entries still declared `system: widevine`.
+- Showed a stored-value hint when editing remote CDM and vault secrets without
+  rendering the credentials themselves.
+- Reduced live recording finalization space usage by releasing each full-size
+  intermediate as soon as the next stage is verified, with recovery of the
+  raw recording or a valid MP4 fallback when finalization fails.
+
 ## [2.1.8] - 2026-09-25
 
 ### Title attachments

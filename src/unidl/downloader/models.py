@@ -157,9 +157,16 @@ class StreamInfo:
                 *common_tail,
             ]
         else:
+            actual_bitrate = self.extra.get("actual_bitrate")
+            actual_bitrate_text = (
+                f"actual {format_bitrate(int(actual_bitrate))}"
+                if actual_bitrate
+                else None
+            )
             parts = [
                 self.resolution,
                 format_bitrate(self.bandwidth),
+                actual_bitrate_text,
                 format_frame_rate(self.frame_rate),
                 pretty_codec(self.codecs, self.media_type),
                 "Muxed Audio" if self.extra.get("muxed_audio") else None,
