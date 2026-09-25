@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.8] - 2026-09-25
+
+### Title attachments
+
+- Added per-service poster, thumbnail and artwork attachments with optional TUI previews.
+- Preserved attachment aspect ratios in native terminal image widgets with letterboxed rendering.
+- Downloaded enabled attachments as separate files without muxing them into media.
+- Added attachment metadata to native exports and imports.
+
 ## [2.1.7] - 2026-09-24
 
 ### Compiled-only service compatibility

@@ -103,8 +103,10 @@ class AskWidget(Vertical):
     def _header(self):
         chapters = tuple(getattr(self.ask, "chapters", ()) or ())
         lyrics = getattr(self.ask, "lyrics", None)
+        attachments = tuple(getattr(self.ask, "attachments", ()) or ())
         if self.ask.title:
-            if chapters or lyrics is not None:
+            if chapters or lyrics is not None or attachments:
+                from ..core.attachments import count_label as attachment_count_label
                 from ..core.chapters import count_label
 
                 with Horizontal(classes="ask-title-row"):
@@ -121,6 +123,12 @@ class AskWidget(Vertical):
                         )
                         lyric_chip.update(tr("lyrics.lines_n", count=len(lyrics.lines)))
                         yield lyric_chip
+                    if attachments:
+                        attachment_chip = StatusChip(
+                            "show_attachments", id="ask-attachments", classes="chapter-chip"
+                        )
+                        attachment_chip.update(attachment_count_label(attachments))
+                        yield attachment_chip
             else:
                 yield Label(visual_markup(self.ask.title), classes="ask-title")
         hint = getattr(self.ask, "hint", "")

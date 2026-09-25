@@ -126,7 +126,7 @@
   "update.note.media_types": "Script-based manifest URLs and URL spaces are handled without rebuilding signed queries.",
   "update.note.documentation": "HLS initialization sections retain their original AES key scope; legacy TS/AAC SAMPLE-AES downloads are supported.",
   "update.note.clipboard": "Optional Dolby Vision + HDR10 hybrid output is configurable globally and per service; matching sources and external tools are required.",
-  "update.note.update_checker": "UniDL v2.1.7 adds ABI/platform-aware compiled service variants and safer native extension loading.",
+  "update.note.update_checker": "UniDL v2.1.8 adds per-service title attachments, separate attachment downloads and aspect-ratio-safe previews.",
   "update.close_hint": "esc / x closes this window",
   "home.chip.config": "config",
   "home.chip.config_create": "create",
@@ -1069,5 +1069,17 @@
   "justwatch.no_service": "no service",
   "justwatch.disc_sale": "{provider} sells a disc, not a stream",
   "justwatch.no_handler": "No service here handles {provider}",
-  "justwatch.no_search": "{name} has no search; paste the URL once you have it"
+  "justwatch.no_search": "{name} has no search; paste the URL once you have it",
+  "service.attachments.action": "Title attachments by service",
+  "service.attachments.summary": "Independent on/off per registered service",
+  "service.attachments.title": "Title attachments by service",
+  "service.attachments.help": "Select a service to toggle optional title attachments.",
+  "setting.fetch_attachments": "Fetch title attachments",
+  "setting.fetch_attachments.help": "Allow this service to request optional posters, thumbnails and artwork. Attachments are downloaded separately and never muxed into the video or audio file.",
+  "attachments.count.one": "{count} attachment",
+  "attachments.count.other": "{count} attachments",
+  "attachments.title": "Attachments",
+  "attachments.loading": "Loading attachment…",
+  "attachments.unavailable": "Attachment preview unavailable",
+  "attachments.browse_hint": "←/→ to browse  ·  esc to close"
 }

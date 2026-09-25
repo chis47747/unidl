@@ -126,7 +126,7 @@
   "update.note.media_types": "Processa manifestos servidos por scripts e espaços nas URLs sem reconstruir parâmetros assinados.",
   "update.note.documentation": "As seções iniciais HLS preservam seu escopo AES; suporte ao SAMPLE-AES TS/AAC clássico.",
   "update.note.clipboard": "Saída híbrida Dolby Vision + HDR10 configurável globalmente ou por serviço; requer fontes compatíveis e ferramentas externas.",
-  "update.note.update_checker": "UniDL v2.1.7 adiciona variantes de serviços compilados por ABI/plataforma e carregamento mais seguro de extensões nativas.",
+  "update.note.update_checker": "UniDL v2.1.8 adiciona anexos por serviço, transferências separadas e pré-visualizações com proporção preservada.",
   "update.close_hint": "esc / x fecha esta janela",
   "home.chip.config": "configuração",
   "home.chip.config_create": "criar",
@@ -1069,5 +1069,17 @@
   "justwatch.no_service": "nenhum serviço",
   "justwatch.disc_sale": "{provider} vende um disco, não uma transmissão",
   "justwatch.no_handler": "Nenhum serviço aqui trata {provider}",
-  "justwatch.no_search": "{name} não tem pesquisa; cole a URL quando a tiver"
+  "justwatch.no_search": "{name} não tem pesquisa; cole a URL quando a tiver",
+  "service.attachments.action": "Anexos do título por serviço",
+  "service.attachments.summary": "Ativação independente por serviço registado",
+  "service.attachments.title": "Anexos do título por serviço",
+  "service.attachments.help": "Selecione um serviço para ativar os anexos opcionais do título.",
+  "setting.fetch_attachments": "Obter anexos do título",
+  "setting.fetch_attachments.help": "Permite a este serviço obter cartazes, miniaturas e imagens opcionais. Os anexos são descarregados separadamente e nunca são misturados com o vídeo ou áudio.",
+  "attachments.count.one": "{count} anexo",
+  "attachments.count.other": "{count} anexos",
+  "attachments.title": "Anexos",
+  "attachments.loading": "A carregar anexo…",
+  "attachments.unavailable": "Pré-visualização indisponível",
+  "attachments.browse_hint": "←/→ para navegar · esc para fechar"
 }

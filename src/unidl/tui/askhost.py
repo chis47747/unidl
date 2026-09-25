@@ -746,6 +746,32 @@ class AskHost(Screen):
         _name, lyrics = self.lyrics_payload()
         return [("l", "lyrics")] if lyrics is not None else []
 
+    def attachments_payload(self) -> tuple[str, tuple]:
+        current = getattr(self, "_current_ask", None)
+        ask = getattr(current, "ask", None)
+        attachments = tuple(getattr(ask, "attachments", ()) or ())
+        if attachments:
+            title = str(getattr(ask, "title", "") or "")
+            name = title.split("·", 1)[-1].strip() if "·" in title else title
+            return name, attachments
+        playback = getattr(self, "_chapter_playback", None)
+        if playback is not None and getattr(playback, "attachments", ()):
+            return str(playback.save_name), tuple(playback.attachments)
+        return "", ()
+
+    def attachments_proxy(self) -> str | None:
+        current = getattr(self, "_current_ask", None)
+        ask = getattr(current, "ask", None)
+        proxy = getattr(ask, "attachments_proxy", None)
+        if proxy:
+            return str(proxy)
+        playback = getattr(self, "_chapter_playback", None)
+        return str(getattr(playback, "proxy", "") or "") or None
+
+    def attachments_hints(self) -> list[tuple[str, str]]:
+        _name, attachments = self.attachments_payload()
+        return [("a", tr("attachments.title"))] if attachments else []
+
     def action_show_lyrics(self) -> None:
         name, lyrics = self.lyrics_payload()
         if lyrics is None:
@@ -763,6 +789,15 @@ class AskHost(Screen):
         from .chapters_screen import ChaptersScreen
 
         self.app.push_screen(ChaptersScreen(name, chapters))
+
+    def action_show_attachments(self) -> None:
+        name, attachments = self.attachments_payload()
+        if not attachments:
+            self.notify("This title has no attachments", timeout=3)
+            return
+        from .attachments_screen import AttachmentsScreen
+
+        self.app.push_screen(AttachmentsScreen(name, attachments, proxy=self.attachments_proxy()))
 
     # ------------------------------------------------------------ queue actions
     # On every screen of a session, not only on the one that draws the queue. The

@@ -300,6 +300,47 @@ def _cover_renderable(
     return _cover_pixels(image, width=width, height=height)
 
 
+def _contain_dimensions(image: Image.Image, max_width: int, max_height: int) -> tuple[int, int]:
+    """Fit an image into terminal cells without changing its aspect ratio."""
+    source_width, source_height = image.size
+    if source_width <= 0 or source_height <= 0:
+        return max(1, int(max_width)), max(1, int(max_height))
+    cell_width, cell_height = protocol_cell_size() or (1, 2)
+    source_ratio = source_width / source_height
+    width = max(1, int(max_width))
+    height = max(1, round(width * cell_width / (source_ratio * cell_height)))
+    if height > max_height:
+        height = max(1, int(max_height))
+        width = max(1, round(height * source_ratio * cell_height / cell_width))
+    return min(width, int(max_width)), min(height, int(max_height))
+
+
+def _contain_image(image: Image.Image, max_width: int, max_height: int) -> Image.Image:
+    """Create a letterboxed raster for native terminal image widgets."""
+    from PIL import Image, ImageOps
+
+    width, height = _contain_dimensions(image, max_width, max_height)
+    cell_width, cell_height = protocol_cell_size() or (1, 2)
+    scale = 8
+    canvas = Image.new("RGB", (max(1, width * cell_width * scale), max(1, height * cell_height * scale)), (20, 20, 20))
+    fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
+    canvas.paste(fitted, ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2))
+    return canvas
+
+
+def _letterbox_image(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    """Build a canvas matching a widget's exact terminal area."""
+    from PIL import Image, ImageOps
+
+    cell_width, cell_height = protocol_cell_size() or (1, 2)
+    scale = 8
+    canvas_size = (max(1, int(target_width) * cell_width * scale), max(1, int(target_height) * cell_height * scale))
+    canvas = Image.new("RGB", canvas_size, (20, 20, 20))
+    fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
+    canvas.paste(fitted, ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2))
+    return canvas
+
+
 def _metadata_text(preview: AudioPreview, palette) -> Text:
     result = Text(no_wrap=False, overflow="fold")
     for key, label in _TAG_ROWS:
@@ -491,4 +532,7 @@ __all__ = [
     "_cover_bytes",
     "_cover_pixels",
     "_cover_renderable",
+    "_contain_dimensions",
+    "_contain_image",
+    "_letterbox_image",
 ]

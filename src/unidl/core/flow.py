@@ -98,6 +98,9 @@ class Pick(Ask):
     chapters: tuple[Any, ...] = ()
     #: Optional lyrics model shown from the delivery picker with the ``l`` key.
     lyrics: Any = None
+    #: Optional service-owned attachments shown from the delivery picker.
+    attachments: tuple[Any, ...] = ()
+    attachments_proxy: str | None = None
     #: Optional presentation-only context for the picker.  The flow contract
     #: keeps this opaque so Core does not learn about album art or other UI
     #: details; the TUI may use it when a delivery type has a richer layout.
@@ -397,6 +400,8 @@ class FlowContext:
         scope: str = SCOPE_FLOW,
         chapters: Sequence[Any] = (),
         lyrics: Any = None,
+        attachments: Sequence[Any] = (),
+        attachments_proxy: str | None = None,
         preview: Any = None,
     ) -> Pick:
         normalized = [c if isinstance(c, Choice) else Choice(str(c), c) for c in choices]
@@ -410,6 +415,8 @@ class FlowContext:
             preselected=list(preselected or []),
             chapters=tuple(chapters or ()),
             lyrics=lyrics,
+            attachments=tuple(attachments or ()),
+            attachments_proxy=str(attachments_proxy) if attachments_proxy else None,
             preview=preview,
         )
 

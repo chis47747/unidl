@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .attachments import Attachment, normalize_attachments
 from .chapters import Chapter, normalize_chapters
 from .lyrics import Lyrics
 from .secureio import safe_filename
@@ -259,6 +260,8 @@ class Playback:
     #: service translates its own payload into Core milliseconds; no capability
     #: declaration or empty hook is required when the service has no chapter API.
     chapters: list[Chapter] = field(default_factory=list)
+    #: Optional service-owned files such as posters, thumbnails or artwork.
+    attachments: list[Attachment] = field(default_factory=list)
     #: Optional static, line-synchronized, or word-synchronized lyrics. Services
     #: retain the original TTML inside this neutral model for display and export.
     lyrics: Lyrics | None = None
@@ -324,3 +327,4 @@ class Playback:
         self.chapters = list(
             normalize_chapters(self.chapters, duration_ms=duration_ms)
         )
+        self.attachments = list(normalize_attachments(self.attachments))

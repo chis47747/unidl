@@ -40,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .attachments import Attachment
 from .chapters import Chapter
 from .lyrics import Lyrics
 from .playback import DrmInfo, Playback
@@ -212,6 +213,7 @@ class Entry:
     #: Optional service/API chapter timeline.  This is additive within export
     #: version 1: older readers ignore the field and newer readers retain it.
     chapters: list[Chapter] = field(default_factory=list)
+    attachments: list[Attachment] = field(default_factory=list)
     lyrics: Lyrics | None = None
     audio_codec_hint: str = ""
 
@@ -273,6 +275,7 @@ class Entry:
             keys=list(self.keys),
             note=self.note,
             chapters=list(self.chapters),
+            attachments=list(self.attachments),
             lyrics=self.lyrics,
             audio_codec_hint=self.audio_codec_hint,
         )
@@ -324,6 +327,8 @@ class Entry:
             document["summary"] = self.summary
         if self.chapters:
             document["chapters"] = [chapter.as_document() for chapter in self.chapters]
+        if self.attachments:
+            document["attachments"] = [attachment.as_document() for attachment in self.attachments]
         if self.lyrics is not None:
             document["lyrics"] = self.lyrics.as_document()
         if self.audio_codec_hint:
@@ -352,6 +357,13 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         lyrics = Lyrics.from_document(document["lyrics"]) if document.get("lyrics") else None
     except (TypeError, ValueError) as exc:
         raise ExportError(f"invalid lyrics metadata ({exc})") from exc
+    attachment_documents = document.get("attachments") or []
+    if not isinstance(attachment_documents, list):
+        raise ExportError("attachments must be a list")
+    try:
+        attachments = [Attachment.from_document(item) for item in attachment_documents]
+    except (TypeError, ValueError) as exc:
+        raise ExportError(f"invalid attachment metadata ({exc})") from exc
     return Entry(
         save_name=_text(document.get("save_name")),
         title=_title_from(document.get("title") or {}),
@@ -379,6 +391,7 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         tracks=[str(row) for row in (document.get("tracks") or [])],
         summary=_text(document.get("summary")),
         chapters=chapters,
+        attachments=attachments,
         lyrics=lyrics,
         audio_codec_hint=_text(document.get("audio_codec_hint")),
     )
@@ -503,6 +516,7 @@ def entry_for(
         tracks=rows,
         summary=summary,
         chapters=list(playback.chapters),
+        attachments=list(playback.attachments),
         lyrics=playback.lyrics,
         audio_codec_hint=playback.audio_codec_hint,
     )

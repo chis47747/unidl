@@ -80,6 +80,58 @@ class _ChapterPolicyScreen(ModalScreen[None]):
         return True
 
 
+class _AttachmentPolicyScreen(ModalScreen[None]):
+    """Toggle title attachments independently for each registered service."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
+
+    def __init__(self, app) -> None:
+        super().__init__()
+        self.services = sorted(app.services, key=lambda cls: cls.NAME.casefold())
+        spec = next(spec for spec in service_license_settings() if spec.key == "fetch_attachments")
+        self.scopes = [Settings(cls.ID, [spec], app.settings_store, parent=app.globals, legacy_ids=cls.LEGACY_IDS) for cls in self.services]
+
+    def compose(self) -> ComposeResult:
+        yield Chrome(show_search=False, show_settings=False)
+        with Vertical(id="modal-body"):
+            yield Static(tr("service.attachments.title", default="Title attachments by service"), classes="ask-title")
+            yield Label(tr("service.attachments.help", default="Select a service to toggle optional title attachments."), classes="ask-hint")
+            yield OptionList(id="service-attachments-list")
+        yield KeyBar(("enter", "toggle"), ("^b", "back"), ("esc", "back"))
+
+    def on_mount(self) -> None:
+        self.rebuild()
+        self.query_one("#service-attachments-list", OptionList).focus()
+
+    def rebuild(self) -> None:
+        options = self.query_one("#service-attachments-list", OptionList)
+        previous = options.highlighted
+        options.clear_options()
+        width = label_width(cls.NAME for cls in self.services)
+        for index, (cls, settings) in enumerate(zip(self.services, self.scopes, strict=True)):
+            value = setting_value(settings.spec_by_key["fetch_attachments"], settings)
+            options.add_option(Option(setting_row(options, cls.NAME, f"[$accent]{value}[/]", width), id=str(index)))
+        if self.services:
+            options.highlighted = min(previous or 0, len(self.services) - 1)
+        else:
+            options.add_option(Option(tr("service.export.empty"), disabled=True))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        index = event.option_index
+        if 0 <= index < len(self.services):
+            settings = self.scopes[index]
+            settings.set("fetch_attachments", not bool(settings.get("fetch_attachments")))
+            self.rebuild()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.dismiss(None)
+        return True
+
+
 class _RegistrationEditor(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
 
@@ -255,7 +307,7 @@ class ServicesManagerScreen(Screen[None]):
     def __init__(self, globals_scope: Settings):
         super().__init__()
         self.globals = globals_scope
-        self._rows = ("chapters", "license", "hybrid", "register", "home", "export")
+        self._rows = ("chapters", "attachments", "license", "hybrid", "register", "home", "export")
         self._sources = []
 
     def compose(self) -> ComposeResult:
@@ -305,6 +357,7 @@ class ServicesManagerScreen(Screen[None]):
         )
         rows = [
             ("chapters", tr('service.chapters.action', default='Chapter metadata by service'), f"[$dim]{tr('service.chapters.summary', default='Independent on/off per registered service')}[/]"),
+            ("attachments", tr('service.attachments.action', default='Title attachments by service'), f"[$dim]{tr('service.attachments.summary', default='Independent on/off per registered service')}[/]"),
             ("license", tr('service.license.action', default='License after final track selection'), f"[$dim]{setting_value(self.globals.spec_by_key['license_after_tracks'], self.globals)}[/]"),
             ("hybrid", tr('service.hybrid.action', default='Dolby Vision + HDR10 hybrid output'), f"[$dim]{setting_value(self.globals.spec_by_key['dolby_vision_hybrid'], self.globals)}[/]"),
             ("register", tr('service.register.action'), f"[$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
@@ -324,6 +377,7 @@ class ServicesManagerScreen(Screen[None]):
     def _show_help(self, ident: str) -> None:
         keys = {
             "chapters": "service.chapters.help",
+            "attachments": "service.attachments.help",
             "license": "service.license.help",
             "hybrid": "service.hybrid.help",
             "register": "service.register.help",
@@ -346,6 +400,9 @@ class ServicesManagerScreen(Screen[None]):
         ident = str(options.get_option_at_index(options.highlighted or 0).id or "")
         if ident == "chapters":
             self.app.push_screen(_ChapterPolicyScreen(self.app), lambda _result: self.rebuild())
+            return
+        if ident == "attachments":
+            self.app.push_screen(_AttachmentPolicyScreen(self.app), lambda _result: self.rebuild())
             return
         if ident == "license":
             spec = self.globals.spec_by_key["license_after_tracks"]

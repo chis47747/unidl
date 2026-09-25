@@ -287,6 +287,12 @@ download and mux are unaffected.
 Chapter embedding is already a shared **Tracks and output** setting named
 `embed_chapters` (on by default); a service should not add a second mux toggle.
 
+Optional posters, thumbnails and artwork use `Playback.attachments` with
+`Attachment(url, name, kind, mime_type, filename, headers)` values. Check
+`self.fetch_attachments_enabled()` before requesting them. UniDL previews them
+beside Chapters/Lyrics and downloads them separately under a title-specific
+`.attachments` directory; attachments are never muxed into media.
+
 ```python
 DrmInfo(
     system=None,                                 # None: service/global selection decides

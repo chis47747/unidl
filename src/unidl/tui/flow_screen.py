@@ -30,6 +30,7 @@ class FlowScreen(AskHost):
     BINDINGS = [
         Binding("c", "show_chapters", "Chapters", show=False),
         Binding("l", "show_lyrics", "Lyrics", show=False),
+        Binding("a", "show_attachments", "Attachments", show=False),
     ]
 
     def compose_identity(self) -> ComposeResult:
@@ -66,6 +67,7 @@ class FlowScreen(AskHost):
             *self.queue_hints(),
             *self.chapter_hints(),
             *self.lyrics_hints(),
+            *self.attachments_hints(),
             ("^l", "log"),
             ("^s", "settings"),
         ]

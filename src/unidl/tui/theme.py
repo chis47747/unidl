@@ -542,6 +542,26 @@ LyricsScreen {
 .lyrics-row.odd {
     background: $panel;
 }
+AttachmentsScreen {
+    align: center middle;
+    background: $base 70%;
+}
+#attachment-modal {
+    width: 72;
+    max-width: 94%;
+    height: auto;
+    max-height: 86%;
+    background: $recessed;
+    border-left: solid $accent;
+    padding: 1;
+}
+#attachment-modal-head { height: 1; padding: 0 1; }
+#attachment-modal-title { width: 1fr; height: 1; color: $foreground; text-style: bold; }
+#attachment-modal-close { width: 5; height: 1; content-align: right middle; color: $accent; text-style: bold; }
+#attachment-modal-close:hover { background: $highlight; color: $foreground; }
+#attachment-summary, #attachment-info { height: auto; padding: 1 2 0 2; color: $muted; text-align: center; }
+#attachment-image { width: 1fr; height: 1fr; min-height: 8; max-height: 28; content-align: center middle; padding: 1; }
+#attachment-modal-hint { height: 1; padding: 1 2 0 2; color: $muted; text-align: center; }
 .ask-title-row {
     height: 1;
     width: 1fr;

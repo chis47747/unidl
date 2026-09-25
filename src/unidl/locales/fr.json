@@ -126,7 +126,7 @@
   "update.note.media_types": "Les URL de manifestes servies par script et les espaces sont traités sans reconstruire les paramètres signés.",
   "update.note.documentation": "Les sections initiales HLS conservent leur portée AES ; prise en charge du SAMPLE-AES TS/AAC classique.",
   "update.note.clipboard": "Sortie hybride Dolby Vision + HDR10 configurable globalement ou par service ; sources compatibles et outils externes requis.",
-  "update.note.update_checker": "UniDL v2.1.7 ajoute des variantes de services compilés selon l’ABI/la plateforme et un chargement plus sûr des extensions natives.",
+  "update.note.update_checker": "UniDL v2.1.8 ajoute les pièces jointes par service, les téléchargements séparés et les aperçus respectant les proportions.",
   "update.close_hint": "esc / x ferme cette fenêtre",
   "home.chip.config": "configuration",
   "home.chip.config_create": "créer",
@@ -1069,5 +1069,17 @@
   "justwatch.no_service": "aucun service",
   "justwatch.disc_sale": "{provider} vend un disque, pas un flux",
   "justwatch.no_handler": "Aucun service ici ne gère {provider}",
-  "justwatch.no_search": "{name} ne propose pas de recherche ; collez l’URL lorsque vous l’avez"
+  "justwatch.no_search": "{name} ne propose pas de recherche ; collez l’URL lorsque vous l’avez",
+  "service.attachments.action": "Pièces jointes du titre par service",
+  "service.attachments.summary": "Activation indépendante pour chaque service enregistré",
+  "service.attachments.title": "Pièces jointes du titre par service",
+  "service.attachments.help": "Sélectionnez un service pour activer les pièces jointes facultatives du titre.",
+  "setting.fetch_attachments": "Récupérer les pièces jointes du titre",
+  "setting.fetch_attachments.help": "Autorise ce service à récupérer des affiches, miniatures et illustrations facultatives. Les pièces jointes sont téléchargées séparément et ne sont jamais fusionnées avec la vidéo ou l’audio.",
+  "attachments.count.one": "{count} pièce jointe",
+  "attachments.count.other": "{count} pièces jointes",
+  "attachments.title": "Pièces jointes",
+  "attachments.loading": "Chargement de la pièce jointe…",
+  "attachments.unavailable": "Aperçu indisponible",
+  "attachments.browse_hint": "←/→ pour parcourir · esc pour fermer"
 }

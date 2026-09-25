@@ -338,6 +338,8 @@ def export_panel(path: Path, document: exports.Document) -> Panel:
         detail = f"{len(entry.keys)} key(s)"
         if entry.chapters:
             detail += f"  ·  {len(entry.chapters)} chapter(s)"
+        if entry.attachments:
+            detail += f"  ·  {len(entry.attachments)} attachment(s)"
         rows.append(f"{entry.label()}  ·  {detail}")
     rows.append("")
     rows.append("It holds the content keys and the manifest link, so treat it like a password. Nothing was downloaded.")
@@ -2006,6 +2008,14 @@ class SessionController:
             if getattr(self, "import_session", False)
             else str(self.settings.get("after_resolve", "download"))
         )
+        attachment_policy = getattr(self.service, "fetch_attachments_enabled", None)
+        attachments_enabled = (
+            bool(attachment_policy())
+            if callable(attachment_policy)
+            else bool(self.settings.get("fetch_attachments", True))
+        )
+        if playback.attachments and not attachments_enabled:
+            playback.attachments = []
         self.post_status(tr("delivery.status.preparing", name=playback.save_name))
 
         # Title and manifest are always reported, whatever the service, whatever
@@ -2430,6 +2440,14 @@ class SessionController:
             completed = tuple(dict.fromkeys(result.artifacts)) or (result.output_dir,)
             for path in completed:
                 self.post_log(f"done -> {path}", "ok")
+            if playback.attachments and attachments_enabled:
+                attachment_paths = self.engine.download_attachments(
+                    playback,
+                    self.settings,
+                    service=self.service.ID,
+                )
+                for path in attachment_paths:
+                    self.post_log(f"attachment -> {path}", "ok")
             self._notify(f"Downloaded {playback.save_name}")
             return DONE, ""
 
@@ -2892,6 +2910,8 @@ class SessionController:
             scope=SCOPE_DELIVERY,
             chapters=tuple(playback.chapters),
             lyrics=playback.lyrics,
+            attachments=tuple(playback.attachments),
+            attachments_proxy=playback.proxy,
             preview=AudioPreview.from_playback(playback) if playback.audio_only else None,
         )
         try:

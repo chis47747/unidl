@@ -550,6 +550,16 @@ def service_license_settings(config: Any = None) -> list[Setting]:
                 "a chapter failure never stops playback or downloading."
             ),
         ),
+        Setting(
+            "fetch_attachments",
+            "Fetch title attachments",
+            "bool",
+            default=True,
+            help=(
+                "When enabled, this service may request optional posters, thumbnails "
+                "and artwork and download them as separate files."
+            ),
+        ),
         Setting("license_after_tracks", "License after final track selection", "bool", default=False,
                 inherit_global=True,
                 help="Wait for this service's final tracks, then query/license only their KIDs and PSSH values."),

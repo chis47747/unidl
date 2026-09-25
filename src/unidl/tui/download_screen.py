@@ -203,6 +203,7 @@ class DownloadScreen(AskHost):
     BINDINGS = [
         Binding("c", "show_chapters", "Chapters", show=False),
         Binding("l", "show_lyrics", "Lyrics", show=False),
+        Binding("a", "show_attachments", "Attachments", show=False),
     ]
 
     def __init__(self, controller) -> None:
@@ -239,6 +240,9 @@ class DownloadScreen(AskHost):
             yield StatusChip(
                 "show_lyrics", id="delivery-lyrics", classes="chapter-chip"
             )
+            yield StatusChip(
+                "show_attachments", id="delivery-attachments", classes="chapter-chip"
+            )
         yield Static("", id="delivery-elapsed")
         yield Static("", id="queue-summary")
         yield Static("", id="status-line")
@@ -251,6 +255,7 @@ class DownloadScreen(AskHost):
                 ("■", "Pause", "screen.stop_resume", "chrome-stop"),
                 ("c", "Chapters", "screen.show_chapters", "chrome-chapters"),
                 ("l", "Lyrics", "screen.show_lyrics", "chrome-lyrics"),
+                ("a", "Attachments", "screen.show_attachments", "chrome-attachments"),
             ),
         )
 
@@ -282,12 +287,13 @@ class DownloadScreen(AskHost):
         back = "stopping..." if self.controller.cancel_requested else "back"
         chapters = self.chapter_hints()
         lyrics = self.lyrics_hints()
+        attachments = self.attachments_hints()
         log_action = {
             "normal": "expand the log",
             "tall": "collapse the log",
             "collapsed": "show the log",
         }.get(self._log_state, "toggle the log")
-        return [("^b", back), *self.queue_hints(), *chapters, *lyrics, ("^l", log_action),
+        return [("^b", back), *self.queue_hints(), *chapters, *lyrics, *attachments, ("^l", log_action),
                 ("drag", "select text to copy it"), ("^s", "settings")]
 
     def refresh_keys(self) -> None:
@@ -313,6 +319,13 @@ class DownloadScreen(AskHost):
             lyric_button.display = count > 0
             lyric_button.set_label("l", tr("lyrics.lines_n", count=count) if count else "Lyrics")
             lyric_button.set_enabled(count > 0)
+        attachments = self.query("#chrome-attachments")
+        if attachments:
+            attachment_button = attachments.first(ChromeButton)
+            count = len(self._chapter_playback.attachments) if self._chapter_playback else 0
+            attachment_button.display = count > 0
+            attachment_button.set_label("a", tr("attachments.title") + (f" {count}" if count else ""))
+            attachment_button.set_enabled(count > 0)
         found = self.query("#chrome-stop")
         if not found:
             return
@@ -380,6 +393,12 @@ class DownloadScreen(AskHost):
         lyrics_found = self.query("#delivery-lyrics")
         if lyrics_found:
             lyrics_found.first(StatusChip).display = False
+        attachments_found = self.query("#delivery-attachments")
+        if attachments_found:
+            attachments_found.first(StatusChip).display = False
+        attachments_found = self.query("#delivery-attachments")
+        if attachments_found:
+            attachments_found.first(StatusChip).display = False
         self.refresh_keys()
         self.render_queue(self.controller.jobs, self.controller.batch_total)
         # a screen that appears while something is already downloading shows it
@@ -615,7 +634,12 @@ class DownloadScreen(AskHost):
             if playback.lyrics is not None
             else ""
         )
-        chip_room = sum(len(value) + 3 for value in (chapter_text, lyrics_text) if value)
+        attachment_text = ""
+        if playback.attachments:
+            from ..core.attachments import count_label
+
+            attachment_text = count_label(playback.attachments)
+        chip_room = sum(len(value) + 3 for value in (chapter_text, lyrics_text, attachment_text) if value)
         # content_size is already inside the padding; the fallback is not, so it
         # has to give the 2+2 columns back
         room = widget.content_size.width or max(0, self.size.width - 4)
@@ -642,6 +666,15 @@ class DownloadScreen(AskHost):
             chip = lyrics_found.first(StatusChip)
             if lyrics_text:
                 chip.update(lyrics_text)
+                chip.display = True
+            else:
+                chip.update("")
+                chip.display = False
+        attachments_found = self.query("#delivery-attachments")
+        if attachments_found:
+            chip = attachments_found.first(StatusChip)
+            if attachment_text:
+                chip.update(attachment_text)
                 chip.display = True
             else:
                 chip.update("")

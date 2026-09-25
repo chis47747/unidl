@@ -126,7 +126,7 @@
   "update.note.media_types": "支援腳本形式的 manifest 位址及 URL 空格，不重建已簽署的查詢參數。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 金鑰作用域，支援舊式 TS/AAC SAMPLE-AES 下載。",
   "update.note.clipboard": "可全域或按服務啟用 Dolby Vision + HDR10 混合輸出；需要匹配的來源軌道及外部工具。",
-  "update.note.update_checker": "UniDL v2.1.7 增加按 ABI/平台選擇編譯服務變體，並改進原生擴充功能的安全載入。",
+  "update.note.update_checker": "UniDL v2.1.8 增加按服務設定的標題附件、獨立附件下載和保持比例的預覽。",
   "update.close_hint": "按 esc / x 關閉視窗",
   "home.chip.config": "設定檔",
   "home.chip.config_create": "建立",
@@ -1069,5 +1069,17 @@
   "justwatch.no_service": "無對應服務",
   "justwatch.disc_sale": "{provider} 賣的是光碟，不是串流",
   "justwatch.no_handler": "這裡沒有服務能處理 {provider}",
-  "justwatch.no_search": "{name} 不支援搜尋；拿到網址後再貼上"
+  "justwatch.no_search": "{name} 不支援搜尋；拿到網址後再貼上",
+  "service.attachments.action": "按服務取得標題附件",
+  "service.attachments.summary": "每個已註冊服務可獨立開關",
+  "service.attachments.title": "按服務取得標題附件",
+  "service.attachments.help": "選擇服務以切換可選標題附件。",
+  "setting.fetch_attachments": "取得標題附件",
+  "setting.fetch_attachments.help": "允許目前服務取得海報、縮圖和 artwork 等可選附件。附件會單獨下載，不會混流到影片或音訊檔案中。",
+  "attachments.count.one": "{count} 個附件",
+  "attachments.count.other": "{count} 個附件",
+  "attachments.title": "附件",
+  "attachments.loading": "正在載入附件…",
+  "attachments.unavailable": "無法預覽附件",
+  "attachments.browse_hint": "←/→ 瀏覽 · esc 關閉"
 }

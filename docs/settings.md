@@ -367,6 +367,15 @@ malformed or temporarily unavailable response is reduced to no chapters (with a
 warning where the service can report one) and never prevents playback, licence
 acquisition, downloading or muxing.
 
+## Title attachments
+
+**Fetch title attachments** is independently configurable for each service in
+its own settings or under **Settings → Services → Title attachments by service**.
+Services should check `fetch_attachments_enabled()` before requesting optional
+posters, thumbnails or artwork, then place them in `Playback.attachments`.
+UniDL previews attachments beside Chapters and Lyrics and downloads them as
+separate files under `<save name>.attachments`; they are never muxed into media.
+
 ## Declaring service settings
 
 ```python

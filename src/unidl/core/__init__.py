@@ -4,6 +4,7 @@ Nothing in here imports a UI framework: services and core stay renderer
 agnostic, and the TUI is one possible front-end over the Flow protocol.
 """
 
+from .attachments import Attachment
 from .cache import TokenStore
 from .cdm import CdmError
 from .chapters import Chapter
@@ -35,6 +36,7 @@ __all__ = [
     "CORE",
     "SELF",
     "AuthStatus",
+    "Attachment",
     "Back",
     "Capabilities",
     "CdmError",

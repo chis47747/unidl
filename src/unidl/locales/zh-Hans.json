@@ -126,7 +126,7 @@
   "update.note.media_types": "支持脚本形式的 manifest 地址和 URL 空格，不重建已签名的查询参数。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 密钥作用域，支持旧式 TS/AAC SAMPLE-AES 下载。",
   "update.note.clipboard": "可全局或按服务启用 Dolby Vision + HDR10 混合输出；需要匹配的源轨道与外部工具。",
-  "update.note.update_checker": "UniDL v2.1.7 增加按 ABI/平台选择编译服务变体，并改进原生扩展的安全加载。",
+  "update.note.update_checker": "UniDL v2.1.8 增加按服务设置的标题附件、独立附件下载和保持比例的预览。",
   "update.close_hint": "按 esc / x 关闭窗口",
   "home.chip.config": "配置",
   "home.chip.config_create": "创建",
@@ -1069,5 +1069,17 @@
   "justwatch.no_service": "无对应服务",
   "justwatch.disc_sale": "{provider} 卖的是光盘，不是流媒体",
   "justwatch.no_handler": "这里没有服务能处理 {provider}",
-  "justwatch.no_search": "{name} 不支持搜索；拿到网址后再粘贴"
+  "justwatch.no_search": "{name} 不支持搜索；拿到网址后再粘贴",
+  "service.attachments.action": "按服务获取标题附件",
+  "service.attachments.summary": "每个已注册服务可独立开关",
+  "service.attachments.title": "按服务获取标题附件",
+  "service.attachments.help": "选择服务以切换可选标题附件。",
+  "setting.fetch_attachments": "获取标题附件",
+  "setting.fetch_attachments.help": "允许当前服务获取海报、缩略图和 artwork 等可选附件。附件会单独下载，不会混流到视频或音频文件中。",
+  "attachments.count.one": "{count} 个附件",
+  "attachments.count.other": "{count} 个附件",
+  "attachments.title": "附件",
+  "attachments.loading": "正在加载附件…",
+  "attachments.unavailable": "无法预览附件",
+  "attachments.browse_hint": "←/→ 浏览 · esc 关闭"
 }

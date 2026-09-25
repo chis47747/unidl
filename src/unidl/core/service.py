@@ -429,6 +429,22 @@ class Service:
             return value.strip().casefold() not in {"", "0", "false", "no", "off"}
         return bool(value)
 
+    def fetch_attachments_enabled(self) -> bool:
+        """Whether this run may request optional title attachments."""
+        settings = getattr(self, "settings", None)
+        getter = getattr(settings, "get", None)
+        if not callable(getter):
+            return True
+        try:
+            value = getter("fetch_attachments", True)
+        except TypeError:
+            value = getter("fetch_attachments")
+            if value is None:
+                value = True
+        if isinstance(value, str):
+            return value.strip().casefold() not in {"", "0", "false", "no", "off"}
+        return bool(value)
+
     # ------------------------------------------------------------------ meta
     @classmethod
     def tag(cls) -> str:

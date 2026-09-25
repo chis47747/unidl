@@ -168,7 +168,7 @@
   "update.note.media_types": "Procesa manifiestos servidos por scripts y espacios en URL sin reconstruir parámetros firmados.",
   "update.note.documentation": "Las secciones iniciales HLS conservan su ámbito AES; soporte para SAMPLE-AES TS/AAC clásico.",
   "update.note.clipboard": "Salida híbrida Dolby Vision + HDR10 configurable globalmente o por servicio; requiere fuentes compatibles y herramientas externas.",
-  "update.note.update_checker": "UniDL v2.1.7 añade variantes de servicios compilados según ABI/plataforma y una carga más segura de extensiones nativas.",
+  "update.note.update_checker": "UniDL v2.1.8 añade adjuntos por servicio, descargas independientes y vistas previas que conservan la proporción.",
   "update.close_hint": "esc / x cierra esta ventana",
   "home.chip.config": "configuración",
   "home.chip.config_create": "crear",
@@ -1069,5 +1069,17 @@
   "cdm.no_kind_devices": "no se encontraron dispositivos {kind}",
   "cdm.no_system_devices": "no se encontraron dispositivos {system} {kind}",
   "cdm.hint.remote": "abre Configuración → DRM y bóvedas para añadir un endpoint remoto",
-  "cdm.hint.local": "pulsa ^o para abrir la carpeta superior y después ^r para recargar"
+  "cdm.hint.local": "pulsa ^o para abrir la carpeta superior y después ^r para recargar",
+  "service.attachments.action": "Adjuntos del título por servicio",
+  "service.attachments.summary": "Activación independiente por servicio registrado",
+  "service.attachments.title": "Adjuntos del título por servicio",
+  "service.attachments.help": "Selecciona un servicio para activar los adjuntos opcionales del título.",
+  "setting.fetch_attachments": "Obtener adjuntos del título",
+  "setting.fetch_attachments.help": "Permite a este servicio obtener carteles, miniaturas y carátulas opcionales. Los adjuntos se descargan por separado y nunca se mezclan con el vídeo o audio.",
+  "attachments.count.one": "{count} adjunto",
+  "attachments.count.other": "{count} adjuntos",
+  "attachments.title": "Adjuntos",
+  "attachments.loading": "Cargando adjunto…",
+  "attachments.unavailable": "Vista previa no disponible",
+  "attachments.browse_hint": "←/→ para explorar · esc para cerrar"
 }

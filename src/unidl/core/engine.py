@@ -7,10 +7,13 @@ never touch implementation details and the TUI never builds command lines by han
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextvars
 import hashlib
 import json
 import math
+import mimetypes
 import re
 import threading
 import time
@@ -56,7 +59,7 @@ from .delivery import (
 )
 from .diagnostics import DebugRecorder, activate, safe_log_text
 from .playback import Playback, normalize_live_record_limit
-from .secureio import atomic_write_text, locked_path, private_directory, private_file
+from .secureio import atomic_write_bytes, atomic_write_text, locked_path, private_directory, private_file, safe_filename
 from .settings import Settings, normalize_drop_video_pattern
 from .vault import KeyVault, normalize_hex, split_pair
 
@@ -2690,6 +2693,55 @@ class Engine:
         root = Path(chosen).expanduser() if chosen else self.config.paths.downloads
         name = _folder_name(service)
         return root / name if name else root
+
+    def download_attachments(self, playback: Playback, settings: Settings, *, service: str = "") -> tuple[Path, ...]:
+        """Download optional title attachments as independent sidecar files."""
+        attachments = tuple(playback.attachments or ())
+        if not attachments:
+            return ()
+        target_dir = private_directory(self.save_dir(settings, service) / f"{safe_filename(playback.save_name)}.attachments")
+        written: list[Path] = []
+        for index, attachment in enumerate(attachments, start=1):
+            try:
+                source = attachment.url
+                parsed = urlsplit(source)
+                mime = attachment.mime_type
+                if source.lower().startswith("data:"):
+                    header, separator, encoded = source.partition(",")
+                    if not separator or ";base64" not in header.casefold():
+                        raise ValueError("data attachment is not base64 encoded")
+                    try:
+                        data = base64.b64decode("".join(encoded.split()), validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ValueError("data attachment is invalid") from exc
+                    mime = mime or header[5:].split(";", 1)[0]
+                elif parsed.scheme in {"http", "https"} and parsed.netloc:
+                    with requests.get(source, headers=dict(attachment.headers), proxies=(
+                        {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
+                    ), timeout=(5.0, 30.0), stream=True) as response:
+                        response.raise_for_status()
+                        mime = mime or response.headers.get("Content-Type", "").split(";", 1)[0]
+                        data = response.raw.read(32 * 1024 * 1024 + 1)
+                else:
+                    data = Path(source).expanduser().read_bytes()
+                if not data:
+                    raise ValueError("attachment is empty")
+                if len(data) > 32 * 1024 * 1024:
+                    raise ValueError("attachment exceeds the 32 MiB safety limit")
+                filename = attachment.filename
+                if not filename:
+                    suffix = Path(parsed.path).suffix if parsed.path else ""
+                    suffix = suffix if suffix and len(suffix) <= 12 else ""
+                    suffix = suffix or mimetypes.guess_extension(mime or "") or ".bin"
+                    filename = f"{index:02d}.{attachment.kind}{suffix}"
+                path = target_dir / safe_filename(filename, label="attachment filename")
+                if path.exists():
+                    path = target_dir / safe_filename(f"{index:02d}.{path.stem}{path.suffix}", label="attachment filename")
+                written.append(atomic_write_bytes(path, data))
+                self.log(f"attachment saved -> {path}")
+            except Exception as exc:  # noqa: BLE001 - attachments are auxiliary
+                self.log(f"warning: attachment skipped ({attachment.name}): {exc}")
+        return tuple(written)
 
     @staticmethod
     def delivery_source(playback: Playback) -> DeliverySource:
