@@ -3156,7 +3156,14 @@ class _LivePipeMuxSession:
         temp_hevc_path = self.output_path.with_name(f"{temp_base}.hevc")
         temp_mkv_path = self.output_path.with_name(f"{temp_base}{suffix}")
         temp_compatible_mp4_path = self.output_path.with_name(f"{temp_base}.compatible.mp4")
+        # Rename the raw recording within the same directory before remuxing.
+        # This keeps it recoverable without counting a second full-size copy
+        # against the filesystem while the finalization stages run.
+        source_path = self.output_path.with_name(f"{temp_base}.source{suffix}")
+        source_moved = False
         try:
+            self.output_path.replace(source_path)
+            source_moved = True
             self._run_live_pipe_finalize_ffmpeg(
                 [
                     executable,
@@ -3167,7 +3174,7 @@ class _LivePipeMuxSession:
                     "-fflags",
                     "+genpts+igndts",
                     "-i",
-                    str(self.output_path),
+                    str(source_path),
                     "-map",
                     "0",
                     "-c",
@@ -3184,6 +3191,10 @@ class _LivePipeMuxSession:
                 stage="MP4 timestamp rebuild",
             )
             self._ensure_live_pipe_finalize_output(temp_mp4_path, "ffmpeg produced an empty finalized MP4")
+            # The verified MP4 supersedes the raw live output. Release the raw
+            # bytes before extracting HEVC or building the MKV.
+            source_path.unlink(missing_ok=True)
+            source_moved = False
             try:
                 used_mkvmerge = self._finalize_matroska_output_with_mkvmerge(
                     temp_mp4_path,
@@ -3223,6 +3234,14 @@ class _LivePipeMuxSession:
                     stage="Matroska timestamp finalize",
                 )
             self._ensure_live_pipe_finalize_output(temp_mkv_path, "ffmpeg produced an empty finalized MKV")
+            # The completed MKV is the only input needed by the optional
+            # compatibility pass. Remove the full-size MP4 and HEVC staging
+            # files before creating another output-sized file.
+            for temp_path in (temp_mp4_path, temp_hevc_path):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if finalize_to_mp4:
                 self._finalize_matroska_output_to_mp4(
                     temp_mkv_path,
@@ -3233,15 +3252,50 @@ class _LivePipeMuxSession:
             else:
                 temp_mkv_path.replace(self.output_path)
         except OSError as exc:
+            self._restore_live_finalize_output(source_path, temp_mkv_path, temp_mp4_path, source_moved)
             raise RuntimeError(str(exc)) from exc
+        except Exception:
+            # If a later stage fails, restore the renamed raw recording or the
+            # completed MKV/MP4. All restores are same-directory renames and do
+            # not need additional free space.
+            self._restore_live_finalize_output(source_path, temp_mkv_path, temp_mp4_path, source_moved)
+            raise
         finally:
-            for temp_path in (temp_mp4_path, temp_hevc_path, temp_mkv_path, temp_compatible_mp4_path):
+            for temp_path in (source_path, temp_mp4_path, temp_hevc_path, temp_mkv_path, temp_compatible_mp4_path):
                 try:
                     temp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
         self.finalize_error = None
         self.finalize_succeeded = True
+
+    def _restore_live_finalize_output(
+        self,
+        source_path: Path,
+        temp_mkv_path: Path,
+        temp_mp4_path: Path,
+        source_moved: bool,
+    ) -> None:
+        """Leave a playable result when a later finalization stage fails."""
+        if self.output_path.exists():
+            return
+        recovery_path = source_path if source_moved else temp_mkv_path
+        if recovery_path.exists():
+            try:
+                recovery_path.replace(self.output_path)
+            except OSError:
+                pass
+            return
+        # The MP4 timestamp rebuild is already a valid playable fallback. Keep
+        # its truthful suffix rather than leaving MP4 bytes under an MKV name.
+        if temp_mp4_path.exists():
+            fallback = self.output_path.with_suffix(".mp4")
+            try:
+                temp_mp4_path.replace(fallback)
+                self.output_path = fallback
+                self.output_container = "mp4"
+            except OSError:
+                pass
 
     def _finalize_matroska_output_to_mp4(
         self,

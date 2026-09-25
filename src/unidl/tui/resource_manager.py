@@ -41,6 +41,7 @@ from textual.widgets.option_list import Option
 from ..core import cdmrules, vaults
 from ..core.drm import all_systems
 from ..core.i18n import phrase, tr
+from ..core.remotecdm import parse_entry
 from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
@@ -135,6 +136,18 @@ def _masked(value: object) -> str:
     return f"{text[:4]}…{text[-4:]}" if len(text) > 9 else ("stored" if text else "missing")
 
 
+def _secret_placeholder(
+    existing: dict[str, Any], keys: tuple[str, ...], fallback: str
+) -> str:
+    """Describe an existing secret without putting any part of it in the UI."""
+    if any(_text(existing.get(key)) for key in keys):
+        # The field label carries the same instruction, but repeating it in the
+        # empty password box is important: an Input with no value otherwise looks
+        # exactly like a resource that was never configured.
+        return tr("resource.field.secret_keep").strip(" ·")
+    return fallback
+
+
 @dataclass(frozen=True)
 class ResourceRow:
     """One selectable manager row; headings are represented by ``None``."""
@@ -212,7 +225,8 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
 
     def compose(self) -> ComposeResult:
         systems = [(system.label, system.id) for system in all_systems() if system.remote_capable]
-        default_system = _text(self.existing.get("system")) or "widevine"
+        parsed = parse_entry(self.existing) if self.existing else None
+        default_system = parsed.system if parsed is not None else (_text(self.existing.get("system")) or "widevine")
         if default_system not in {value for _label, value in systems}:
             systems.append((tr("resource.configured", system=default_system), default_system))
         title = tr("resource.edit_cdm") if self.editing else tr("resource.add_cdm")
@@ -249,7 +263,15 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
                     + (tr("resource.field.secret_keep") if self.editing else ""),
                     classes="resource-field-label",
                 )
-                yield Input(password=True, placeholder=tr("resource.placeholder.secret"), id="resource-secret")
+                yield Input(
+                    password=True,
+                    placeholder=_secret_placeholder(
+                        self.existing,
+                        ("secret", "token", "key"),
+                        tr("resource.placeholder.secret"),
+                    ),
+                    id="resource-secret",
+                )
                 yield Label(tr("resource.field.device_type"), classes="resource-field-label")
                 yield Input(
                     value=_text(self.existing.get("device_type")),
@@ -399,7 +421,15 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
                     + (tr("resource.field.secret_keep") if self.editing else ""),
                     classes="resource-field-label",
                 )
-                yield Input(password=True, placeholder=tr("resource.placeholder.token"), id="resource-secret")
+                yield Input(
+                    password=True,
+                    placeholder=_secret_placeholder(
+                        self.existing,
+                        ("password", "api_key", "token", "secret"),
+                        tr("resource.placeholder.token"),
+                    ),
+                    id="resource-secret",
+                )
                 yield Label(tr("resource.field.api_mode"), classes="resource-field-label")
                 yield Select(
                     [(tr("resource.api.json"), "json"), (tr("resource.api.query"), "query")],
@@ -849,7 +879,8 @@ class ResourceManagerScreen(Screen[None]):
             rows.append(None)
             for entry in remote:
                 name = _text(entry.get("name") or entry.get("device_name") or "remote cdm")
-                system = _text(entry.get("system")) or tr("resource.automatic_system")
+                parsed = parse_entry(entry)
+                system = parsed.system if parsed is not None else (_text(entry.get("system")) or tr("resource.automatic_system"))
                 level = _text(entry.get("security_level"))
                 host = urlparse(_text(entry.get("host"))).netloc or _text(entry.get("host"))
                 detail = " · ".join(

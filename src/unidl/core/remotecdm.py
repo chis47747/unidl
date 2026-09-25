@@ -48,6 +48,34 @@ from .drm import PLAYREADY, WIDEVINE, CdmError
 
 _HEX = re.compile(r"[^0-9a-fA-F]")
 
+# Remote-CDM configurations have existed in a few forms.  In particular,
+# older manager versions wrote ``system: widevine`` for every endpoint while
+# still preserving the authoritative ``device_type: PLAYREADY`` and
+# ``security_level: 2000`` fields.  Keep one canonical value at the boundary so
+# every picker and resolver agrees about which DRM the server can answer for.
+_SYSTEM_ALIASES = {
+    "wv": WIDEVINE,
+    "wvd": WIDEVINE,
+    "widevine": WIDEVINE,
+    "pr": PLAYREADY,
+    "prd": PLAYREADY,
+    "playready": PLAYREADY,
+}
+
+
+def _system_hint(value: object) -> str:
+    """Return a canonical DRM id for a common system/device spelling."""
+    token = re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+    if token in _SYSTEM_ALIASES:
+        return _SYSTEM_ALIASES[token]
+    # Some remote providers use values such as ``com.microsoft.playready`` or
+    # ``playready-device``.  They still unambiguously name the DRM system.
+    if "playready" in token:
+        return PLAYREADY
+    if "widevine" in token:
+        return WIDEVINE
+    return ""
+
 
 @dataclass(frozen=True)
 class RemoteCdmConfig:
@@ -108,14 +136,21 @@ def parse_entry(entry: dict[str, Any]) -> RemoteCdmConfig | None:
     device_type = str(data.get("device_type") or "").strip()
     security_level = _int(data.get("security_level"))
 
-    system = str(data.get("system") or "").strip().lower()
-    if not system:
-        # Inferred, because the existing config format has no system field: a
-        # PlayReady device says so in its type, and its levels are four digits.
-        if device_type.upper() == "PLAYREADY" or (security_level or 0) >= 1000:
-            system = PLAYREADY
-        else:
-            system = WIDEVINE
+    configured_system = _system_hint(data.get("system"))
+    device_system = _system_hint(device_type)
+    # The device type and its security level describe the server-side device;
+    # they are more authoritative than a stale/generic system field written by
+    # an older editor.  A four-digit level is the historical PlayReady signal.
+    # Unknown explicit systems are retained for forward-compatible extensions.
+    if device_system in {WIDEVINE, PLAYREADY}:
+        system = device_system
+    elif (security_level or 0) >= 1000:
+        system = PLAYREADY
+    elif configured_system:
+        system = configured_system
+    else:
+        raw_system = str(data.get("system") or "").strip().lower()
+        system = raw_system or WIDEVINE
 
     return RemoteCdmConfig(
         name=name or device_name,
