@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .secureio import set_fd_mode
+
 _DIRECTORY_MODE = 0o700
 _FILE_MODE = 0o600
 
@@ -139,7 +141,7 @@ class TokenStore:
         )
         temporary = Path(temporary_name)
         try:
-            os.fchmod(descriptor, _FILE_MODE)
+            set_fd_mode(descriptor, _FILE_MODE)
             handle = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
             descriptor = -1
             with handle:

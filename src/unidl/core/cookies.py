@@ -41,6 +41,7 @@ from .secureio import (
     locked_path,
     private_directory,
     private_file,
+    set_fd_mode,
 )
 
 #: the first line every Netscape cookie file starts with, in one spelling or another
@@ -217,7 +218,7 @@ class CookieStore:
         )
         scratch = Path(scratch_name)
         try:
-            os.fchmod(descriptor, FILE_MODE)
+            set_fd_mode(descriptor, FILE_MODE)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 descriptor = -1
                 handle.write(text)

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0] - 2026-09-26
+
+### Fragmented media postprocessing
+
+- Corrected timestamp restamping when one HLS/CMAF segment contains multiple
+  MP4 fragments, preventing accumulated audio/video drift.
+
+### Windows state storage
+
+- Made settings, service registration, token, cookie and cache writes work on
+  Windows where `os.fchmod` is unavailable.
+
 ## [2.1.9] - 2026-09-25
 
 ### Playback metadata

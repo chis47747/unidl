@@ -27,6 +27,23 @@ _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 
 
+def set_fd_mode(descriptor: int, mode: int) -> bool:
+    """Apply a file-descriptor mode where the platform supports it.
+
+    Windows has no :func:`os.fchmod`. Named paths are chmod'ed after atomic
+    replacement, so skipping this fd-only step on Windows keeps the write path
+    portable without weakening the final path-level handling.
+    """
+    chmod = getattr(os, "fchmod", None)
+    if chmod is None:
+        return False
+    try:
+        chmod(descriptor, mode)
+    except (OSError, NotImplementedError):
+        return False
+    return True
+
+
 def safe_filename(value: object, *, label: str = "file name") -> str:
     """Return one portable file name, never a path or a special component."""
     raw = str(value or "").strip()
@@ -106,10 +123,7 @@ def locked_path(path: Path) -> Iterator[None]:
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(lock_path, flags, FILE_MODE)
         try:
-            try:
-                os.fchmod(descriptor, FILE_MODE)
-            except OSError:
-                pass
+            set_fd_mode(descriptor, FILE_MODE)
             if fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
@@ -145,7 +159,7 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int = FILE_MODE) -> Pat
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, mode)
+        set_fd_mode(descriptor, mode)
         handle = os.fdopen(descriptor, "wb")
         descriptor = -1
         with handle:
@@ -182,7 +196,7 @@ def atomic_write_via(
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, mode)
+        set_fd_mode(descriptor, mode)
         os.close(descriptor)
         descriptor = -1
         writer(temporary)
@@ -215,5 +229,6 @@ __all__ = [
     "private_directory",
     "private_file",
     "safe_filename",
+    "set_fd_mode",
     "secure_tree",
 ]

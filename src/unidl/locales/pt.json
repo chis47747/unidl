@@ -126,7 +126,7 @@
   "update.note.media_types": "Processa manifestos servidos por scripts e espaços nas URLs sem reconstruir parâmetros assinados.",
   "update.note.documentation": "As seções iniciais HLS preservam seu escopo AES; suporte ao SAMPLE-AES TS/AAC clássico.",
   "update.note.clipboard": "Saída híbrida Dolby Vision + HDR10 configurável globalmente ou por serviço; requer fontes compatíveis e ferramentas externas.",
-  "update.note.update_checker": "UniDL v2.1.9 adiciona metadados de taxa de bits e canais de áudio das faixas selecionadas, finalização mais segura de transmissões ao vivo e correções do editor de CDM remoto.",
+  "update.note.update_checker": "UniDL v2.2.0 corrige o desfasamento temporal no pós-processamento HLS/CMAF com vários fragmentos e permite guardar definições no Windows.",
   "update.close_hint": "esc / x fecha esta janela",
   "home.chip.config": "configuração",
   "home.chip.config_create": "criar",

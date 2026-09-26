@@ -232,6 +232,18 @@ def restamp_fragmented_mp4_sequence(
             if section_fragment_durations and index < len(section_fragment_durations)
             else None
         )
+        # An HLS ``EXTINF`` duration describes one playlist segment, but a
+        # CMAF segment may contain several moof/tfdt fragments. Applying the
+        # playlist durations positionally in that case stretches the section
+        # and makes A/V drift grow. Keep source deltas and use the section
+        # duration as the boundary instead.
+        if fragment_durations is not None:
+            try:
+                fragment_count = len(_mp4_find_tfdt_positions(section.read_bytes()))
+            except OSError:
+                fragment_count = 0
+            if fragment_count != len(fragment_durations):
+                fragment_durations = None
         restamped, next_decode_time = restamp_fragmented_mp4_timestamps(
             section,
             next_decode_time=start_decode_time if local_section_timestamps else next_decode_time,
