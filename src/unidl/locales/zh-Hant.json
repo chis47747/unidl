@@ -126,7 +126,7 @@
   "update.note.media_types": "支援腳本形式的 manifest 位址及 URL 空格，不重建已簽署的查詢參數。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 金鑰作用域，支援舊式 TS/AAC SAMPLE-AES 下載。",
   "update.note.clipboard": "可全域或按服務啟用 Dolby Vision + HDR10 混合輸出；需要匹配的來源軌道及外部工具。",
-  "update.note.update_checker": "UniDL v2.2.0 修正多 fragment HLS/CMAF 後處理的時間戳漂移，並讓 Windows 設定儲存正常運作。",
+  "update.note.update_checker": "UniDL v2.2.1 增加統一字幕 sidecar 軌道、語言選擇，以及由服務準備字幕混流。",
   "update.close_hint": "按 esc / x 關閉視窗",
   "home.chip.config": "設定檔",
   "home.chip.config_create": "建立",

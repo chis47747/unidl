@@ -126,7 +126,7 @@
   "update.note.media_types": "Les URL de manifestes servies par script et les espaces sont traités sans reconstruire les paramètres signés.",
   "update.note.documentation": "Les sections initiales HLS conservent leur portée AES ; prise en charge du SAMPLE-AES TS/AAC classique.",
   "update.note.clipboard": "Sortie hybride Dolby Vision + HDR10 configurable globalement ou par service ; sources compatibles et outils externes requis.",
-  "update.note.update_checker": "UniDL v2.2.0 corrige le décalage temporel du post-traitement HLS/CMAF multi-fragments et permet l’enregistrement des paramètres sous Windows.",
+  "update.note.update_checker": "UniDL v2.2.1 ajoute les pistes de sous-titres sidecar partagées, la sélection de langue et la préparation du mux gérée par le service.",
   "update.close_hint": "esc / x ferme cette fenêtre",
   "home.chip.config": "configuration",
   "home.chip.config_create": "créer",

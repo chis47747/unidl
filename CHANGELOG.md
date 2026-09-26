@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.1] - 2026-09-26
+
+### Shared subtitle sidecars
+
+- Added the generic `augment_tracks()` service hook for subtitle inventories
+  returned by separate provider APIs.
+- Added service-owned subtitle sidecars to the shared track picker and applied
+  the shared `sub_langs` selection before `prepare_download()` fetches files for
+  muxing.
+- Included selected sidecar subtitle rows in command records and documented
+  the service integration contract.
+
 ## [2.2.0] - 2026-09-26
 
 ### Fragmented media postprocessing

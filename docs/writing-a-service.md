@@ -783,6 +783,18 @@ licensing, or remove entries from `tracks.streams`. Use `role`, `name`,
 is inconsistent. `name` is a display label, not a language field, so changing
 it to `und` is not a reliable way to affect automatic selection.
 
+If a provider returns subtitles through a separate authorized API rather than
+inside its manifest, keep the complete inventory in
+`Playback.subtitle_references` and expose it with an `augment_tracks()` hook.
+Return `StreamInfo` rows marked with `extra["service_sidecar"] = "subtitle"`
+and `extra["subtitle_reference_url"] = reference.url`. Core puts these rows in
+the same picker and applies shared `sub_langs`; it does not send them to the
+native manifest downloader. During a real download Core mirrors the choices
+back to the references, and the service's `prepare_download()` fetches only the
+selected files and adds them to `Playback.mux_imports`. The service should not
+use a setting to decide which subtitle rows exist or use shared subtitle output
+settings to change its provider API request.
+
 A local `.json` manifest path may be supplied as `manifest_url`, because native
 delivery core can parse that input. The `Playback.json_manifest` dictionary
 field exists in the model but the current delivery controller skips it; do not

@@ -2075,7 +2075,9 @@ def _download_selected_stream(
                         temp_dir=_task_temp_subdir(args, "postprocess"),
                         event_callback=decrypt_event,
                     )
-                elif _should_decrypt_fragmented_parts(stream, result):
+                elif _should_decrypt_fragmented_parts(stream, result) and not (
+                    result.sections and _stream_sections_need_timestamp_restamp(stream)
+                ):
                     current_path = decrypt_fragmented_mp4_parts(
                         result.parts or [],
                         stream.segments,
@@ -2085,7 +2087,7 @@ def _download_selected_stream(
                         expected_kids=_stream_key_ids(stream),
                         temp_dir=_task_temp_subdir(args, "postprocess"),
                         event_callback=decrypt_event,
-                        restamp_timestamps=_stream_uses_json_dvr_sequence_fragments(stream),
+                        restamp_timestamps=_stream_needs_fragment_timestamp_restamp(stream),
                     )
                 elif result.sections:
                     if _stream_sections_need_whole_file_decryption(stream):
@@ -2392,6 +2394,17 @@ def _stream_needs_fragment_parts(stream) -> bool:
     if scheme not in {"CBCS", "CENC", "SAMPLE-AES", "SAMPLE_AES"}:
         return False
     return bool(stream.segments and any(segment.index == -1 for segment in stream.segments))
+
+
+def _stream_needs_fragment_timestamp_restamp(stream) -> bool:
+    """Whether fragmented timestamps need a single continuous decode timeline."""
+    if _stream_uses_json_dvr_sequence_fragments(stream):
+        return True
+    if stream.manifest_type != "hls" or stream.media_type not in {"audio", "video"}:
+        return False
+    if _stream_uses_webm_container(stream):
+        return False
+    return bool(stream.segments and sum(segment.index == -1 for segment in stream.segments) > 1)
 
 
 def _stream_uses_json_dvr_sequence_fragments(stream) -> bool:

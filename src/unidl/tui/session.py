@@ -2363,6 +2363,9 @@ class SessionController:
 
         if mode == "download":
             try:
+                sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)
+                if callable(sync_sidecars):
+                    sync_sidecars(playback, tracks)
                 self.post_status(tr("delivery.status.preparing_sidecars"))
                 self.service.prepare_download(playback, self.post_log)
             except Exception as exc:
@@ -2375,6 +2378,9 @@ class SessionController:
 
         # Every run leaves the same two artefacts behind, regardless of mode:
         # the command text file, and the KID:key pairs in the vault.
+        sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)
+        if callable(sync_sidecars):
+            sync_sidecars(playback, tracks)
         command = self.engine.command_for(playback, self.settings, tracks)
         try:
             path = self.engine.export_command(playback, self.settings, tracks, service_id=self.service.ID)

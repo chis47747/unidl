@@ -1219,6 +1219,22 @@ class Service:
         del playback, tracks, log
         return None
 
+    def augment_tracks(
+        self,
+        playback: Playback,
+        tracks: TrackSet,
+        log: Callable[[str], None],
+    ) -> Iterable[StreamInfo] | None:
+        """Return service-owned tracks that are not present in the manifest.
+
+        Providers may publish captions through a separate authorized API. A
+        service can expose those rows here; Core places them in the shared
+        picker while ``prepare_download`` remains responsible for fetching
+        their bytes and adding mux sidecars.
+        """
+        del playback, tracks, log
+        return None
+
     def save_name(self, title: Title) -> str:
         """Override only when ``USES.naming == 'self'``."""
         return save_name_for(title, self.name_templates())

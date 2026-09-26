@@ -120,11 +120,13 @@ read a shared track setting to decide which provider manifest to fetch when a
 service-level source setting exists.
 
 The same boundary applies when a provider returns media assets beside the
-manifest. A provider-specific audio playlist or external subtitle URL is selected
-and fetched by that service's own settings. Once fetched, an external subtitle is
-passed to native delivery core through `Playback.mux_imports`; shared `audio_langs` and
-`sub_langs` only select tracks already present in the parsed input and must not be
-reused to choose provider assets.
+manifest. A provider-specific audio playlist is selected and fetched by that
+service's source/API contract. For subtitles returned by a separate subtitle
+API, the service exposes the complete inventory as Core sidecar track rows via
+`augment_tracks`; they appear beside manifest subtitles in the normal picker,
+and shared `sub_langs` selects them. `prepare_download` fetches the selected
+sidecars and passes local files to native delivery through `Playback.mux_imports`.
+The shared setting never decides which subtitle API request is made.
 
 This is also why neither a service API option nor a command-line default can
 truthfully choose a final bitrate before the returned ladder has been parsed.

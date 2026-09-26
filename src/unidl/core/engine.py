@@ -464,11 +464,16 @@ class TrackSet:
     #: export provenance; only selection and the interactive picker use this
     #: view. ``None`` means that every parsed stream is visible.
     output_streams: list[StreamInfo] | None = field(default=None, repr=False)
+    #: Service-owned tracks whose bytes are fetched by ``prepare_download``
+    #: rather than by the native manifest downloader. They still participate
+    #: in the normal picker and shared auto-selection rules.
+    sidecars: list[StreamInfo] = field(default_factory=list, repr=False)
 
     @property
     def selectable_streams(self) -> list[StreamInfo]:
         """Streams eligible for output selection and the track picker."""
-        return self.streams if self.output_streams is None else self.output_streams
+        visible = [*self.streams, *self.sidecars]
+        return visible if self.output_streams is None else self.output_streams
 
     @property
     def video(self) -> list[StreamInfo]:
@@ -480,7 +485,7 @@ class TrackSet:
 
     @property
     def subtitles(self) -> list[StreamInfo]:
-        return [s for s in self.streams if s.media_type in {"subtitle", "subtitles", "text"}]
+        return [s for s in self.selectable_streams if s.media_type in {"subtitle", "subtitles", "text"}]
 
     def summary(self) -> str:
         streams = self.selectable_streams
@@ -2371,9 +2376,16 @@ class Engine:
         raise ValueError("Playback did not provide a usable manifest URL")
 
     def _apply_track_filter(self, playback: Playback, tracks: TrackSet, service) -> TrackSet:
-        """Apply a service's output-only track filter without shrinking DRM data."""
+        """Add service-owned tracks, then apply an output-only track filter."""
         if service is None:
             return tracks
+        augment = getattr(service, "augment_tracks", None)
+        if callable(augment):
+            extra = augment(playback, tracks, self.log)
+            if extra is not None:
+                tracks.sidecars.extend(
+                    stream for stream in extra if isinstance(stream, StreamInfo)
+                )
         filter_tracks = getattr(service, "filter_tracks", None)
         if not callable(filter_tracks):
             return tracks
@@ -2381,7 +2393,9 @@ class Engine:
         if visible is None:
             return tracks
         visible = list(visible)
-        known = {id(stream) for stream in tracks.streams}
+        visible_ids = {id(stream) for stream in visible}
+        visible.extend(stream for stream in tracks.sidecars if id(stream) not in visible_ids)
+        known = {id(stream) for stream in tracks.selectable_streams}
         foreign = [stream for stream in visible if id(stream) not in known]
         if foreign:
             raise ValueError(
@@ -2952,12 +2966,23 @@ class Engine:
                 strict=True,
             )
         }
+        native_selected = [stream for stream in tracks.selected if id(stream) in track_ids]
+        sidecar_selected = [
+            stream
+            for stream in tracks.selected
+            if id(stream) not in track_ids and stream.extra.get("service_sidecar")
+        ]
+        unknown_selected = [
+            stream
+            for stream in tracks.selected
+            if id(stream) not in track_ids and stream not in sidecar_selected
+        ]
         selected_track_ids = tuple(
             track_ids[id(stream)]
-            for stream in tracks.selected
+            for stream in native_selected
             if id(stream) in track_ids
         )
-        if len(selected_track_ids) != len(tracks.selected):
+        if unknown_selected:
             raise ValueError("selected track is not part of the parsed manifest")
 
         audio_format = self.audio_format_for(playback, settings, tracks)
@@ -3293,6 +3318,24 @@ class Engine:
             return self.downloader.command_line(plan)
         return api.command_line(self.download_options(playback, settings))
 
+    @staticmethod
+    def sync_sidecar_selection(playback: Playback, tracks: TrackSet) -> None:
+        """Copy picker choices for service-owned subtitle rows to their refs."""
+        selected = {
+            str(stream.extra.get("subtitle_reference_url") or "")
+            for stream in tracks.selected
+            if stream.extra.get("service_sidecar") == "subtitle"
+        }
+        if not selected and not any(
+            stream.extra.get("service_sidecar") == "subtitle"
+            for stream in tracks.sidecars
+        ):
+            return
+        playback.subtitle_references = [
+            replace(reference, selected=reference.url in selected)
+            for reference in playback.subtitle_references
+        ]
+
     def export_command(
         self,
         playback: Playback,
@@ -3325,7 +3368,10 @@ class Engine:
             note()
         if tracks:
             note(f"tracks: {tracks.summary()}")
-            lines += [f"#   [{'x' if s in tracks.selected else ' '}] {s.format_line()}" for s in tracks.streams]
+            lines += [
+                f"#   [{'x' if s in tracks.selected else ' '}] {s.format_line()}"
+                for s in tracks.selectable_streams
+            ]
         if playback.subtitle_references:
             note()
             note("all available subtitle URLs:")
