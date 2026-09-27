@@ -172,35 +172,57 @@ def register_compiled_services(
         raise CompiledServiceError("service.toml must declare entry_classes")
     module_name_full = f"{package}.{module_name}"
     variant_dir = selected_manifest.parent
-    module_path = next(
-        (variant_dir / f"{module_name}{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES
-         if (variant_dir / f"{module_name}{suffix}").is_file()),
-        None,
-    )
+    extension_paths: dict[str, Path] = {}
+    for candidate_path in variant_dir.iterdir():
+        if not candidate_path.is_file():
+            continue
+        if not any(candidate_path.name.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES):
+            continue
+        stem = candidate_path.name.split(".", 1)[0]
+        if stem:
+            extension_paths[stem] = candidate_path
+    module_path = extension_paths.get(module_name)
     try:
         if module_path is not None:
-            # A variant's extension is loaded under the canonical package name.
-            # AMC's compiled source uses ``from ...core``; importing it under a
-            # deeper ``variants.<name>`` package would resolve that relative
-            # import incorrectly. Load its sibling API extension the same way.
-            api_path = next(
-                (variant_dir / f"api{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES
-                 if (variant_dir / f"api{suffix}").is_file()),
-                None,
+            # A variant's extensions are loaded under canonical package names.
+            # Importing them below ``variants.<name>`` would change relative
+            # imports such as ``from .profiles import ...``. Load dependencies
+            # first and the declared service module last.
+            # A compiled-only directory may still contain a developer checkout's
+            # ``__init__.py``. Never execute that source package: compiled-only
+            # registration must be source-independent. Install a namespace
+            # package pointing at the selected bundle directory instead.
+            package_spec = importlib.machinery.ModuleSpec(package, loader=None, is_package=True)
+            # The selected manifest lives inside the ABI/platform variant.
+            # Point the namespace package at that directory, rather than the
+            # root service directory.  This matters on Windows where a
+            # compiled module's relative imports are resolved by the package
+            # search path as well as by sys.modules (Prime Video imports the
+            # sibling ``profiles`` extension from ``_service_native``).
+            package_spec.submodule_search_locations = [str(variant_dir)]
+            package_module = importlib.util.module_from_spec(package_spec)
+            sys.modules[package] = package_module
+            module: Any | None = None
+            load_order = sorted(
+                extension_paths,
+                key=lambda stem: (stem == module_name, stem == "api", stem),
             )
-            if api_path is not None and f"{package}.api" not in sys.modules:
-                api_spec = importlib.util.spec_from_file_location(f"{package}.api", api_path)
-                if api_spec is None or api_spec.loader is None:
-                    raise CompiledServiceError(f"compiled API module {package}.api is unavailable")
-                api_module = importlib.util.module_from_spec(api_spec)
-                sys.modules[f"{package}.api"] = api_module
-                api_spec.loader.exec_module(api_module)
-            spec = importlib.util.spec_from_file_location(module_name_full, module_path)
-            if spec is None or spec.loader is None:
+            for stem in load_order:
+                full_name = f"{package}.{stem}"
+                loaded = sys.modules.get(full_name)
+                if loaded is None:
+                    extension_path = extension_paths[stem]
+                    spec = importlib.util.spec_from_file_location(full_name, extension_path)
+                    if spec is None or spec.loader is None:
+                        raise CompiledServiceError(f"compiled module {full_name} is unavailable")
+                    loaded = importlib.util.module_from_spec(spec)
+                    sys.modules[full_name] = loaded
+                    spec.loader.exec_module(loaded)
+                setattr(package_module, stem, loaded)
+                if stem == module_name:
+                    module = loaded
+            if module is None:
                 raise CompiledServiceError(f"compiled module {module_name_full} is unavailable")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name_full] = module
-            spec.loader.exec_module(module)
         else:
             module = importlib.import_module(module_name_full)
     except Exception as exc:
@@ -230,6 +252,28 @@ def register_compiled_services(
         registered.append(candidate)
     if not registered:
         raise CompiledServiceError("compiled-only package exported no Service")
+    # Keep the package-level import contract available for source-free bundles:
+    # ``from unidl.services.<id> import ServiceClass`` should work just as it
+    # does for a source-backed service.  The extension itself remains loaded
+    # under its canonical private module name so relative imports keep working.
+    try:
+        package_module = importlib.import_module(package)
+        package_module.__dict__.update(
+            {
+                name: value
+                for name, value in vars(module).items()
+                if name not in {"__name__", "__package__", "__loader__", "__spec__", "__file__", "__builtins__"}
+            }
+        )
+        for candidate in registered:
+            setattr(package_module, candidate.__name__, candidate)
+        exported = list(getattr(package_module, "__all__", ()))
+        for candidate in registered:
+            if candidate.__name__ not in exported:
+                exported.append(candidate.__name__)
+        package_module.__all__ = exported
+    except Exception as exc:
+        raise CompiledServiceError(f"compiled service package {package} is unavailable: {exc}") from exc
     return tuple(registered)
 
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.2] - 2026-09-27
+
+### Compiled service loading
+
+- Improved source-free compiled service loading by discovering sibling native
+  extensions and preserving canonical package namespaces for relative imports.
+
+### DRM key vault matching
+
+- Corrected vault key inventory handling when services declare authoritative KIDs
+  even when selected stream rows are not marked encrypted.
+- Allowed explicitly selected PSSH metadata to participate in selected-track
+  licensing without reintroducing unrelated manifest KIDs.
+
 ## [2.2.1] - 2026-09-26
 
 ### Shared subtitle sidecars

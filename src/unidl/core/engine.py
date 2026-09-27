@@ -1330,8 +1330,6 @@ class Engine:
         # the full ladder normally; the explicit post-selection compatibility mode
         # supplies a selected-only TrackSet instead.
         encrypted = [stream for stream in tracks.streams if stream.encrypted]
-        if not encrypted:
-            return []
         # ``license_track_kids`` normally contains the same ids as the parsed
         # streams, but a service may replace it in ``prepare_drm`` when its media
         # and licence protocols spell the same KID differently. A service's
@@ -1339,15 +1337,28 @@ class Engine:
         # fragment GUID while its WRM header, licence response and stored vault
         # row use the canonical UUID. Looking up the stream spelling made every
         # repeat download miss keys that were already in the vault.
-        selected_only = playback.drm.context.get("license_inventory_mode") == "selected"
         declared = list(playback.drm.context.get("license_track_kids") or [])
+        # Some service-owned JSON ladders carry the authoritative KID list in
+        # the DRM context while the selected rows themselves are not marked
+        # encrypted. Do not let that metadata mismatch bypass the vault.
+        if not encrypted and not declared:
+            return []
+        selected_only = playback.drm.context.get("license_inventory_mode") == "selected"
         inventory_kids = declared or self.downloader.key_ids(encrypted)
         kids: list[str] = []
         # Full-manifest mode supplements stream metadata with every PSSH/WRM
         # object discovered while scanning the manifest. In selected-only mode
         # that context may still contain the complete ladder's init data; using
         # it would defeat deferred licensing by querying unrelated KIDs.
-        extra_kids = [] if selected_only else self._drm_key_ids(playback)
+        # A service may explicitly replace the DRM context with the PSSH/WRM
+        # belonging to the final selected profile. Only that opt-in marker may
+        # re-enable init-data KID extraction in selected-only mode; otherwise a
+        # context can still contain the complete manifest's PSSH inventory.
+        extra_kids = (
+            self._drm_key_ids(playback)
+            if not selected_only or playback.drm.context.get("selected_license_pssh")
+            else []
+        )
         for value in [*inventory_kids, *extra_kids]:
             kid = normalize_hex(value)
             if kid and kid not in kids:
