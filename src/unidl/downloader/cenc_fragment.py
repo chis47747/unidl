@@ -274,6 +274,19 @@ def _decrypt_cenc_fragment_buffer(
         default_groups_by_track = _with_default_constant_iv(default_groups_by_track, default_constant_iv)
     has_constant_iv_defaults = any(group.constant_iv for group in default_groups_by_track.values())
     if not has_fragment_markers and not (has_constant_iv_defaults and _has_box_type(data, b"moof") and _has_box_type(data, b"mdat")):
+        # Some DASH providers mark an audio AdaptationSet as encrypted in the
+        # MPD while serving a clear fMP4 track.  It has ordinary clear sample
+        # entries and no fragment encryption boxes, so there is nothing to
+        # decrypt.  Treat that explicit clear layout as handled instead of
+        # reporting a misleading unsupported CENC/CBCS error.
+        if _is_explicitly_clear_fragmented_mp4(data, init_metadata):
+            if data_callback:
+                data_callback(data)
+            if write_output:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(data)
+                return output
+            return _FragmentDecryptResult(handled_clear=True)
         return None
 
     key_map, fallback_key = _fragment_key_map(keys, expected_kids)
@@ -922,6 +935,30 @@ def _has_fragment_cenc_markers(data: bytes | bytearray) -> bool:
         or _has_piff_sample_encryption_box(data)
         or (_has_box_type(data, b"saiz") and _has_box_type(data, b"saio"))
     ) and _has_box_type(data, b"mdat")
+
+
+def _is_explicitly_clear_fragmented_mp4(
+    data: bytes | bytearray,
+    init_metadata: CencInitMetadata | None,
+) -> bool:
+    """Return true for a fragmented MP4 with proven clear sample entries.
+
+    The manifest can conservatively label a track encrypted even when the
+    downloaded media is clear.  Only accept that fallback when the init
+    metadata contains sample-entry states, all are clear, and no CENC/CBCS
+    defaults or scheme boxes were found; malformed or partially encrypted
+    files must still use the normal unsupported-layout error.
+    """
+    if init_metadata is None or init_metadata.schemes or init_metadata.default_groups_by_track:
+        return False
+    if any(_has_box_type(data, box_type) for box_type in (b"tenc", b"sinf", b"sgpd", b"sbgp")):
+        return False
+    states = init_metadata.sample_entry_encrypted_by_track
+    if not states or not any(box[2] == b"moof" for box in _mp4_boxes(data)):
+        return False
+    if not _has_box_type(data, b"mdat"):
+        return False
+    return all(not encrypted for entries in states.values() for encrypted in entries)
 
 
 def _has_piff_sample_encryption_box(data: bytes | bytearray) -> bool:

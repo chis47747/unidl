@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
-from collections.abc import Callable
+import ssl
+import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -12,42 +15,84 @@ from urllib.parse import parse_qs, quote_plus, urlparse, urlunsplit
 from xml.etree import ElementTree as ET
 
 import requests
+from requests.adapters import HTTPAdapter
 
 WWW = "https://www.bbc.co.uk/iplayer"
 API_KEY = "q5wcnsqvnacnhjap7gzts9y6"
 TLEO_QUERY_ID = "84633222c21447a3cd14f79dd6c878cf"
 GRAPH = "https://graph.ibl.api.bbc.co.uk/"
 EPISODE = (
-    "https://ibl.api.bbci.co.uk/ibl/v1/episodes/{pid}"
+    "https://ibl.api.bbc.co.uk/ibl/v1/episodes/{pid}"
     f"?rights=mobile&availability=available&mixin=live&api_key={API_KEY}"
 )
 SEARCH = (
-    "https://ibl.api.bbci.co.uk/ibl/v1/new-search"
+    "https://ibl.api.bbc.co.uk/ibl/v1/new-search"
     f"?q={{query}}&rights=mobile&age_bracket=o18&mixin=live&api_key={API_KEY}"
 )
-CHANNELS = f"https://ibl.api.bbci.co.uk/ibl/v1/channels?rights=mobile&lang=en&region={{region}}&api_key={API_KEY}"
+CHANNELS = f"https://ibl.api.bbc.co.uk/ibl/v1/channels?rights=mobile&lang=en&region={{region}}&api_key={API_KEY}"
 BROADCASTS = (
-    "https://ibl.api.bbci.co.uk/ibl/v1/channels/{service}/broadcasts/"
+    "https://ibl.api.bbc.co.uk/ibl/v1/channels/{service}/broadcasts/"
     f"?rights=mobile&availability=available&from=-3h&per_page=40&api_key={API_KEY}"
 )
 TV_PLAYBACK = "https://www.live.bbctvapps.co.uk/taf-private/playback/data/iplayer:::{pid}"
-OPEN_SELECTOR = "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/{mediaset}/vpid/{vpid}/"
-SECURE_SELECTOR = (
-    "https://securegate.iplayer.bbc.co.uk/mediaselector/6/select/version/2.0/"
-    "vpid/{vpid}/format/json/mediaset/{mediaset}/proto/https"
-)
+OPEN_SELECTOR = "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/{mediaset}/vpid/{vpid}/format/json/1"
+SECURE_SELECTOR = "https://securegate.iplayer.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/{mediaset}/vpid/{vpid}/format/json/1"
 
-USER_AGENT = "BBCiPlayer/5.60.0.37606"
-USER_AGENT_UHD = "smarttv_AFTMM_Build_0003255372676_Chromium_41.0.2250.2"
+USER_AGENT = "BBCiPlayer/5.17.2.32046"
+USER_AGENT_UHD = USER_AGENT
 USER_AGENT_TV = (
     "Mozilla/5.0 (Linux; U; Android 5.0.1; NVIDIA_SHIELD_MSE; smart-tv) "
     "ShieldExperience/1.0.0 (10.1.10.1; foster) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Version/4.0 Chrome/76.0.3809.89 Safari/537.36"
 )
 
-# BBC calls these the regions of the ``bbc_one`` master brand.  The regular
-# channel catalogue is deliberately scoped to one region, so fetch these only
-# after a BBC One viewer explicitly asks to choose a variant.
+
+
+
+BBC_CERTIFICATE_B64 = """LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tDQpNSUlFT3pDQ0F5T2dBd0lCQWdJQkFUQU5CZ2txaGtpRzl3MEJBUVVGQURDQm96RU
+  xNQWtHQTFVRUJoTUNWVk14DQpFekFSQmdOVkJBZ1RDa05oYkdsbWIzSnVhV0V4RWpBUUJnTlZCQWNUQ1VOMWNHVnlkR2x1YnpFZU1C
+  d0dBMVVFDQpDeE1WVUhKdlpDQlNiMjkwSUVObGNuUnBabWxqWVhSbE1Sa3dGd1lEVlFRTEV4QkVhV2RwZEdGc0lGQnliMlIxDQpZM1
+  J6TVE4d0RRWURWUVFLRXdaQmJXRjZiMjR4SHpBZEJnTlZCQU1URmtGdFlYcHZiaUJHYVhKbFZGWWdVbTl2DQpkRU5CTURFd0hoY05N
+  VFF4TURFMU1EQTFPREkyV2hjTk16UXhNREV3TURBMU9ESTJXakNCbVRFTE1Ba0dBMVVFDQpCaE1DVlZNeEV6QVJCZ05WQkFnVENrTm
+  hiR2xtYjNKdWFXRXhFakFRQmdOVkJBY1RDVU4xY0dWeWRHbHViekVkDQpNQnNHQTFVRUN4TVVSR1YySUZKdmIzUWdRMlZ5ZEdsbWFX
+  TmhkR1V4R1RBWEJnTlZCQXNURUVScFoybDBZV3dnDQpVSEp2WkhWamRITXhEekFOQmdOVkJBb1RCa0Z0WVhwdmJqRVdNQlFHQTFVRU
+  F4TU5SbWx5WlZSV1VISnZaREF3DQpNVENDQVNBd0RRWUpLb1pJaHZjTkFRRUJCUUFEZ2dFTkFEQ0NBUWdDZ2dFQkFNRFZTNUwwVUR4
+  WnMwNkpGMld2DQpuZE1KajdIVGRlSlg5b0ltWWg3aytNY0VENXZ5OTA2M0p5c3FkS0tsbzVJZERvY2tuczg0VEhWNlNCVkFBaTBEDQ
+  p6cEI4dHRJNUFBM1l3djFZUDJiOThpQ3F2OWhQalZndE9nNHFvMXZkK0oxdFdISUh5ZkV6cWlPRXVXNTlVd2xoDQpVTmFvY3JtZGNx
+  bGcyWmIyZ1VybTZ2dlZqUThZcjQzY29MNnBBMk5ESXNyT0Z4c0ZZaXdaVk12cDZqMlk4dnFrDQpFOHJ2Tm04c3JkY0FhZjRXdHBuYW
+  gyZ3RBY3IrdTVYNExZdmEwTzZrNGhENEdnNHZQQ2xQZ0JXbDZFSHRBdnFDDQpGWm9KbDhMNTN2VVY1QWhMQjdKQk0wUTFXVERINWs4
+  NWNYT2tFd042NDhuZ09hZUtPMGxqYndZVG52NHhDV2NlDQo2RXNDQVFPamdZTXdnWUF3SHdZRFZSMGpCQmd3Rm9BVVo2RFJJSlNLK2
+  hmWCtHVnBycWlubGMraTVmZ3dIUVlEDQpWUjBPQkJZRUZOeUNPZkhja3Vpclp2QXF6TzBXbjZLTmtlR1BNQWtHQTFVZEV3UUNNQUF3
+  RXdZRFZSMGxCQXd3DQpDZ1lJS3dZQkJRVUhBd0l3RVFZSllJWklBWWI0UWdFQkJBUURBZ2VBTUFzR0ExVWREd1FFQXdJSGdEQU5CZ2
+  txDQpoa2lHOXcwQkFRVUZBQU9DQVFFQXZXUHd4b1VhV3IwV0tXRXhHdHpQOElGVUUrZis5SUZjSzNoWXl2QmxLOUxODQo3Ym9WZHhx
+  dWJGeEgzMFNmOC90VnNYMUpBOUM3bnMzZ09jV2Z0dTEzeUtzK0RnZGhqdG5GVkgraW4zNkVpZEZBDQpRRzM1UE1PU0ltNGNaVXkwME
+  4xRXRwVGpGY2VBbmF1ZjVJTTZNZmRBWlQ0RXNsL09OUHp5VGJYdHRCVlpBQmsxDQpXV2VHMEcwNDdUVlV6M2Ira0dOVTNzZEs5Ri9o
+  NmRiS3c0azdlZWJMZi9KNjZKSnlkQUhybFhJdVd6R2tDbjFqDQozNWdHRHlQajd5MDZWNXV6MlUzYjlMZTdZWENnNkJCanBRN0wrRW
+  d3OVVsSmpoN1pRMXU2R2RCNUEwcGFWM0VQDQpQTk1KN2J6Rkl1cHozdklPdk5nUVV4ZWs1SUVIczZKeXdjNXByck5MS3c9PQ0KLS0t
+  LS1FTkQgQ0VSVElGSUNBVEUtLS0tLQ0KLS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tDQpNSUlFdlFJQkFEQU5CZ2txaGtpRzl3ME
+  JBUUVGQUFTQ0JLY3dnZ1NqQWdFQUFvSUJBUURBMVV1UzlGQThXYk5PDQppUmRscjUzVENZK3gwM1hpVi9hQ0ptSWU1UGpIQkErYjh2
+  ZE90eWNyS25TaXBhT1NIUTZISko3UE9FeDFla2dWDQpRQUl0QTg2UWZMYlNPUUFOMk1MOVdEOW0vZklncXIvWVQ0MVlMVG9PS3FOYj
+  NmaWRiVmh5QjhueE02b2poTGx1DQpmVk1KWVZEV3FISzVuWEtwWU5tVzlvRks1dXI3MVkwUEdLK04zS0MrcVFOalF5TEt6aGNiQldJ
+  c0dWVEw2ZW85DQptUEw2cEJQSzd6WnZMSzNYQUduK0ZyYVoyb2RvTFFISy9ydVYrQzJMMnREdXBPSVErQm9PTHp3cFQ0QVZwZWhCDQ
+  o3UUw2Z2hXYUNaZkMrZDcxRmVRSVN3ZXlRVE5FTlZrd3grWlBPWEZ6cEJNRGV1UEo0RG1uaWp0SlkyOEdFNTcrDQpNUWxuSHVoTEFn
+  RURBb0lCQVFDQWpqSmgrRFY5a1NJMFcyVHVkUlBpQmwvTDRrNlc1VThCYnV3VW1LWGFBclVTDQpvZm8wZWhvY3h2aHNibTBNRTE4RX
+  d4U0tKWWhPVVlWamdBRnpWOThLL2M4MjBLcXo1ZGRUa0NwRXFVd1Z4eXFRDQpOUWpsYzN3SmNjSTlQcVcrU09XaFdvYWd6UndYcmRE
+  MFU0eXc2NHM1eGFIUkU2SEdRSkVQVHdEY21mSDlOK0JXDQovdVU4YVc1QWZOcHhqRzduSGF0cmhJQjU1cDZuNHNFNUVoTjBnSk9WMD
+  lmMEdOb1pQUVhiT1VVcEJWOU1jQ2FsDQpsK1VTalpBRmRIbUlqWFBwR1FEelJJWTViY1hVQzBZYlRwaytRSmhrZ1RjSW1LRFJmd0FC
+  YXRIdnlMeDlpaVY1DQp0ZWZoV1hhaDE4STdkbUF3TmRTN0U4QlpoL3d5MlIwNXQ0RHppYjlyQW9HQkFPU25yZXAybk1VRVAyNXdSQW
+  RBDQozWDUxenYwOFNLWkh6b0VuNExRS1krLzg5VFRGOHZWS2wwQjZLWWlaYW14aWJqU1RtaDRCWHI4ZndRaytiazFCDQpReEZ3ZHVG
+  eTd1MU43d0hSNU45WEFpNEtuamgxQStHcW9SYjg4bk43b1htekM3cTZzdFZRUk9peDJlRVFJWTVvDQpiREZUellaRnloNGlMdkU0bj
+  V1WnVHL1JBb0dCQU5mazdHMDhvYlpacmsxSXJIVXZSQmVENzZRNDlzQ0lSMGRBDQpIU0hCZjBadFBEMjdGSEZtamFDN0YwWkM2QXdU
+  RnBNL0FNWDR4UlpqNnhGalltYnlENGN3MFpGZ08rb0pwZjFIDQpFajNHSHdMNHFZekJFUXdRTmswSk9GbE84cDdVMm1ZL2hEVXM3bG
+  JQQm82YUo4VVpJMGs3SHhSOVRWYVhud0h1DQovaXhnRjlsYkFvR0JBSmh2eVViNXZkaXRmNTcxZ3ErQWs2bWozMU45aGNRdjN3REZR
+  SGdHN1Vxb28zaUQ5MDR4DQp1aXI4RzdCbVJ2THNTWGhpWnI2cmxIOXFnTERVU1lqV0xMWksrZXVoOUo0ejlLdmhReitQVnNsY2FYcj
+  RyVUVjDQphMlNvb2FKU2E2WjNYU2NuSWVPSzJKc2hPK3RnRmw3d1NDRGlpUVF1aHI3QmRLRFFhbWU3MEVxTEFvR0JBSS90DQo4dk45
+  d1NRN3lZamJIYU4wMkErdFNtMTdUeXNGaE5vcXZoYUEvNFJJMHRQU0RhRHZDUlhTRDRRc21ySzNaR0lxDQpBSVA3TGc3dFIyRHM3RV
+  NoWDY5MTRRdVZmVWF4R1ZPRXR0UFphZ0g3RzdNcllMSzFlWWl3MER1Sjl4U041dTdWDQpBczRkOURuZldiUm14UzRRd2pEU0ZMaFRp
+  T1JsRkt2MHFYTHF1cERuQW9HQWVFa3J4SjhJaXdhVEhnWXltM21TDQprU2h5anNWK01tVkJsVHNRK0ZabjFTM3k0YVdxbERhNUtMZF
+  QvWDEwQXg4NHNQTmVtQVFVMGV4YTN0OHM5bHdIDQorT3NEaktLb3hqQ1Q3S2wzckdQeUFISnJmVlZ5U2VFZVgrOERLZFZKcjByU1Bk
+  Qkk4Y2tFQ3kzQXpsVmphK3d3DQpST0N0emMxVHVyeG5OQTVxV0QzbjNmND0NCi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0NCg=="""
+
 BBC_ONE_REGIONS = (
     ("london", "London"),
     ("south", "South"),
@@ -67,8 +112,6 @@ BBC_ONE_REGIONS = (
     ("northern_ireland", "Northern Ireland"),
 )
 
-SecureFetch = Callable[[str, str], dict[str, Any] | None]
-
 _PID = re.compile(r"^[a-z][a-z0-9_]+$", re.I)
 _SEASON = re.compile(r"(?:series|season)\s+(\d+)", re.I)
 _FISCAL_SEASON = re.compile(r"(\d{4})/(\d{2})\s*:\s*episode\s+\d+", re.I)
@@ -81,7 +124,7 @@ class IPlayerError(RuntimeError):
 
 @dataclass(frozen=True)
 class ParsedInput:
-    kind: str  # programme | episode | live | unknown
+    kind: str
     pid: str
     series_id: str = ""
 
@@ -190,12 +233,27 @@ class Source:
     protocol: str
     quality: str
     subtitle: str = ""
+    chapters: tuple[dict[str, Any], ...] = ()
     encrypted: bool = False
 
     def line(self) -> str:
         return " · ".join(
             value for value in (self.protocol, "clear", self.quality, "subtitles" if self.subtitle else "") if value
         )
+
+
+class _BBCSSLAdapter(HTTPAdapter):
+    def __init__(self, context: ssl.SSLContext):
+        self.context = context
+        super().__init__()
+
+    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["ssl_context"] = self.context
+        super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args: Any, **kwargs: Any):
+        kwargs["ssl_context"] = self.context
+        return super().proxy_manager_for(*args, **kwargs)
 
 
 class IPlayerApi:
@@ -205,18 +263,25 @@ class IPlayerApi:
         *,
         resolution: str = "auto",
         region: str = "london",
-        secure: SecureFetch | None = None,
     ):
+        resolution = str(resolution or "auto").strip().lower()
+        # Keep existing user configuration files working after the setting
+        # vocabulary was renamed from 4k/1080p/720p to UHD/FHD/HD.
+        resolution = {"4k": "uhd", "2160p": "uhd", "1080p": "fhd", "720p": "hd"}.get(
+            resolution, resolution
+        )
+        if resolution not in {"auto", "uhd", "fhd", "hd"}:
+            resolution = "auto"
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", USER_AGENT_UHD if resolution in {"auto", "4k"} else USER_AGENT)
+        self.session.headers.setdefault("User-Agent", USER_AGENT)
         self.resolution = resolution
         self.region = region
-        self.secure = secure
         self._tv_playback_cache: dict[str, dict[str, Any]] = {}
         self._manifest_height_cache: dict[str, int] = {}
+        self._subtitle_url_cache: dict[str, str] = {}
         self._region_variant_cache: dict[str, list[Channel]] = {}
 
-    # -------------------------------------------------------------- catalogue
+
     def search(self, query: str) -> list[SearchHit]:
         data = self._json("GET", SEARCH.format(query=quote_plus(query)))
         hits: list[SearchHit] = []
@@ -346,7 +411,7 @@ class IPlayerApi:
             raise IPlayerError(f"BBC programme metadata failed: {message}")
         return programme
 
-    # ------------------------------------------------------------------- live
+
     def channels(self, region: str | None = None, *, include_schedule: bool = True) -> list[Channel]:
         selected_region = region or self.region
         data = self._json("GET", CHANNELS.format(region=selected_region))
@@ -359,7 +424,7 @@ class IPlayerApi:
                 continue
             channel_id = str(raw["id"])
             if "radio" in channel_id:
-                continue  # radio channels are outside this video catalogue
+                continue
             channel = Channel(
                 id=channel_id,
                 name=_text(raw.get("title")) or channel_id,
@@ -438,22 +503,137 @@ class IPlayerApi:
                 return raw, following if isinstance(following, dict) else None
         return None, None
 
-    # --------------------------------------------------------------- playback
-    def source(self, item: Episode | Channel) -> Source:
+
+    def _secure_selector(self, vpid: str, mediaset: str) -> dict[str, Any]:
+        cert_path = ""
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
+        if self.session.proxies:
+            session.proxies.update(self.session.proxies)
+        context = ssl.create_default_context()
+        try:
+            context.set_ciphers("DEFAULT:@SECLEVEL=0")
+        except ssl.SSLError:
+            context.set_ciphers("DEFAULT:@SECLEVEL=1")
+        adapter = _BBCSSLAdapter(context)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        try:
+            data = base64.b64decode("".join(BBC_CERTIFICATE_B64.split()))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as handle:
+                handle.write(data)
+                cert_path = handle.name
+            response = session.get(
+                SECURE_SELECTOR.format(mediaset=mediaset, vpid=vpid),
+                cert=cert_path,
+                timeout=20,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, requests.RequestException):
+            return {}
+        finally:
+            session.close()
+            if cert_path:
+                try:
+                    os.unlink(cert_path)
+                except OSError:
+                    pass
+
+    def sources(self, item: Episode | Channel) -> list[Source]:
         live = isinstance(item, Channel) or item.live
         vpids = [item.id] if isinstance(item, Channel) else [item.service_id or item.vpid]
-        if live and self.resolution in {"auto", "4k"}:
+        quality_plan = _quality_plan(self.resolution)
+        if live and "uhd" in quality_plan:
             episode_pid = item.episode_id if isinstance(item, Channel) else item.id
             vpids = [*self._live_uhd_vpids(episode_pid), *vpids]
         vpids = list(dict.fromkeys(vpid for vpid in vpids if vpid))
         if not vpids:
             raise IPlayerError("BBC metadata contained no playable version id")
-        for quality in _quality_plan(self.resolution):
+        chapters = () if live or isinstance(item, Channel) else tuple(self._chapters_for_episode(item.id, vpids))
+        if live:
+            for quality in quality_plan:
+                for vpid in vpids:
+                    result = self._source_for(vpid, quality, True)
+                    if result is not None:
+                        return [replace(result, chapters=chapters)]
+            requested = "/".join(quality_plan).upper()
+            raise IPlayerError(f"BBC playback is unavailable at the requested quality ({requested}; often a UK region gate)")
+        found: list[Source] = []
+        seen: set[str] = set()
+        for quality in quality_plan:
             for vpid in vpids:
-                result = self._source_for(vpid, quality, live)
-                if result is not None:
-                    return result
-        raise IPlayerError("BBC playback is unavailable at the requested quality (often a UK region gate)")
+                result = self._source_for(vpid, quality, False)
+                if result is None or result.manifest in seen:
+                    continue
+                seen.add(result.manifest)
+                found.append(replace(result, chapters=chapters))
+                break
+        if not found:
+            requested = "/".join(quality_plan).upper()
+            raise IPlayerError(f"BBC playback is unavailable at the requested quality ({requested}; often a UK region gate)")
+        return found
+
+    def source(self, item: Episode | Channel) -> Source:
+        return self.sources(item)[0]
+
+    def _chapters_for_episode(self, pid: str, vpids: list[str]) -> list[dict[str, Any]]:
+        try:
+            data = self._json("GET", EPISODE.format(pid=pid))
+        except IPlayerError:
+            return []
+        episodes = data.get("episodes") or []
+        if not episodes or not isinstance(episodes[0], dict):
+            return []
+        versions = [value for value in episodes[0].get("versions") or [] if isinstance(value, dict)]
+        selected = next(
+            (value for value in versions if str(value.get("id") or value.get("pid") or "") in vpids),
+            None,
+        )
+        selected = selected or next(
+            (value for value in versions if str(value.get("kind") or "").lower() not in {"audio-described", "signed"}),
+            None,
+        )
+        if not selected:
+            return []
+        values: list[dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+
+        def add(seconds: Any, title: str, kind: str) -> None:
+            try:
+                start_ms = max(0, int(round(float(seconds) * 1000)))
+            except (TypeError, ValueError):
+                return
+            key = (start_ms, title)
+            if key in seen:
+                return
+            seen.add(key)
+            values.append({"start_ms": start_ms, "title": title, "kind": kind})
+
+        for interaction in selected.get("interactions") or []:
+            if not isinstance(interaction, dict):
+                continue
+            subtype = str(interaction.get("subtype") or "").lower()
+            title_data = interaction.get("title") or {}
+            title = _text(title_data, "long", "short") or subtype.title() or "Chapter"
+            points = interaction.get("interaction_points") or {}
+            show_from = points.get("show_from")
+            skip_to = points.get("skip_to")
+            if subtype == "intro":
+                add(show_from, "Intro", "intro")
+                add(skip_to, "Content", "scene")
+            elif subtype == "recap":
+                add(show_from, "Recap", "recap")
+                add(skip_to, "Content", "scene")
+            else:
+                add(show_from, title, subtype or "scene")
+                add(skip_to, "Content", "scene")
+        if selected.get("credits_start") is not None:
+            add(selected.get("credits_start"), "Credits", "credits")
+        values.sort(key=lambda value: int(value.get("start_ms") or 0))
+        return values
 
     def _live_uhd_vpids(self, episode_pid: str) -> list[str]:
         if not episode_pid:
@@ -509,41 +689,49 @@ class IPlayerApi:
 
     def _source_for(self, vpid: str, quality: str, live: bool) -> Source | None:
         if quality == "uhd":
-            if self.secure is None:
-                return None
-            payload = self.secure(vpid, "iptv-uhd")
+            payload = self._secure_selector(vpid, "iptv-uhd")
         else:
-            mediaset = "iptv-mse" if quality == "fhd" else "mobile-phone-main"
+            mediaset = "iptv-all" if not live else ("iptv-mse" if quality == "fhd" else "mobile-phone-main")
             try:
                 payload = self._json(
                     "GET",
                     OPEN_SELECTOR.format(mediaset=mediaset, vpid=vpid),
-                    headers={"User-Agent": USER_AGENT_TV if mediaset == "iptv-mse" else USER_AGENT},
+                    headers={"User-Agent": USER_AGENT_TV if live and mediaset == "iptv-mse" else USER_AGENT},
                 )
             except IPlayerError:
                 return None
         media = [entry for entry in (payload or {}).get("media") or [] if isinstance(entry, dict)]
         if not media:
             return None
-        subtitle = _subtitle(media)
+        subtitle = self._subtitle_url(media)
         preferred = {
             "uhd": ("h265", "hevc"),
-            "fhd": ("h265", "hevc", "h264", "avc"),
+            "fhd": ("h264", "avc"),
             "hd": ("h264", "avc"),
         }[quality]
-        candidates = _connections(media, preferred)
-        if quality == "fhd" and not live:
-            h264_candidates = _connections(media, ("h264", "avc"))
-            converted = next((_vod_hls(url) for _entry, url in h264_candidates if _vod_hls(url)), "")
-            if converted and self._manifest_height(converted) >= 1080:
-                return Source(converted, "HLS", "1080p H.264", subtitle)
+        protocol_order: tuple[str, ...] = ()
+        if not live:
+            if quality == "fhd":
+                protocol_order = ("hls",)
+            elif quality == "uhd":
+                protocol_order = ("dash",)
+        candidates = _connections(media, preferred, protocol_order)
         minimum = {"uhd": 2160, "fhd": 1080, "hd": 720}[quality]
         maximum = 1439 if quality == "fhd" else 1079 if quality == "hd" else None
-        for entry, url in candidates:
-            height = self._manifest_height(url) or _int(entry.get("height")) or 0
+        for entry, connection, raw_url in candidates:
+            transfer = str(connection.get("transferFormat") or "").lower()
+            encoding = str(entry.get("encoding") or "").lower()
+            if not live and quality == "fhd" and (transfer != "hls" or encoding not in {"h264", "avc", "avc1"}):
+                continue
+            if not live and quality == "uhd" and encoding not in {"h265", "hevc", "hev1", "hvc1"}:
+                continue
+            url = _normalize_vod_manifest(raw_url, transfer) if not live else raw_url
+            height = self._manifest_height(url)
+            if not height:
+                continue
             if height < minimum or maximum is not None and height > maximum:
                 continue
-            protocol = "DASH" if url.split("?", 1)[0].endswith(".mpd") else "HLS"
+            protocol = "DASH" if transfer == "dash" or url.split("?", 1)[0].endswith(".mpd") else "HLS"
             codec = _codec_label(entry)
             tier = "UHD " if quality == "uhd" else ""
             return Source(url, protocol, f"{height}p {tier}{codec}".strip(), subtitle)
@@ -580,6 +768,27 @@ class IPlayerApi:
                 height = max(heights, default=0)
         self._manifest_height_cache[url] = height
         return height
+
+    def _subtitle_url(self, media: list[dict[str, Any]]) -> str:
+        candidates: list[tuple[int, int, int, str]] = []
+        for entry in media:
+            if str(entry.get("kind") or "").lower() != "captions":
+                continue
+            for connection in entry.get("connection") or []:
+                if not isinstance(connection, dict):
+                    continue
+                url = str(connection.get("href") or "").strip()
+                if not url:
+                    continue
+                supplier = str(connection.get("supplier") or "").lower()
+                protocol = str(connection.get("protocol") or "").lower()
+                supplier_rank = 0 if "cloudfront" in supplier else 1 if "bidi" in supplier else 2 if "akamai" in supplier else 3
+                protocol_rank = 0 if protocol == "https" or url.lower().startswith("https://") else 1
+                candidates.append((supplier_rank, protocol_rank, _connection_priority(connection), url))
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda value: value[:3])
+        return candidates[0][3]
 
     def subtitle(self, url: str) -> bytes:
         try:
@@ -644,10 +853,17 @@ def _episode(raw: dict[str, Any], default_season: int | None = None) -> Episode:
         number = None
     name_match = re.search(r"(?:^|:\s*)\d+\.\s*(.+)", subtitle)
     name = name_match.group(1) if name_match else subtitle
-    if re.search(r"(?:series|season)\s+\d+\s*:\s*episode\s+\d+", subtitle, re.I):
-        name = ""
-    if not name and subtitle_editorial:
-        name = re.sub(r"^\d+/\d+\s*", "", subtitle_editorial).strip()
+    if has_numbering:
+        # BBC exposes the user-facing episode label separately in ``slice``:
+        # e.g. ``default = Series 1: Episode 2`` and ``slice = Episode 2``.
+        # The editorial value is often a synopsis (or ``2/6 ...``), so it must
+        # not replace the episode name in the picker.
+        name = subtitle_slice
+        if not name:
+            episode_match = re.search(r"\bepisode\s+\d+\b", subtitle, re.I)
+            name = episode_match.group(0) if episode_match else ""
+        if not name and subtitle_editorial:
+            name = re.sub(r"^\d+/\d+\s*", "", subtitle_editorial).strip()
 
     labels = raw.get("labels") or {}
     time_label = _text(labels.get("time")).lower()
@@ -732,15 +948,44 @@ def _text(value: Any, *keys: str) -> str:
     return ""
 
 
+def _quality_plan(resolution: str) -> tuple[str, ...]:
+    """Return source profiles in preference order for the configured setting."""
+
+    resolution = {"4k": "uhd", "2160p": "uhd", "1080p": "fhd", "720p": "hd"}.get(
+        str(resolution or "auto").strip().lower(), str(resolution or "auto").strip().lower()
+    )
+    return {
+        "auto": ("uhd", "fhd", "hd"),
+        "uhd": ("uhd",),
+        "fhd": ("fhd",),
+        "hd": ("hd",),
+    }.get(str(resolution or "auto").strip().lower(), ("uhd", "fhd", "hd"))
+
+
 def _connections(
-    media: list[dict[str, Any]], preferred_encodings: tuple[str, ...] = ()
-) -> list[tuple[dict[str, Any], str]]:
+    media: list[dict[str, Any]],
+    preferred_encodings: tuple[str, ...] = (),
+    preferred_protocols: tuple[str, ...] = (),
+) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
     preferred = tuple(value.lower() for value in preferred_encodings)
+    protocol_preference = tuple(value.lower() for value in preferred_protocols)
 
     def sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
         encoding = str(entry.get("encoding") or "").lower()
         score = len(preferred) - preferred.index(encoding) if encoding in preferred else 0
         return score, _int(entry.get("height")) or 0, _int(entry.get("bitrate")) or 0
+
+    def connection_key(value: dict[str, Any]) -> tuple[int, int, int, int]:
+        transfer = str(value.get("transferFormat") or "").lower()
+        protocol_score = protocol_preference.index(transfer) if transfer in protocol_preference else len(protocol_preference)
+        supplier = str(value.get("supplier") or "").lower()
+        supplier_score = 0 if "cloudfront" in supplier else 1 if "bidi" in supplier else 2 if "akamai" in supplier else 3
+        return (
+            protocol_score,
+            supplier_score,
+            _connection_priority(value),
+            str(value.get("protocol") or "").lower() != "http",
+        )
 
     found = []
     seen: set[str] = set()
@@ -748,17 +993,14 @@ def _connections(
     for entry in sorted(videos, key=sort_key, reverse=True):
         connections = sorted(
             (value for value in entry.get("connection") or [] if isinstance(value, dict)),
-            key=lambda value: (
-                _connection_priority(value),
-                str(value.get("protocol") or "").lower() != "https",
-            ),
+            key=connection_key,
         )
         for connection in connections:
             href = str(connection.get("href") or "")
             transfer = str(connection.get("transferFormat") or "").lower()
             if href and href not in seen and transfer in {"dash", "hls"}:
                 seen.add(href)
-                found.append((entry, href))
+                found.append((entry, connection, href))
     return found
 
 
@@ -792,23 +1034,16 @@ def _connection_priority(connection: dict[str, Any]) -> int:
     return priority if priority is not None else 99
 
 
-def _vod_hls(url: str) -> str:
+def _normalize_vod_manifest(url: str, transfer: str) -> str:
+    if transfer != "hls":
+        return url
     parsed = urlparse(url)
-    if ".ism/" not in parsed.path or "vod-dash-uk" not in parsed.netloc:
-        return ""
-    asset = parsed.path.split(".ism/", 1)[0] + ".ism"
-    return urlunsplit(
-        (parsed.scheme, parsed.netloc.replace("vod-dash-", "vod-hls-", 1), f"{asset}/hls/master.m3u8", "", "")
-    )
-
-
-def _quality_plan(resolution: str) -> tuple[str, ...]:
-    return {
-        "auto": ("uhd", "fhd", "hd"),
-        "4k": ("uhd",),
-        "1080p": ("fhd",),
-        "720p": ("hd",),
-    }.get(resolution, ("fhd", "hd"))
+    if ".ism" not in parsed.path:
+        return url
+    if "/hls/master.m3u8" in parsed.path:
+        return url
+    asset = parsed.path.split(".ism", 1)[0] + ".ism"
+    return urlunsplit((parsed.scheme, parsed.netloc, f"{asset}/hls/master.m3u8", "", ""))
 
 
 def _date(value: Any) -> datetime | None:

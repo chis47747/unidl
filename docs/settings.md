@@ -90,7 +90,7 @@ manifests independently, merges their track ladders and removes duplicate
 representations by their displayed media properties (not by short-lived signed
 URLs or provider-specific representation IDs); it never invents profile names or
 derives URLs from shared track preferences. The example service has `hd/uhd`
-manifest profiles; BBC has `auto/4k/1080p/720p`. Other service packages may
+manifest profiles; BBC has `auto/uhd/fhd/hd`. Other service packages may
 declare platform, region or local-market choices. These vocabularies do not
 automatically translate into each other, so each
 service declares its own and they only appear while that service is active.

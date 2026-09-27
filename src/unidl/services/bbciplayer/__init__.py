@@ -7,25 +7,30 @@ import os
 import re
 from collections.abc import Iterator
 
+from ...core.chapters import Chapter
 from ...core.flow import Ask, Choice, FlowContext
-from ...core.helpers import SUBBY, Helper, HelperError, HelperKind
-from ...core.playback import DrmInfo, ExternalTrack, Playback
+from ...core.helpers import SUBBY, HelperError
+from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.settings import Option, Setting
 from ...core.titles import Title, TitleKind
+from ...downloader.models import StreamInfo
 from . import api
 
 _RESOLUTION = Setting(
     "source_resolution",
     "Playback source",
     options=[
-        Option("auto", "Best available (4K → 1080p → 720p)"),
-        Option("4k", "4K only"),
-        Option("1080p", "1080p only"),
-        Option("720p", "720p only"),
+        Option("auto", "Best available · UHD → FHD → HD"),
+        Option("uhd", "UHD · 2160p"),
+        Option("fhd", "FHD · 1080p"),
+        Option("hd", "HD · 720p"),
     ],
     default="auto",
-    help="This picks the BBC media-selector profile; the shared quality setting still chooses tracks inside it.",
+    help=(
+        "Chooses the BBC media-selector source profile. This is separate from the "
+        "shared video quality setting, which selects tracks inside that source."
+    ),
 )
 _REGION = Setting(
     "live_region",
@@ -50,25 +55,6 @@ _REGION = Setting(
     ],
     default="london",
 )
-_CURL = Helper(
-    key="curl",
-    label="curl",
-    kind=HelperKind.BINARY,
-    candidates=("curl",),
-    required=False,
-    install_hint="install curl, or set helpers.curl in unidl.yaml",
-    degrades_to="4K media selection is unavailable; 1080p and 720p still work",
-)
-_CERTIFICATE = Helper(
-    key="iplayer.pem",
-    label="BBC iPlayer UHD client certificate",
-    kind=HelperKind.ASSET,
-    candidates=("iplayer.pem",),
-    required=False,
-    install_hint="place iplayer.pem in helpers/bbc/iplayer.pem or set helpers.bbc.iplayer.pem",
-    degrades_to="4K media selection is unavailable; 1080p and 720p still work",
-)
-
 
 class BBCiPlayer(Service):
     ID = "bbc"
@@ -80,7 +66,7 @@ class BBCiPlayer(Service):
     DESCRIPTION = "BBC television on demand and regional live channels, clear up to UHD."
     USES = Capabilities()
     SETTINGS = [_RESOLUTION, _REGION]
-    HELPERS = [_CURL, _CERTIFICATE, SUBBY]
+    HELPERS = [SUBBY]
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
@@ -89,55 +75,13 @@ class BBCiPlayer(Service):
         return AuthStatus(False, "no sign-in needed", anonymous_ok=True)
 
     def client(self, ctx: FlowContext | None = None) -> api.IPlayerApi:
-        resolution = str(self.settings.get("source_resolution") or "auto")
-        uhd_ready = self.ctx.has_helper("curl") and self.ctx.has_helper("iplayer.pem")
-        secure = self._secure(ctx) if uhd_ready else None
-        if resolution == "4k" and secure is None:
-            missing = []
-            if not self.ctx.has_helper("curl"):
-                missing.append("curl")
-            if not self.ctx.has_helper("iplayer.pem"):
-                missing.append("helpers/bbc/iplayer.pem")
-            raise api.IPlayerError(
-                f"BBC 4K selection needs {' and '.join(missing)}; install them or choose Auto/1080p/720p"
-            )
         return api.IPlayerApi(
-            session=self.ctx.session(user_agent=api.USER_AGENT_UHD if resolution in {"auto", "4k"} else api.USER_AGENT),
-            resolution=resolution,
+            session=self.ctx.session(user_agent=api.USER_AGENT),
+            resolution=str(self.settings.get("source_resolution") or "auto"),
             region=str(self.settings.get("live_region") or "london"),
-            secure=secure,
         )
 
-    def _secure(self, ctx: FlowContext | None = None):
-        curl = self.ctx.helper("curl")
-        certificate = self.ctx.helper("iplayer.pem")
 
-        def fetch(vpid: str, mediaset: str) -> dict | None:
-            runner = self.ctx.runner(log=ctx.log if ctx else None)
-            try:
-                result = runner.run(
-                    [
-                        curl,
-                        "-sS",
-                        "--max-time",
-                        "20",
-                        "--cert",
-                        certificate,
-                        "--key",
-                        certificate,
-                        "-H",
-                        f"User-Agent: {api.USER_AGENT_UHD}",
-                        api.SECURE_SELECTOR.format(vpid=vpid, mediaset=mediaset),
-                    ],
-                    timeout=25,
-                )
-                return api.parse_selector(result.stdout)
-            except (HelperError, api.IPlayerError):
-                return None
-
-        return fetch
-
-    # ---------------------------------------------------------------- browsing
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)
         if parsed is None:
@@ -235,7 +179,7 @@ class BBCiPlayer(Service):
         for item in episodes:
             yield from self._emit_episode(ctx, client, item)
 
-    # ------------------------------------------------------------------- live
+
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
         try:
             client = self.client(ctx)
@@ -265,9 +209,9 @@ class BBCiPlayer(Service):
                     ],
                 )
             if chosen is not None:
-                # The region picker intentionally skips all schedules. Refresh
-                # only the selected feed so its current programme can drive UHD
-                # version discovery and the recording label.
+
+
+
                 chosen = client.channel(chosen.id)
                 yield from self._emit_live(ctx, client, chosen)
 
@@ -288,7 +232,7 @@ class BBCiPlayer(Service):
         )
         yield from self._emit(ctx, client, title, channel, is_live=True)
 
-    # --------------------------------------------------------------- playback
+
     def _emit_episode(
         self,
         ctx: FlowContext,
@@ -321,80 +265,170 @@ class BBCiPlayer(Service):
     ) -> Iterator[Ask]:
         try:
             ctx.status(f"Resolving {title.label()}")
-            source = client.source(item)
+            sources = client.sources(item)
         except api.IPlayerError as exc:
             ctx.error(f"{title.label()}: {exc}")
             return
+        source = sources[0]
         save_name = self.save_name(title)
-        imports = self._subtitle_imports(ctx, client, source, save_name, is_live=is_live)
+        chapters = [
+            Chapter(
+                start_ms=max(0, int(value.get("start_ms") or 0)),
+                title=str(value.get("title") or value.get("kind") or "Chapter"),
+                kind=str(value.get("kind") or ""),
+            )
+            for value in source.chapters
+            if isinstance(value, dict)
+        ]
+        drm = DrmInfo(clear=True)
+        drm.context["bbc_manifest_sources"] = tuple(sources[1:])
         playback = Playback(
             title=title,
             save_name=save_name,
             manifest_url=source.manifest,
-            headers={"User-Agent": api.USER_AGENT_UHD},
+            headers={"User-Agent": api.USER_AGENT},
             proxy=self.ctx.proxy,
             is_live=is_live,
-            drm=DrmInfo(clear=True),
-            mux_imports=imports,
-            note=source.line(),
+            drm=drm,
+            subtitle_references=self._subtitle_references(sources, is_live=is_live),
+            chapters=chapters,
+            merge_manifests=not is_live and len(sources) > 1,
+            note=" + ".join(value.line() for value in sources),
         )
         yield ctx.emit(playback)
 
-    def _subtitle_imports(
+    def manifest_variants(self, playback: Playback, log) -> list[Playback]:
+        if playback.is_live or not playback.merge_manifests or playback.drm is None:
+            return []
+        sources = playback.drm.context.get("bbc_manifest_sources")
+        if not isinstance(sources, tuple):
+            return []
+        variants: list[Playback] = []
+        for source in sources:
+            if not isinstance(source, api.Source):
+                continue
+            variants.append(
+                Playback(
+                    title=playback.title,
+                    save_name=playback.save_name,
+                    manifest_url=source.manifest,
+                    headers=dict(playback.headers),
+                    proxy=playback.proxy,
+                    drm=DrmInfo(clear=True),
+                    merge_manifests=False,
+                    note=source.line(),
+                )
+            )
+            log(f"BBC iPlayer merged source: {source.line()}")
+        return variants
+
+    def _subtitle_references(
         self,
-        ctx: FlowContext,
-        client: api.IPlayerApi,
-        source: api.Source,
-        save_name: str,
+        sources: list[api.Source],
         *,
         is_live: bool,
-    ) -> list[ExternalTrack]:
-        if is_live or not source.subtitle:
+    ) -> list[SubtitleReference]:
+        if is_live:
             return []
-        try:
-            data = client.subtitle(source.subtitle)
-            directory = self.ctx.subtitle_dir()
-            directory.mkdir(parents=True, exist_ok=True)
-            os.chmod(directory, 0o700)
-        except (api.IPlayerError, OSError) as exc:
-            ctx.warn(f"subtitle skipped: {exc}")
-            return []
+        references: list[SubtitleReference] = []
+        seen: set[str] = set()
+        for source in sources:
+            url = str(source.subtitle or "").strip()
+            if not url:
+                continue
+            key = url.split("?", 1)[0].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(
+                SubtitleReference(
+                    url=url,
+                    language="en",
+                    kind="sdh",
+                    name="English",
+                )
+            )
+        return references
 
-        stem = re.sub(r"[^\w.-]+", ".", save_name, flags=re.UNICODE)
-        stem = re.sub(r"\.{2,}", ".", stem).strip(".")[:180] or "BBC.iPlayer"
-        clean_url = source.subtitle.lower().split("?", 1)[0]
-        suffix = next(
-            (value for value in (".srt", ".vtt", ".ttml", ".dfxp", ".xml") if clean_url.endswith(value)),
-            ".ttml" if b"<tt" in data[:1000].lower() else ".xml",
-        )
-        digest = hashlib.sha256(source.subtitle.encode("utf-8") + b"\0" + data).hexdigest()[:12]
-        original = directory / f"{stem}.en.{digest}{suffix}"
-        try:
+    def augment_tracks(self, playback: Playback, tracks, log):
+        rows: list[StreamInfo] = []
+        seen: set[str] = set()
+        for index, reference in enumerate(playback.subtitle_references, 1):
+            url = str(reference.url or "").strip()
+            if not url:
+                continue
+            key = url.split("?", 1)[0].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                StreamInfo(
+                    manifest_type="service",
+                    media_type="subtitle",
+                    url=url,
+                    original_url=url,
+                    id=f"bbc-subtitle-{index}",
+                    group_id=reference.kind or "sdh",
+                    name=reference.name or "English",
+                    language=reference.language or "en",
+                    role="SDH" if (reference.kind or "").casefold() == "sdh" else None,
+                    codecs="subrip",
+                    extension="srt",
+                    extra={
+                        "service_sidecar": "subtitle",
+                        "subtitle_reference_url": url,
+                        "subtitle_kind": reference.kind or "sdh",
+                    },
+                )
+            )
+        if rows:
+            log(f"BBC iPlayer: added {len(rows)} API subtitle track(s) to the picker")
+        return rows
+
+    def prepare_download(self, playback: Playback, log) -> None:
+        selected = [subtitle for subtitle in playback.subtitle_references if subtitle.selected]
+        if not selected:
+            return
+        client = self.client()
+        directory = self.ctx.subtitle_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        imports: list[ExternalTrack] = []
+        for index, subtitle in enumerate(selected, 1):
+            data = client.subtitle(subtitle.url)
+            clean_url = subtitle.url.lower().split("?", 1)[0]
+            suffix = next(
+                (value for value in (".srt", ".vtt", ".ttml", ".dfxp", ".xml") if clean_url.endswith(value)),
+                ".ttml" if b"<tt" in data[:1000].lower() else ".xml",
+            )
+            digest = hashlib.sha256(subtitle.url.encode("utf-8") + b"\0" + data).hexdigest()[:12]
+            stem = re.sub(
+                r"[^\w.-]+",
+                ".",
+                f"{playback.save_name}.{subtitle.language}.{subtitle.kind}.{index}.{digest}",
+            )
+            stem = re.sub(r"\.{2,}", ".", stem).strip(".")[:180] or "BBC.iPlayer"
+            original = directory / f"{stem}{suffix}"
             if not original.exists() or original.read_bytes() != data:
                 original.write_bytes(data)
-            os.chmod(original, 0o600)
-        except OSError as exc:
-            ctx.warn(f"subtitle skipped: {exc}")
-            return []
-
-        selected = original
-        if suffix != ".srt" and self.ctx.has_helper("subby"):
-            converted = original.with_suffix(".srt")
-            try:
-                self.ctx.runner(log=ctx.log).run(
-                    [self.ctx.helper("subby"), "convert", original, "-o", converted, "-l", "en"],
-                    timeout=30,
-                )
-                if not converted.is_file() or converted.stat().st_size == 0:
-                    raise HelperError("subby produced no SRT output")
-                os.chmod(converted, 0o600)
-                selected = converted
-                ctx.log("subtitle converted to SRT with subby", "ok")
-            except (HelperError, OSError) as exc:
-                ctx.warn(f"subby conversion failed; keeping original subtitle: {exc}")
-        else:
-            ctx.log(f"subtitle staged · {suffix.lstrip('.')}", "ok")
-        return [ExternalTrack(path=str(selected), language="en", name="English")]
+                os.chmod(original, 0o600)
+            selected_path = original
+            if suffix != ".srt" and self.ctx.has_helper("subby"):
+                converted = original.with_suffix(".srt")
+                try:
+                    self.ctx.runner(log=log).run(
+                        [self.ctx.helper("subby"), "convert", original, "-o", converted, "-l", "en"],
+                        timeout=30,
+                    )
+                    if not converted.is_file() or converted.stat().st_size == 0:
+                        raise HelperError("subby produced no SRT output")
+                    os.chmod(converted, 0o600)
+                    selected_path = converted
+                except (HelperError, OSError) as exc:
+                    log(f"BBC iPlayer subtitle conversion failed, keeping XML: {exc}")
+            imports.append(ExternalTrack(str(selected_path), subtitle.language or "en", subtitle.name or "English"))
+        playback.mux_imports.extend(imports)
+        log(f"BBC iPlayer subtitles: prepared {len(imports)}/{len(selected)} track(s)")
 
 
 registry.register(BBCiPlayer)

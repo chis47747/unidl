@@ -2939,12 +2939,24 @@ class Engine:
             if tracks.manifest is not None
             else self.delivery_source(playback)
         )
+        # A standalone command reparses the master playlist.  When the picker
+        # already inspected HLS child playlists, that second parse must do the
+        # same or its lazy hydration can report a different per-rendition KID
+        # (Disney+ commonly publishes a session KID on the master and a
+        # representation KID on the media playlist).  Keep the exported command
+        # aligned with the KID shown by Core while retaining the faster lazy
+        # path for unencrypted/metadata-only HLS selections.
+        hls_details = bool(settings.get("hls_details", False)) or any(
+            stream.manifest_type in {"hls", "m3u"}
+            and bool(api.stream_key_ids(stream))
+            for stream in tracks.selected
+        )
         request = ParseRequest(
             source,
             ParsePolicy(
                 headers=dict(playback.headers),
                 proxy=download_proxy,
-                details=bool(settings.get("hls_details", False)),
+                details=hls_details,
                 no_probe=direct_audio_no_probe,
                 base_url=playback.manifest_base_url,
                 append_url_params=overrides.append_url_params,

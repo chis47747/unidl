@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.2.3] - 2026-09-27
+
+### BBC iPlayer playback
+
+- Updated BBC source profiles to UHD, FHD and HD while preserving compatibility
+  with existing resolution settings.
+- Added multi-source VOD selection, chapter metadata and shared subtitle
+  references for BBC playback.
+
+### DASH and HLS delivery
+
+- Preserved the selected HLS rendition KID in exported downloader commands by
+  requesting the matching media playlists when needed.
+- Accepted explicitly clear fragmented MP4 tracks even when a provider marks
+  their adaptation set as encrypted, while retaining strict CENC/CBCS handling
+  for encrypted media.
+
 ## [2.2.2] - 2026-09-27
 
 ### Compiled service loading
