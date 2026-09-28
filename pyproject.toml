@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.2.3"
+version = "2.2.4"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,8 @@ dependencies = [
     # and shape Arabic glyphs without changing the logical strings services use.
     "python-bidi>=0.6",
     "arabic-reshaper>=3.0",
+    # Apple TV catalogue and sign-in pages are parsed during service loading.
+    "beautifulsoup4>=4.12",
 ]
 
 [project.urls]

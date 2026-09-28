@@ -91,10 +91,11 @@ def normalize_manifest_type(value: Any) -> str:
 def _title_document(title: Title) -> dict[str, Any]:
     """A title as plain JSON.
 
-    ``data`` is the service's private payload and is carried whole or not at all:
-    half of it is worse than none, because the half that survived looks complete.
-    Nothing on the import side reads it - no service code runs there - so losing
-    it costs the export nothing but the ability to say what it was.
+    Service-private ``data`` is intentionally omitted.  It commonly contains
+    large, short-lived provider responses (Amazon playback envelopes, widget
+    pages and expiry/correlation metadata) that the import path never reads.
+    Older exports may still contain ``data`` and remain readable through
+    :func:`_title_from`, but new exports carry only stable title metadata.
     """
     document: dict[str, Any] = {
         "id": _text(title.id),
@@ -125,8 +126,6 @@ def _title_document(title: Title) -> dict[str, Any]:
         when = getattr(title, name, None)
         if isinstance(when, datetime):
             document[name] = when.isoformat()
-    if title.data and _json_safe(title.data):
-        document["data"] = title.data
     return document
 
 

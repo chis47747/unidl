@@ -126,7 +126,7 @@
   "update.note.media_types": "支援腳本形式的 manifest 位址及 URL 空格，不重建已簽署的查詢參數。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 金鑰作用域，支援舊式 TS/AAC SAMPLE-AES 下載。",
   "update.note.clipboard": "可全域或按服務啟用 Dolby Vision + HDR10 混合輸出；需要匹配的來源軌道及外部工具。",
-  "update.note.update_checker": "UniDL v2.2.3 改進 BBC iPlayer 播放，在命令中保留 HLS rendition KID，並接受服務錯誤標記為加密的明文 fMP4 軌道。",
+  "update.note.update_checker": "UniDL v2.2.4 修復 5.1 聲道元資料、明文軌道 DRM 標記、精簡 export，以及遠端金鑰庫 KID 查詢。",
   "update.close_hint": "按 esc / x 關閉視窗",
   "home.chip.config": "設定檔",
   "home.chip.config_create": "建立",

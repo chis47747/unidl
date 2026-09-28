@@ -103,6 +103,7 @@ from .postprocess import (
     decrypt_fragmented_mp4_parts,
     decrypt_sections,
     fragmented_mp4_timing,
+    mp4_protected_tenc_default_kids_from_bytes,
     mp4_tenc_default_kids,
     mp4_tenc_default_kids_from_bytes,
     mux_files,
@@ -8762,7 +8763,11 @@ def _hydrate_selected_stream_key_ids(
             if not init_range:
                 return
             continue
-        kids = webm_key_ids_from_bytes(init_data) if _stream_uses_webm_container(stream) else mp4_tenc_default_kids_from_bytes(init_data)
+        kids = (
+            webm_key_ids_from_bytes(init_data)
+            if _stream_uses_webm_container(stream)
+            else mp4_protected_tenc_default_kids_from_bytes(init_data)
+        )
         kids = [_normalize_kid_text(kid) for kid in kids]
         kids = [kid for kid in kids if kid]
         if kids:

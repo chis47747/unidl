@@ -210,6 +210,8 @@ def _video_stream(uri: str, title: dict[str, Any], item: dict[str, Any], title_m
     url = join_uri(uri, url)
     codec = _str_or_none(item.get("codec") or item.get("codecs"))
     kid = _normalize_kid(item.get("kid") or item.get("key_id") or item.get("keyId"))
+    if _explicit_encryption_state(item) is False:
+        kid = None
     encrypted = _encrypted(item, codec, kid)
     scheme = _encryption_scheme(item, codec, encrypted)
     dvr_sequence = _dvr_sequence_info(title, url)
@@ -255,6 +257,11 @@ def _audio_stream(uri: str, title: dict[str, Any], item: dict[str, Any], title_m
     url = join_uri(uri, url)
     codec = _str_or_none(item.get("codec") or item.get("codecs"))
     kid = _normalize_kid(item.get("kid") or item.get("key_id") or item.get("keyId"))
+    if _explicit_encryption_state(item) is False:
+        # Some DRM manifests carry a group-level/bookkeeping KID beside a
+        # clear audio URL.  An explicit clear declaration must win over that
+        # metadata; otherwise the generic parser invents CENC encryption.
+        kid = None
     encrypted = _encrypted(item, codec, kid)
     scheme = _encryption_scheme(item, codec, encrypted)
     dvr_sequence = _dvr_sequence_info(title, url)
@@ -1054,7 +1061,7 @@ def _extra(title_meta: dict[str, Any], item: dict[str, Any], *, dvr_sequence: di
     # parsers, otherwise Engine's license inventory (and vault lookup) sees an
     # encrypted stream with no key id at all.
     key_ids = item.get("key_ids") or item.get("keyIds")
-    if isinstance(key_ids, (list, tuple)):
+    if _explicit_encryption_state(item) is not False and isinstance(key_ids, (list, tuple)):
         normalized = [
             kid
             for value in key_ids
@@ -1064,6 +1071,8 @@ def _extra(title_meta: dict[str, Any], item: dict[str, Any], *, dvr_sequence: di
             extra["key_ids"] = list(dict.fromkeys(normalized))
             extra["key_id"] = extra["key_ids"][0]
     key_id = _normalize_kid(item.get("kid") or item.get("key_id") or item.get("keyId"))
+    if _explicit_encryption_state(item) is False:
+        key_id = None
     if key_id:
         extra.setdefault("key_id", key_id)
         extra.setdefault("key_ids", [key_id])
@@ -1243,10 +1252,28 @@ def _infer_video_range_from_text(value: str) -> str | None:
 
 
 def _encrypted(item: dict[str, Any], codec: str | None, kid: str | None) -> bool:
+    explicit = _explicit_encryption_state(item)
+    if explicit is not None:
+        return explicit
     if _bool(item.get("encrypted")) or _bool(item.get("drm")) or kid:
         return True
     text = (codec or "").lower()
     return any(token in text for token in ("cenc", "cbcs", "prk"))
+
+
+def _explicit_encryption_state(item: dict[str, Any]) -> bool | None:
+    for key in ("encrypted", "is_encrypted", "isEncrypted"):
+        if key not in item:
+            continue
+        value = item.get(key)
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "yes", "on", "1"}:
+            return True
+        if text in {"false", "no", "off", "0"}:
+            return False
+    return None
 
 
 def _encryption_scheme(item: dict[str, Any], codec: str | None, encrypted: bool) -> str | None:

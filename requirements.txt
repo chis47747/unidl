@@ -15,3 +15,4 @@ geonamescache>=2.0
 pycryptodome>=3.20
 python-bidi>=0.6
 arabic-reshaper>=3.0
+beautifulsoup4>=4.12

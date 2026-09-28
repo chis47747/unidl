@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.2.4] - 2026-09-28
+
+### Audio and clear-track metadata
+
+- Preserved Amazon E-AC-3/AC-3 5.1 channel metadata when a generic MP4 init
+  field reports stereo.
+- Prevented clear audio tracks with provider bookkeeping KIDs from being
+  labelled as encrypted CENC tracks.
+
+### Export and vault handling
+
+- Reduced native export size by omitting unused service-private title payloads
+  while keeping older exports readable.
+- Queried remote key vaults using both canonical and PlayReady byte-order KID
+  aliases.
+
+### Dependencies
+
+- Updated the public dependency and lock metadata for the current service
+  integrations.
+
 ## [2.2.3] - 2026-09-27
 
 ### BBC iPlayer playback

@@ -531,6 +531,26 @@ def mp4_tenc_default_kids_from_bytes(data: bytes | bytearray) -> list[str]:
     return list(dict.fromkeys(kids))
 
 
+def mp4_protected_tenc_default_kids_from_bytes(data: bytes | bytearray) -> list[str]:
+    """Return only KIDs whose ``tenc`` box says samples are protected.
+
+    A few providers put a default KID in an otherwise clear MP4 track for
+    bookkeeping.  ``mp4_tenc_default_kids_from_bytes`` intentionally exposes
+    every KID because callers such as init-KID patching need the raw metadata,
+    but using those KIDs to infer encryption would mislabel clear tracks.  The
+    downloader's encryption probe should use this protected-only variant.
+    """
+    kids: list[str] = []
+    for position, size in _scan_box_ranges(data, b"tenc"):
+        parsed = _parse_tenc_info(data[position : position + size])
+        if not parsed or not parsed[0]:
+            continue
+        _is_protected, kid, _relative = parsed
+        if kid not in kids:
+            kids.append(kid)
+    return kids
+
+
 def restamp_fragmented_mp4_timestamps(
     input_path: str | Path,
     next_decode_time: int | None = None,

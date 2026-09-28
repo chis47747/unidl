@@ -168,7 +168,7 @@
   "update.note.media_types": "Procesa manifiestos servidos por scripts y espacios en URL sin reconstruir parámetros firmados.",
   "update.note.documentation": "Las secciones iniciales HLS conservan su ámbito AES; soporte para SAMPLE-AES TS/AAC clásico.",
   "update.note.clipboard": "Salida híbrida Dolby Vision + HDR10 configurable globalmente o por servicio; requiere fuentes compatibles y herramientas externas.",
-  "update.note.update_checker": "UniDL v2.2.3 mejora la reproducción de BBC iPlayer, conserva los KID de las variantes HLS en los comandos y acepta pistas fMP4 claras marcadas como cifradas por el proveedor.",
+  "update.note.update_checker": "UniDL v2.2.4 corrige los metadatos de audio 5.1, las etiquetas DRM de pistas claras, los exports compactos y la búsqueda de KID en el almacén remoto.",
   "update.close_hint": "esc / x cierra esta ventana",
   "home.chip.config": "configuración",
   "home.chip.config_create": "crear",

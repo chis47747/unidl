@@ -33,7 +33,15 @@ from typing import Any, Protocol
 import requests
 
 from .secureio import private_directory
-from .vault import KeyRecord, KeyVault, canonical_service, is_null_key, normalize_hex, split_pair
+from .vault import (
+    KeyRecord,
+    KeyVault,
+    canonical_service,
+    is_null_key,
+    normalize_hex,
+    playready_kid_alias,
+    split_pair,
+)
 
 LineSink = Callable[[str], None]
 
@@ -156,10 +164,12 @@ class ApiVault:
             kid_hex = normalize_hex(kid)
             if not kid_hex or kid_hex in found:
                 continue
-            data = self._call("get", f"{self.uri}/{tag}/{kid_hex}")
-            key = normalize_hex(data.get("content_key"))
-            if key and not is_null_key(key):
-                found[kid_hex] = key
+            for query_kid in _kid_variants(kid_hex):
+                data = self._call("get", f"{self.uri}/{tag}/{query_kid}")
+                key = normalize_hex(data.get("content_key"))
+                if key and not is_null_key(key):
+                    found[kid_hex] = key
+                    break
         return found
 
     def add_pairs(self, service: str, pairs: Iterable[str], **meta: Any) -> int:
@@ -300,10 +310,14 @@ class HttpVault:
             kid_hex = normalize_hex(kid)
             if not kid_hex or kid_hex in found:
                 continue
-            answer = self._call("GetKey", {"kid": kid_hex, "service": tag, "title": None})
-            key = _key_for(kid_hex, answer.get("keys"))
-            if key and not is_null_key(key):
-                found[kid_hex] = key
+            for query_kid in _kid_variants(kid_hex):
+                answer = self._call(
+                    "GetKey", {"kid": query_kid, "service": tag, "title": None}
+                )
+                key = _key_for(query_kid, answer.get("keys"))
+                if key and not is_null_key(key):
+                    found[kid_hex] = key
+                    break
         return found
 
     @property
@@ -453,6 +467,15 @@ def _key_for(kid: str, keys: Any) -> str | None:
             if parsed and parsed[0] == kid:
                 return parsed[1]
     return None
+
+
+def _kid_variants(kid: str) -> tuple[str, ...]:
+    """Return the requested KID and its PlayReady byte-order alias."""
+    normalized = normalize_hex(kid)
+    if not normalized:
+        return ()
+    alias = playready_kid_alias(normalized)
+    return (normalized, alias) if alias else (normalized,)
 
 
 class VaultError(RuntimeError):

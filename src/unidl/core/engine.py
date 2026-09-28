@@ -81,6 +81,35 @@ def _resolution_height(value: object) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "on", "1"}:
+        return True
+    if text in {"false", "no", "off", "0"}:
+        return False
+    return None
+
+
+def _explicit_stream_encryption_state(stream: StreamInfo) -> bool | None:
+    """Return a service-declared encryption state, if the manifest has one."""
+    extra = getattr(stream, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    raw = extra.get("raw")
+    sources = [raw, extra] if isinstance(raw, dict) else [extra]
+    for source in sources:
+        for key in ("encrypted", "is_encrypted", "isEncrypted"):
+            if key in source:
+                state = _optional_bool(source.get(key))
+                if state is not None:
+                    return state
+    return None
+
+
 def _plain_terminal_text(value: object) -> str:
     """Remove terminal state changes from an embedded downloader message."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -804,6 +833,14 @@ class Engine:
         for stream in tracks.selected:
             if stream.media_type != "audio":
                 continue
+            # E-AC-3/AC-3 carries its authoritative channel layout in the
+            # codec-specific bitstream.  The generic ISO-BMFF sample-entry
+            # field is commonly left at 2 for these ``enca`` tracks (Amazon
+            # exposes this exact shape), so probing it would turn a real 5.1
+            # track into a misleading stereo filename. Keep the DASH value.
+            codec_key = re.sub(r"[^a-z0-9]+", "", str(stream.codecs or "").lower())
+            if any(token in codec_key for token in ("eac3", "ec3", "ac3")):
+                continue
             if stream.extra.get("_audio_channels_reconciled"):
                 continue
             stream.extra["_audio_channels_reconciled"] = True
@@ -934,6 +971,21 @@ class Engine:
         video_only = bool((drm.context or {}).get("drm_hint_video_only"))
         for stream in streams:
             if stream.media_type not in ({"video"} if video_only else {"video", "audio"}):
+                continue
+            # A service-owned JSON manifest can carry an explicit per-track
+            # encryption flag.  Do not turn a declared clear track into an
+            # encrypted one merely because the surrounding playback uses DRM;
+            # Netflix, for example, protects video while serving clear audio
+            # with bookkeeping KIDs in the init metadata.
+            if _explicit_stream_encryption_state(stream) is False:
+                stream.encrypted = False
+                stream.encryption_scheme = None
+                stream.extra.pop("key_ids", None)
+                stream.extra.pop("key_id", None)
+                for segment in stream.segments:
+                    segment.encrypted = False
+                    segment.encryption_scheme = None
+                    segment.key_id = None
                 continue
             stream.encrypted = True
             stream.encryption_scheme = stream.encryption_scheme or "CENC"
