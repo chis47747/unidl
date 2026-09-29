@@ -64,6 +64,13 @@ published to the Python package index.
 
 Python packages do not include native media binaries or private device data.
 
+UniDL checks the operating-system `PATH` first. If a command is not installed
+there, it also checks the project-level `binaries/` directory. This lets a
+portable checkout keep tools such as `ffmpeg`, `ffprobe`, `mkvmerge`, and
+`aria2c` beside the project without overriding a newer system installation.
+On Unix-like systems, files placed there must be executable; on Windows, use
+the normal `.exe`/`.cmd` extension.
+
 - **FFmpeg and ffprobe** are strongly recommended and are required for several
   muxing, audio conversion, subtitle conversion and media-probing paths.
 - **mkvmerge** is optional. It is used when selected or when it gives a better

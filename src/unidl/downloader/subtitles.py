@@ -73,6 +73,20 @@ def convert_subtitle_file(
         _write_subtitle(output, cues, target)
         return output
 
+    # Apple HLS may publish a valid WebVTT sidecar containing only the
+    # header/timestamp map and no cues (for example, a descriptive subtitle
+    # track with no events in this programme).  Do not send a known subtitle
+    # format through ffmpeg in that case: ffmpeg quite correctly emits an
+    # empty file, but exits with an error which looks like a conversion
+    # failure to the caller.  Returning an empty sidecar lets the normal
+    # ``No subtitle cues`` handling keep the track harmlessly.
+    if any(
+        parser(text, input_path.suffix.lower())
+        for parser in (_looks_like_webvtt, _looks_like_ttml, _looks_like_srt)
+    ):
+        _write_subtitle(output, [], target)
+        return output
+
     return _convert_with_ffmpeg(input_path, output, target)
 
 

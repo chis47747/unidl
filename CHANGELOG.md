@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.2.5] - 2026-09-29
+
+### HLS audio decryption
+
+- Corrected clear Apple HLS audio fragments that contain ordinary `roll`
+  sample groups, while retaining strict handling for encrypted CBCS/CENC data.
+
+### Subtitle handling
+
+- Treated valid empty WebVTT, TTML and SRT sidecars as tracks with no cues
+  instead of reporting a misleading ffmpeg conversion failure.
+
+### Local binaries
+
+- Added project-level `binaries/` lookup as a fallback after the operating
+  system `PATH`, without overriding system-installed tools.
+
 ## [2.2.4] - 2026-09-28
 
 ### Audio and clear-track metadata

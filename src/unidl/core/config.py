@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from .binaries import configure_binary_path
 from .credentials import Credential
 from .secureio import (
     atomic_write_text,
@@ -417,6 +418,7 @@ class Config:
         self.raw = data or {}
         self.source = source
         self.paths = self._read_paths()
+        configure_binary_path(self.paths.home)
         self._devices = self._read_devices()
         #: chosen in the UI rather than written in the file. The YAML stays the
         #: "set it once" surface; this is the "flipped while browsing" surface,

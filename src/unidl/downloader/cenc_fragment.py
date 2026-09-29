@@ -951,7 +951,11 @@ def _is_explicitly_clear_fragmented_mp4(
     """
     if init_metadata is None or init_metadata.schemes or init_metadata.default_groups_by_track:
         return False
-    if any(_has_box_type(data, box_type) for box_type in (b"tenc", b"sinf", b"sgpd", b"sbgp")):
+    # ``sgpd``/``sbgp`` are also used for ordinary media groups such as
+    # ``roll`` (Apple's audio playlists commonly carry these).  Their
+    # presence alone does not mean that samples are encrypted.  Only the
+    # ``seig`` grouping type describes per-sample CENC/CBCS encryption.
+    if _has_box_type(data, b"tenc") or _has_box_type(data, b"sinf") or _has_encryption_group_boxes(data):
         return False
     states = init_metadata.sample_entry_encrypted_by_track
     if not states or not any(box[2] == b"moof" for box in _mp4_boxes(data)):
@@ -959,6 +963,22 @@ def _is_explicitly_clear_fragmented_mp4(
     if not _has_box_type(data, b"mdat"):
         return False
     return all(not encrypted for entries in states.values() for encrypted in entries)
+
+
+def _has_encryption_group_boxes(data: bytes | bytearray) -> bool:
+    """Return whether *data* contains an encryption ``seig`` group box.
+
+    ISO-BMFF uses the same ``sgpd``/``sbgp`` boxes for many non-DRM sample
+    groups.  Looking only at the box type makes clear Apple HLS audio
+    fragments (which use ``roll`` groups) look unsupported.  The grouping
+    type is the four bytes immediately following the full-box version/flags.
+    """
+    for box_type in (b"sgpd", b"sbgp"):
+        for position, size in _scan_box_ranges(data, box_type):
+            payload = position + 8
+            if payload + 8 <= position + size and bytes(data[payload + 4 : payload + 8]) == b"seig":
+                return True
+    return False
 
 
 def _has_piff_sample_encryption_box(data: bytes | bytearray) -> bool:
