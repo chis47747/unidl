@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.2.5"
+version = "2.2.6"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,8 @@ dependencies = [
     # 0.8.1 is the first line that coexists with pywidevine; 0.8.5 adds signed
     # challenge CustomData while retaining the newer PSSH API.
     "pyplayready>=0.8.5",
+    # MonaLisa ticket DRM is part of the supported local DRM registry.
+    "pymonalisa>=0.1.2",
     # MonaLisa devices execute a local WebAssembly module.
     "wasmtime>=20",
     # SOCKS routes are a first-class Proxy & VPN option; plain requests omits
@@ -31,7 +33,7 @@ dependencies = [
     # Python 3.11 keeps the exact Unicode module fallback in unidl.tui.qr.
     "textual-image[textual]>=0.13.2; python_version >= '3.12'",
     # Optional HTTP/2 fast path used by the native delivery engine.
-    "httpx[http2]>=0.27",
+    "httpx[http2,socks]>=0.27",
     # The native download core performs AES/CENC operations directly.
     "cryptography>=42",
     "PyYAML>=6.0",

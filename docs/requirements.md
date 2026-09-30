@@ -73,6 +73,8 @@ the normal `.exe`/`.cmd` extension.
 
 - **FFmpeg and ffprobe** are strongly recommended and are required for several
   muxing, audio conversion, subtitle conversion and media-probing paths.
+- **pymonalisa** and **wasmtime** are included for the MonaLisa local-ticket DRM
+  system; a `.mld` device still needs its referenced WebAssembly module.
 - **mkvmerge** is optional. It is used when selected or when it gives a better
   Matroska result; FFmpeg remains the fallback where possible.
 - **aria2c** is optional and is used only when the user selects that segment

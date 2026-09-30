@@ -9,7 +9,6 @@ from collections.abc import Iterator
 
 from ...core.chapters import Chapter
 from ...core.flow import Ask, Choice, FlowContext
-from ...core.helpers import SUBBY, HelperError
 from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.settings import Option, Setting
@@ -66,7 +65,6 @@ class BBCiPlayer(Service):
     DESCRIPTION = "BBC television on demand and regional live channels, clear up to UHD."
     USES = Capabilities()
     SETTINGS = [_RESOLUTION, _REGION]
-    HELPERS = [SUBBY]
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
@@ -413,19 +411,6 @@ class BBCiPlayer(Service):
                 original.write_bytes(data)
                 os.chmod(original, 0o600)
             selected_path = original
-            if suffix != ".srt" and self.ctx.has_helper("subby"):
-                converted = original.with_suffix(".srt")
-                try:
-                    self.ctx.runner(log=log).run(
-                        [self.ctx.helper("subby"), "convert", original, "-o", converted, "-l", "en"],
-                        timeout=30,
-                    )
-                    if not converted.is_file() or converted.stat().st_size == 0:
-                        raise HelperError("subby produced no SRT output")
-                    os.chmod(converted, 0o600)
-                    selected_path = converted
-                except (HelperError, OSError) as exc:
-                    log(f"BBC iPlayer subtitle conversion failed, keeping XML: {exc}")
             imports.append(ExternalTrack(str(selected_path), subtitle.language or "en", subtitle.name or "English"))
         playback.mux_imports.extend(imports)
         log(f"BBC iPlayer subtitles: prepared {len(imports)}/{len(selected)} track(s)")

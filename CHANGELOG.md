@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.2.6] - 2026-09-30
+
+### Live recording
+
+- Fixed Pluto TV live Matroska recording when independent HLS AAC audio needs
+  to be probed before FFmpeg writes the output header.
+
+### HDR metadata
+
+- Detected HDR10+ and related video-range markers from DASH media BaseURL
+  metadata when adaptation-level fields are absent.
+
+### BBC iPlayer and dependencies
+
+- Kept BBC iPlayer subtitle sidecars in their provider format without requiring
+  the optional external subtitle helper.
+- Updated the MonaLisa DRM and HTTP SOCKS dependency metadata and lockfile.
+
 ## [2.2.5] - 2026-09-29
 
 ### HLS audio decryption

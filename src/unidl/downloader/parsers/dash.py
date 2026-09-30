@@ -871,6 +871,15 @@ def _video_range(element: ET.Element) -> str | None:
     explicit = element.attrib.get("videoRange")
     if explicit:
         return _normalize_video_range(explicit)
+    # Several Cedexis/Paramount DASH manifests omit HDR metadata from the
+    # adaptation and representation elements, but preserve the mastering
+    # profile in the media BaseURL filename (for example ``HDR10plus``).  The
+    # URL is still manifest metadata, so use it only as a fallback signal.
+    base_urls = [child.text or "" for child in list(element) if _local(child.tag) == "BaseURL"]
+    if base_urls:
+        base_range = _video_range_from_text(" ".join(base_urls))
+        if base_range:
+            return base_range
     for child in list(element):
         if _local(child.tag) not in {"SupplementalProperty", "EssentialProperty"}:
             continue
@@ -892,6 +901,20 @@ def _video_range(element: ET.Element) -> str | None:
             return "HDR10"
         if "sdr" in raw:
             return "SDR"
+    return None
+
+
+def _video_range_from_text(value: str) -> str | None:
+    raw = str(value or "")
+    if _is_hdr10_plus_signal(raw):
+        return "HDR10+"
+    normalized = raw.lower().replace("_", "-").replace(" ", "-")
+    if "hlg" in normalized or "arib-std-b67" in normalized:
+        return "HLG"
+    if any(token in normalized for token in ("hdr10", "smpte:2084", "st2084", "pq")):
+        return "HDR10"
+    if "sdr" in normalized:
+        return "SDR"
     return None
 
 

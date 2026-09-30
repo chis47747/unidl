@@ -4,11 +4,12 @@
 textual>=0.80
 pywidevine>=1.8
 pyplayready>=0.8.5
+pymonalisa>=0.1.2
 wasmtime>=20
 requests[socks]>=2.31
 qrcode[pil]>=7.4
 textual-image[textual]>=0.13.2; python_version >= "3.12"
-httpx[http2]>=0.27
+httpx[http2,socks]>=0.27
 cryptography>=42
 PyYAML>=6.0
 geonamescache>=2.0

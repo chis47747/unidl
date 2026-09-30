@@ -292,11 +292,20 @@ def live_pipe_mux_disabled_reason(stream) -> str | None:
 
 
 def live_pipe_matroska_options(streams, output_container: str | None) -> list[str]:
-    """Return Matroska live-pipe options for continuous recording."""
+    """Return Matroska live-pipe options for continuous recording.
+
+    An independent HLS audio rendition can be a raw MPEG-TS stream whose
+    AAC AudioSpecificConfig is only available after the first packets reach
+    the FIFO.  Matroska's ``-live 1`` mode commits the output header before
+    that happens, making FFmpeg reject the stream with ``unable to determine
+    samplerate``.  Keep normal live mode for every other input, but let the
+    muxer probe this narrow transport before writing its header.
+    """
     if output_container != "matroska":
         return []
     options: list[str] = []
-    options.extend(["-live", "1"])
+    if not any(_is_live_raw_audio_ts(stream) for stream in streams or []):
+        options.extend(["-live", "1"])
     options.extend([
         "-cluster_time_limit",
         "1000",
@@ -304,6 +313,25 @@ def live_pipe_matroska_options(streams, output_container: str | None) -> list[st
         str(64 * 1024),
     ])
     return options
+
+
+def _is_live_raw_audio_ts(stream) -> bool:
+    """Whether a live HLS audio stream carries AAC/AC-3 in MPEG-TS parts."""
+    if getattr(stream, "manifest_type", None) != "hls":
+        return False
+    if not getattr(stream, "is_live", False) or getattr(stream, "media_type", None) != "audio":
+        return False
+    codec = pretty_codec(getattr(stream, "codecs", None), "audio")
+    if codec not in {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos"}:
+        return False
+    extension = (getattr(stream, "extension", None) or "").lower().lstrip(".")
+    if extension in {"ts", "m2ts", "mts", "bbts"}:
+        return True
+    return any(
+        Path(urlparse(getattr(segment, "url", "")).path).suffix.lower().lstrip(".")
+        in {"ts", "m2ts", "mts", "bbts"}
+        for segment in getattr(stream, "segments", []) or []
+    )
 
 
 def should_finalize_live_pipe_matroska_output(streams, output_container: str | None) -> bool:

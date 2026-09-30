@@ -126,7 +126,7 @@
   "update.note.media_types": "Processa manifestos servidos por scripts e espaços nas URLs sem reconstruir parâmetros assinados.",
   "update.note.documentation": "As seções iniciais HLS preservam seu escopo AES; suporte ao SAMPLE-AES TS/AAC clássico.",
   "update.note.clipboard": "Saída híbrida Dolby Vision + HDR10 configurável globalmente ou por serviço; requer fontes compatíveis e ferramentas externas.",
-  "update.note.update_checker": "O UniDL v2.2.5 corrige a desencriptação de áudio HLS da Apple, os avisos de conversão de legendas vazias e a procura de binários locais do projeto.",
+  "update.note.update_checker": "O UniDL v2.2.6 corrige a gravação em direto do Pluto TV, melhora a deteção de HDR10+, atualiza as legendas do BBC iPlayer e renova as dependências DRM.",
   "update.close_hint": "esc / x fecha esta janela",
   "home.chip.config": "configuração",
   "home.chip.config_create": "criar",
