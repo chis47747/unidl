@@ -126,7 +126,7 @@
   "update.note.media_types": "支援腳本形式的 manifest 位址及 URL 空格，不重建已簽署的查詢參數。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 金鑰作用域，支援舊式 TS/AAC SAMPLE-AES 下載。",
   "update.note.clipboard": "可全域或按服務啟用 Dolby Vision + HDR10 混合輸出；需要匹配的來源軌道及外部工具。",
-  "update.note.update_checker": "UniDL v2.2.6 修復 Pluto TV 直播錄製，改善 HDR10+ 偵測，更新 BBC iPlayer 字幕處理與 DRM 相依套件。",
+  "update.note.update_checker": "UniDL v2.2.7 顯示準確的 CDM 身份資訊，並修復 Windows Terminal 的滑鼠與 Ctrl+S 輸入相容性。",
   "update.close_hint": "按 esc / x 關閉視窗",
   "home.chip.config": "設定檔",
   "home.chip.config_create": "建立",

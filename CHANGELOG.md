@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.7] - 2026-10-01
+
+### CDM identity
+
+- Displayed the selected CDM's authoritative security level and Widevine system
+  ID in the service identity row when the device provides those values.
+
+### Windows Terminal compatibility
+
+- Disabled incompatible Kitty keyboard negotiation on Windows and kept the TUI
+  on a reliable 256-colour path, restoring mouse input and Ctrl+S settings access
+  on affected Windows Terminal and Python 3.14 installations.
+
 ## [2.2.6] - 2026-09-30
 
 ### Live recording

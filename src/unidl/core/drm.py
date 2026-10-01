@@ -228,6 +228,8 @@ class LocalDeviceMetadata:
     """
 
     level: str = ""
+    #: Widevine's device identity, read from the WVD payload when available.
+    system_id: str = ""
     error: str = ""
 
     @property
@@ -245,6 +247,14 @@ def _security_level(value: Any, prefix: str, allowed: set[int]) -> LocalDeviceMe
     if level not in allowed:
         return LocalDeviceMetadata(error=f"device contains unsupported security level {level}")
     return LocalDeviceMetadata(level=f"{prefix}{level}")
+
+
+def _display_system_id(value: Any) -> str:
+    """Normalize a CDM system id for a compact, non-secret UI label."""
+    if value is None or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    return text if text else ""
 
 
 @lru_cache(maxsize=512)
@@ -269,10 +279,15 @@ def _read_local_device_metadata(
             from pywidevine.device import Device
 
             device = Device.load(path)
-            return _security_level(
+            metadata = _security_level(
                 getattr(device, "security_level", None),
                 "L",
                 {1, 2, 3},
+            )
+            return LocalDeviceMetadata(
+                level=metadata.level,
+                system_id=_display_system_id(getattr(device, "system_id", None)),
+                error=metadata.error,
             )
         if system == PLAYREADY:
             from pyplayready.device import Device
@@ -338,6 +353,8 @@ class DeviceFile:
     #: security level as the source states it, for sources that state it rather
     #: than encoding it in a file name
     stated_level: str = ""
+    #: a system id stated by a remote endpoint, or read from a local WVD
+    stated_system_id: str = ""
     #: where it is, for the picker's right-hand column
     origin: str = ""
 
@@ -364,6 +381,16 @@ class DeviceFile:
             return local_device_metadata(self.path, system).level
         match = _LEVEL_RE.search(self.path.stem)
         return match.group(1).upper() if match else ""
+
+    @property
+    def system_id(self) -> str:
+        """Authoritative Widevine system id, never inferred from the filename."""
+        if self.stated_system_id:
+            return str(self.stated_system_id)
+        system = str(self.system or "").strip().lower()
+        if system != WIDEVINE or self.is_remote:
+            return ""
+        return local_device_metadata(self.path, system).system_id
 
     @property
     def problem(self) -> str:
@@ -407,6 +434,9 @@ def remote_devices(configs) -> list[DeviceFile]:
                 system=config.system,
                 remote=config.name,
                 stated_level=config.level,
+                stated_system_id=(
+                    str(config.system_id) if config.system_id is not None else ""
+                ),
                 origin=host,
             )
         )

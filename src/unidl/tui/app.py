@@ -34,6 +34,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from textual.app import App
+from textual.binding import Binding
 
 from ..core import i18n, playready, service_catalog, vaults
 from ..core.brands import service_tag
@@ -257,7 +258,28 @@ class UnidlApp(App):
         ("ctrl+q", "global_quit", "Quit"),
         # a chord, so it still works with a text field focused
         ("ctrl+t", "toggle_theme", "Theme"),
+        # Keep this at app priority: Windows console input can deliver Ctrl+S
+        # while an Input owns focus, and the settings action is global by design.
+        Binding(
+            "ctrl+s",
+            "global_settings",
+            "Settings",
+            show=False,
+            priority=True,
+        ),
     ]
+    if sys.platform == "win32":
+        # Some Windows Terminal / ConPTY combinations report the physical
+        # Ctrl+S chord as a NUL/ctrl-@ event instead of Ctrl+S.
+        BINDINGS.append(
+            Binding(
+                "ctrl+@",
+                "global_settings",
+                "Settings",
+                show=False,
+                priority=True,
+            )
+        )
 
     def __init__(self, config: Config | None = None):
         super().__init__()

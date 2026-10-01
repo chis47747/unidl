@@ -351,7 +351,13 @@ class AskHost(Screen):
             return self._ident_bits
         status = self.service.auth_status()
         account = mask_in(status.label)
-        device = self.service.ctx.device_name or "no cdm"
+        system = self.service.drm_system()
+        # Resolve the same service-level CDM that the next licence request will
+        # use.  ``ctx.device_name`` is only the context snapshot and can still
+        # reflect the app-wide choice for a service with its own CDM setting.
+        device = self.service.cdm_name(system) or "no cdm"
+        level = self.service.cdm_level(system)
+        system_id = self.service.cdm_system_id(system)
         self._ident_bits = [
             # theme variables, not literals: this used to name the dark palette's
             # own foreground, which on a white terminal is white text on white
@@ -359,6 +365,10 @@ class AskHost(Screen):
             (f"[$muted]{visual_markup(account)}[/]", account),
             (f"[$dim]{visual_markup(device)}[/]", device),
         ]
+        if level:
+            self._ident_bits.append((f"[$dim]{visual_markup(level)}[/]", level))
+        if system_id:
+            self._ident_bits.append((f"[$dim]{visual_markup(system_id)}[/]", system_id))
         return self._ident_bits
 
     def _render_identity(self) -> None:

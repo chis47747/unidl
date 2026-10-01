@@ -594,6 +594,21 @@ class Service:
         path = self._device_for_drm(system, requested)
         return DeviceFile(path=path, system=system).level.upper() if path else ""
 
+    def cdm_system_id(self, system: str = "") -> str:
+        """Return the selected Widevine CDM system id from its device data."""
+        system = system or self.drm_system()
+        if system != WIDEVINE:
+            return ""
+        requested = self.cdm_choice(system) or None
+        remote = self.ctx.config.remote_cdm_for(
+            self.ID, requested, system=system, legacy_ids=self.LEGACY_IDS
+        )
+        if remote is not None:
+            value = getattr(remote, "system_id", None)
+            return str(value) if value is not None else ""
+        path = self._device_for_drm(system, requested)
+        return DeviceFile(path=path, system=system).system_id if path else ""
+
     def refresh_device(self) -> None:
         """Re-resolve the context's CDM, honouring this service's own choice."""
         self.ctx.refresh_device(self.cdm_choice())
