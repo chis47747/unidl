@@ -2167,6 +2167,9 @@ class SessionController:
             except Exception as exc:
                 self.post_error("Could not select output tracks", str(exc), "Check Track settings.")
                 return FAILED, "track selection failed"
+            hydrate = getattr(self.engine, "hydrate_selected_track_kids", None)
+            if callable(hydrate):
+                hydrate(playback, self.settings, tracks)
             self.post_log(f"tracks: {tracks.summary()}")
             if actual := _actual_video_line(tracks):
                 self.post_field("actual", actual, "ok")
@@ -2180,12 +2183,7 @@ class SessionController:
         # the confirmed output tracks; this is useful for HLS services whose PSSH
         # only appears in selected media playlists.  It is not the meaning of
         # Track output selection and never changes the default behavior.
-        scoped = getattr(self.settings, "scoped", None)
-        defer_license = bool(
-            scoped("license_after_tracks", False)
-            if callable(scoped)
-            else self.settings.get("license_after_tracks", False)
-        )
+        defer_license = bool(self.settings.get("license_after_tracks", False))
         if not defer_license:
             try:
                 self.post_status(tr("delivery.status.resolving_keys"))
@@ -2219,6 +2217,11 @@ class SessionController:
                 return
             else:
                 self.post_field("key", "none needed", "dim")
+
+        def hydrate_selected_track_kids() -> None:
+            hydrate = getattr(self.engine, "hydrate_selected_track_kids", None)
+            if callable(hydrate):
+                hydrate(playback, self.settings, tracks)
 
         if not defer_license:
             report_keys()
@@ -2265,6 +2268,10 @@ class SessionController:
         if not tracks.selected:
             self.post_log("nothing selected", "warning")
             return SKIPPED, "no tracks selected"
+
+        # KIDs shown by Core and the delivery screen come from the selected
+        # rendition/init data, never from a master-level session declaration.
+        hydrate_selected_track_kids()
 
         if defer_license:
             try:
@@ -2323,6 +2330,7 @@ class SessionController:
                     if not tracks.selected:
                         self.post_log("nothing selected", "warning")
                         return SKIPPED, "no tracks selected"
+                    hydrate_selected_track_kids()
                     self.post_log(f"tracks: {tracks.summary()}")
                     self._report_hybrid_choice(playback, tracks)
                     if defer_license:

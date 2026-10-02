@@ -126,7 +126,7 @@
   "update.note.media_types": "Processa manifestos servidos por scripts e espaços nas URLs sem reconstruir parâmetros assinados.",
   "update.note.documentation": "As seções iniciais HLS preservam seu escopo AES; suporte ao SAMPLE-AES TS/AAC clássico.",
   "update.note.clipboard": "Saída híbrida Dolby Vision + HDR10 configurável globalmente ou por serviço; requer fontes compatíveis e ferramentas externas.",
-  "update.note.update_checker": "O UniDL v2.2.7 mostra dados de identidade autoritários do CDM e corrige a compatibilidade do rato e do Ctrl+S no Windows Terminal.",
+  "update.note.update_checker": "O UniDL v2.2.8 mantém os seletores de faixas de vídeo em lote utilizáveis em terminais pequenos, reforça o rato, a entrada e a limpeza ao sair no Windows, alinha os KID da faixa selecionada entre o Core e o downloader e encurta os caminhos temporários para os limites antigos do Windows.",
   "update.close_hint": "esc / x fecha esta janela",
   "home.chip.config": "configuração",
   "home.chip.config_create": "criar",

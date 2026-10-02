@@ -148,14 +148,15 @@ def _portable_import_service_class(document) -> type[Service]:
 # bypass that path and leave iTerm in mouse-reporting mode.  Keep this cleanup
 # deliberately independent from Textual so it also covers a renderer failure.
 _TERMINAL_RESET = (
-    "\x1b[0m"
-    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
+    "\x1b[0m\x1b[<u\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
     "\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[?2048l"
-    "\x1b[<u\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
+    # Disable reporting on the restored primary screen, after leaving every
+    # alternate-screen mode. Include UTF-8 mouse mode as well as SGR.
+    "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l"
 )
 
 
-def _restore_terminal_state(stream=None) -> None:
+def _restore_terminal_state(stream=None, *, clear_input: bool = False) -> None:
     """Best-effort reset for terminal modes UniDL/Textual may have enabled."""
 
     if stream is None:
@@ -163,6 +164,11 @@ def _restore_terminal_state(stream=None) -> None:
     if stream is None or getattr(stream, "closed", False):
         return
     try:
+        if sys.platform == "win32":
+            from .windows_driver import restore_terminal_state_windows
+
+            restore_terminal_state_windows(stream, _TERMINAL_RESET, clear_input=clear_input)
+            return
         stream.write(_TERMINAL_RESET)
         stream.flush()
     except (AttributeError, OSError, ValueError):
@@ -197,7 +203,7 @@ class _TerminalStateGuard:
                 # Signals can be unavailable on a platform or from a non-main
                 # thread. Textual still owns its regular cleanup in that case.
                 continue
-        atexit.register(_restore_terminal_state)
+        atexit.register(_restore_terminal_state, clear_input=True)
         return self
 
     def _handle_signal(self, signum: int, frame) -> None:
@@ -213,7 +219,7 @@ class _TerminalStateGuard:
                     self._shutdown()
                 except Exception:
                     pass
-            _restore_terminal_state()
+            _restore_terminal_state(clear_input=True)
 
             # Ctrl+C is an application request to stop, not an unhandled
             # exception.  ``run`` supplies a callback that aborts sessions and
@@ -241,7 +247,7 @@ class _TerminalStateGuard:
             atexit.unregister(_restore_terminal_state)
         except Exception:
             pass
-        _restore_terminal_state()
+        _restore_terminal_state(clear_input=True)
         for signum, previous in self._previous.items():
             try:
                 signal.signal(signum, previous)
@@ -966,5 +972,10 @@ def run(config_path: Path | None = None, *, config: Config | None = None) -> Non
         # print a traceback for an intentional user interrupt.
         pass
     finally:
-        app.abort_sessions()
-        app.wait_for_sessions(SESSION_SHUTDOWN_TIMEOUT)
+        try:
+            app.abort_sessions()
+            app.wait_for_sessions(SESSION_SHUTDOWN_TIMEOUT)
+        finally:
+            # Helpers may restore shared console modes as they exit. Reset
+            # after worker cleanup, immediately before returning to the shell.
+            _restore_terminal_state(clear_input=True)

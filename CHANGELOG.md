@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.2.8] - 2026-10-02
+
+### Batch track selection
+
+- Expanded queued video track pickers into the available terminal space and hid
+  stale delivery panels, keeping later batches selectable in short windows.
+
+### Windows console input
+
+- Stabilized Windows console input mode and mouse reporting, including recovery
+  when the host resets the mode and cleanup of pending reports on exit.
+
+### Selected-track KIDs
+
+- Reported KIDs from the selected rendition and initialization data so Core,
+  the delivery screen and the native downloader show the same key identity.
+
+### Windows temporary paths
+
+- Bounded temporary directory and section names to avoid legacy Windows path
+  length failures while retaining resume identity through stable digests.
+
 ## [2.2.7] - 2026-10-01
 
 ### CDM identity

@@ -136,6 +136,48 @@ class NativeDownloaderBackend:
         )
         return ParsedManifest(request, tracks, state)
 
+    def hydrate_selected(
+        self,
+        request: ParseRequest,
+        streams: Sequence[StreamInfo],
+        *,
+        request_timeout: int = 30,
+    ) -> None:
+        """Resolve the selected tracks' child playlists and init KIDs in place.
+
+        Core must use the same track-level KID that the native downloader will
+        use.  A master playlist/MPD can expose a session or adaptation KID that
+        is not the KID in the selected rendition's media/init segment.  This is
+        deliberately limited to the final selection, so it does not hydrate an
+        entire ladder before the picker is shown.
+        """
+        from . import cli
+
+        headers = dict(request.policy.headers)
+        for stream in streams:
+            try:
+                if stream.manifest_type in {"hls", "m3u"}:
+                    cli._hydrate_stream(
+                        stream,
+                        headers=headers,
+                        no_probe=request.policy.no_probe,
+                        base_url=request.policy.base_url,
+                    )
+                if not stream.encrypted:
+                    continue
+                cli._hydrate_selected_stream_key_ids(
+                    stream,
+                    headers=headers,
+                    request_timeout=max(1, int(request_timeout or 30)),
+                    force=True,
+                )
+            except Exception:
+                # One rendition can expire while another remains usable.  The
+                # normal downloader will report a hard failure if that selected
+                # stream cannot actually be fetched; do not hide KIDs for the
+                # other selected tracks here.
+                continue
+
     def merge(self, manifests: Sequence[ParsedManifest]) -> ParsedManifest:
         """Merge authorized ladders into one runnable JSON-backed manifest.
 

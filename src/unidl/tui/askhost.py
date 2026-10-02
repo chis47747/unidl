@@ -173,6 +173,11 @@ class AskHost(Screen):
         # returns to that ask's parent page.
         self._ask_scope: str | None = None
         self._current_ask: AskWidget | None = None
+        #: Save delivery-only panels while a queued title asks for tracks.
+        #: Those panels describe the previous title and otherwise consume the
+        #: small terminal height needed by the next SelectionList.
+        self._delivery_audio_side_display: bool | None = None
+        self._delivery_details_display: bool | None = None
         #: a finished artefact left in the middle of the screen. Its own slot
         #: rather than the ask's, because nothing is waiting on it: everything
         #: that reasons about "is the flow blocked" must not see it.
@@ -355,9 +360,18 @@ class AskHost(Screen):
         # Resolve the same service-level CDM that the next licence request will
         # use.  ``ctx.device_name`` is only the context snapshot and can still
         # reflect the app-wide choice for a service with its own CDM setting.
-        device = self.service.cdm_name(system) or "no cdm"
-        level = self.service.cdm_level(system)
-        system_id = self.service.cdm_system_id(system)
+        # Keep the older Service-shaped test doubles usable too: they do not
+        # expose the metadata helpers, but their context still has a device name.
+        cdm_name = getattr(self.service, "cdm_name", None)
+        if callable(cdm_name):
+            device = cdm_name(system) or "no cdm"
+        else:
+            context = getattr(self.service, "ctx", None)
+            device = getattr(context, "device_name", "") or "no cdm"
+        cdm_level = getattr(self.service, "cdm_level", None)
+        level = cdm_level(system) if callable(cdm_level) else ""
+        cdm_system_id = getattr(self.service, "cdm_system_id", None)
+        system_id = cdm_system_id(system) if callable(cdm_system_id) else ""
         self._ident_bits = [
             # theme variables, not literals: this used to name the dark palette's
             # own foreground, which on a white terminal is white text on white
@@ -894,6 +908,20 @@ class AskHost(Screen):
             self._ask_scope = None
             return
         self._current_ask = widget
+        # A queued batch item asks on the delivery screen after the previous
+        # item has finished. Reclaim the stale delivery panels and mark the
+        # screen so its ask area can expand beyond the idle height cap.
+        self.add_class("active-ask")
+        audio_side = self.query("#delivery-audio-side")
+        if audio_side:
+            side = audio_side.first()
+            self._delivery_audio_side_display = bool(side.display)
+            side.display = False
+        details = self.query("#delivery-details")
+        if details:
+            card = details.first()
+            self._delivery_details_display = bool(card.display)
+            card.display = False
         area = self.query("#ask-area")
         if not area:
             box["value"] = None
@@ -903,6 +931,7 @@ class AskHost(Screen):
             self._ask_scope = None
             return
         target = area.first(VerticalScroll)
+        target.add_class("active-ask")
         # Something to go and do by hand is not a list to work down: it is one
         # thing, and it belongs in the middle where the eye already is. Everything
         # else keeps its old place - a bare field at the bottom, next to where what
@@ -919,6 +948,18 @@ class AskHost(Screen):
         self.refresh_keys()
 
     def _clear_ask(self) -> None:
+        self.remove_class("active-ask")
+        audio_side = self.query("#delivery-audio-side")
+        if audio_side and self._delivery_audio_side_display is not None:
+            audio_side.first().display = self._delivery_audio_side_display
+        self._delivery_audio_side_display = None
+        details = self.query("#delivery-details")
+        if details and self._delivery_details_display is not None:
+            details.first().display = self._delivery_details_display
+        self._delivery_details_display = None
+        area = self.query("#ask-area")
+        if area:
+            area.first(VerticalScroll).remove_class("active-ask")
         if self._current_ask is not None:
             self._current_ask.remove()
             self._current_ask = None

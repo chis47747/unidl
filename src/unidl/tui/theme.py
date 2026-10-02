@@ -638,6 +638,12 @@ AttachmentsScreen {
     min-width: 0;
     padding: 0 1;
 }
+.audio-track-controls .ask-hint {
+    /* One status line is enough; shared hint padding can consume the only
+       row available to a short audio batch picker. */
+    height: 1;
+    padding: 0 1;
+}
 .audio-cover-label {
     width: 100%;
     height: 1;
@@ -715,6 +721,21 @@ AttachmentsScreen {
 DownloadScreen #ask-area {
     height: auto;
     max-height: 20%;
+}
+
+/* A queued title may ask for tracks after the preceding title finishes. Let
+   the picker use the flexible remainder and scroll internally on small windows. */
+DownloadScreen #ask-area.active-ask {
+    height: 1fr;
+    min-height: 5;
+    max-height: 100%;
+}
+
+/* These panels describe the previous/current transfer and are stale while a
+   queued title's track selection is waiting for input. */
+DownloadScreen.active-ask #delivery-details,
+DownloadScreen.active-ask #delivery-audio-side {
+    display: none;
 }
 
 #statusline {

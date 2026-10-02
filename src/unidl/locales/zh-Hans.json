@@ -126,7 +126,7 @@
   "update.note.media_types": "支持脚本形式的 manifest 地址和 URL 空格，不重建已签名的查询参数。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 密钥作用域，支持旧式 TS/AAC SAMPLE-AES 下载。",
   "update.note.clipboard": "可全局或按服务启用 Dolby Vision + HDR10 混合输出；需要匹配的源轨道与外部工具。",
-  "update.note.update_checker": "UniDL v2.2.7 显示准确的 CDM 身份信息，并修复 Windows Terminal 的鼠标和 Ctrl+S 输入兼容性。",
+  "update.note.update_checker": "UniDL v2.2.8 让小窗口中的视频 batch 轨道选择保持可用，强化 Windows 控制台鼠标/输入与退出清理，使 Core 与 downloader 使用一致的选中轨道 KID，并缩短临时路径以规避 Windows 传统路径限制。",
   "update.close_hint": "按 esc / x 关闭窗口",
   "home.chip.config": "配置",
   "home.chip.config_create": "创建",

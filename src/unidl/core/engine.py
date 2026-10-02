@@ -2513,6 +2513,41 @@ class Engine:
             tracks.selected = self.ensure_hybrid_tracks(tracks, tracks.selected)
         return tracks.selected
 
+    def hydrate_selected_track_kids(
+        self,
+        playback: Playback,
+        settings: Settings,
+        tracks: TrackSet,
+    ) -> None:
+        """Make selected-track KIDs authoritative before reporting/licensing.
+
+        Master-level session/adaptation KIDs are useful licence hints, but they
+        are not the identity of every rendition.  Once the user has selected
+        tracks, use the native downloader's child-playlist/init probing on those
+        tracks only.  The same native objects are then used by the delivery plan,
+        so Core, the delivery screen and decryption share one KID inventory for
+        HLS, DASH and ISM alike.
+        """
+        selected = list(tracks.selected)
+        if not selected:
+            return
+        request = (
+            tracks.manifest.request
+            if tracks.manifest is not None
+            else self.parse_request(playback, settings)
+        )
+        hydrate = getattr(self.downloader, "hydrate_selected", None)
+        if not callable(hydrate):
+            return
+        try:
+            hydrate(
+                request,
+                selected,
+                request_timeout=max(1, int(settings.get("http_timeout", 30) or 30)),
+            )
+        except Exception as exc:  # optional metadata must not block delivery
+            self.log(f"selected-track KID probe skipped: {exc}")
+
     @staticmethod
     def hybrid_enabled(
         settings: Settings | None,

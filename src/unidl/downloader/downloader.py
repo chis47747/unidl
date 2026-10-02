@@ -1728,7 +1728,10 @@ def _write_section_outputs(output_path: Path, part_paths: list[Path], segments: 
     suffix = output_path.suffix or ".mp4"
     paths: list[Path] = []
     for section_index, (start, end) in enumerate(ranges, start=1):
-        section_path = section_dir / f"{output_path.stem}.{section_index:03d}{suffix}"
+        # The parent already identifies the task and track.  Repeating the
+        # complete output title here needlessly creates very long Windows
+        # paths (and can surface as Errno 2 when the final file is opened).
+        section_path = section_dir / f"section_{section_index:03d}{suffix}"
         with section_path.open("wb") as output:
             for part_path in part_paths[start:end]:
                 _copy_file_to_output(part_path, output)
@@ -1755,7 +1758,8 @@ def _default_tmp_root() -> Path:
 def _transient_temp_dir(output_path: Path, temp_dir: str | Path | None, label: str) -> Path:
     root = Path(temp_dir).expanduser() if temp_dir else output_path.parent
     root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=f"{output_path.stem}_{label}_", dir=str(root)))
+    prefix = _short_temp_label(output_path.stem, 36)
+    return Path(tempfile.mkdtemp(prefix=f"{prefix}_{label}_", dir=str(root)))
 
 
 def _resume_temp_dir(
@@ -1769,7 +1773,7 @@ def _resume_temp_dir(
     root = Path(temp_dir).expanduser() if temp_dir else _default_tmp_root()
     key = _stream_resume_key(stream, segments=segments)
     label = _safe_name("-".join(part for part in [stream.media_type, stream.resolution, stream.language, str(stream.bandwidth or "")] if part))
-    target = root / f"{label or output_path.stem}_{key[:16]}"
+    target = root / f"{_short_temp_label(label or output_path.stem, 36)}_{key[:16]}"
     if target.exists() or not search_fallback:
         return target
 
@@ -3889,3 +3893,15 @@ def _safe_name(value: str) -> str:
             keep.append("_")
     result = "".join(keep).strip("._")
     return result or "stream"
+
+
+def _short_temp_label(value: str, limit: int = 36) -> str:
+    """Bound a temporary path component without losing useful identity."""
+    safe = _safe_name(str(value))
+    if not safe:
+        return "stream"
+    if len(safe) <= limit:
+        return safe
+    digest = hashlib.sha1(str(value).encode("utf-8", "replace")).hexdigest()[:8]
+    keep = max(1, limit - len(digest) - 1)
+    return f"{safe[:keep]}_{digest}"

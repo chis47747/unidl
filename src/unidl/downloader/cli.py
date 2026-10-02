@@ -881,7 +881,16 @@ def _download(args: argparse.Namespace) -> int:
                 hls_crypto=_hls_crypto_for_stream(stream, hls_crypto),
                 request_timeout=max(1, args.http_request_timeout),
             )
-            _hydrate_selected_stream_key_ids(stream, headers=headers, request_timeout=max(1, args.http_request_timeout), keys=keys)
+            _hydrate_selected_stream_key_ids(
+                stream,
+                headers=headers,
+                request_timeout=max(1, args.http_request_timeout),
+                keys=keys,
+                # The user has already chosen this track.  For encrypted
+                # media, prefer its init/segment KID over any master-level
+                # declaration so the summary and decrypter see one identity.
+                force=bool(stream.encrypted),
+            )
     print()
     _print_selected_download_summary(hydrated, original_streams=streams, colors=colors)
     _log_line(args, "Selected: " + ", ".join(stream.format_line() for stream in hydrated))
@@ -7346,7 +7355,12 @@ def _write_meta_json(output_dir: Path, save_name: str | None, streams, selected)
 def _task_temp_root(args: argparse.Namespace, streams, default_save_base: str | None) -> Path:
     base_root = Path(args.tmp_dir).expanduser() if getattr(args, "tmp_dir", None) else _default_tmp_root()
     label = args.save_name or _input_temp_label(getattr(args, "input", "unidl"))
-    safe_label = _safe_output_name(_save_name_base(str(label)))[:80] or "unidl"
+    # Temporary paths are nested below per-track directories and section
+    # files.  Keeping the full title here can push the final section path
+    # past Windows' traditional MAX_PATH limit even when the output filename
+    # itself is valid.  The digest remains the stable identity; the short
+    # prefix is only for diagnostics and does not affect resume matching.
+    safe_label = _short_temp_label(_save_name_base(str(label)), 40)
     digest = hashlib.sha1(_task_temp_payload(args, streams).encode("utf-8")).hexdigest()[:12]
     return base_root / f"{safe_label}_{digest}"
 
@@ -7378,6 +7392,23 @@ def _task_temp_subdir(args: argparse.Namespace, name: str) -> Path:
         base_root = Path(args.tmp_dir).expanduser() if getattr(args, "tmp_dir", None) else _default_tmp_root()
         root = base_root / "unidown_task"
     return Path(root).expanduser() / name
+
+
+def _short_temp_label(value: str, limit: int = 40) -> str:
+    """Return a readable, bounded label for a temporary directory.
+
+    Temporary paths are not user-facing output names.  Bound their title
+    component so nested section paths remain usable on Windows while keeping
+    a short digest to distinguish similarly truncated titles.
+    """
+    safe = _safe_output_name(str(value))
+    if not safe:
+        return "unidl"
+    if len(safe) <= limit:
+        return safe
+    digest = hashlib.sha1(str(value).encode("utf-8", "replace")).hexdigest()[:8]
+    keep = max(1, limit - len(digest) - 1)
+    return f"{safe[:keep]}_{digest}"
 
 
 def _task_temp_payload(args: argparse.Namespace, streams) -> str:
@@ -8707,6 +8738,19 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
     if not detail_streams:
         return stream
     detail = detail_streams[0]
+    # A Disney-style master can expose an EXT-X-SESSION-KEY while the selected
+    # media playlist exposes the rendition's own EXT-X-KEY.  They are both
+    # legitimate KIDs for the same delivery (and the licence response can
+    # contain both), so do not lose either value while hydrating.  The selected
+    # media playlist is the first track-level authority; the master/session KID
+    # is retained only as an alias until an init probe can establish the exact
+    # rendition KID.
+    original_key_id = _normalize_kid_text((stream.extra or {}).get("key_id"))
+    original_key_ids = [
+        normalized
+        for value in ((stream.extra or {}).get("key_ids") or [])
+        if (normalized := _normalize_kid_text(value))
+    ]
     # Keep metadata supplied by a lazy third-party export when the selected HLS
     # playlist omits it (notably exported KID inventories and JOC/Atmos flags).
     lazy_metadata = {}
@@ -8728,6 +8772,42 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
     stream.is_live = detail.is_live
     stream.extra.update(detail.extra or {})
     stream.extra.update(lazy_metadata)
+    if detail.encrypted:
+        detail_key_ids = [
+            normalized
+            for value in _stream_key_ids(stream)
+            if (normalized := _normalize_kid_text(value))
+        ]
+        # _stream_key_ids() now sees the child metadata and its per-segment
+        # values.  Keep the pre-hydration master/session IDs in the inventory as
+        # aliases, without letting them replace the selected media KID.
+        merged_key_ids = list(
+            dict.fromkeys(
+                value
+                for value in (*detail_key_ids, original_key_id, *original_key_ids)
+                if value
+            )
+        )
+        if merged_key_ids:
+            stream.extra["key_ids"] = merged_key_ids
+            media_key_id = next(
+                (
+                    _normalize_kid_text(getattr(segment, "key_id", None))
+                    for segment in stream.segments
+                    if _normalize_kid_text(getattr(segment, "key_id", None))
+                ),
+                None,
+            )
+            stream.extra["key_id"] = media_key_id or merged_key_ids[0]
+            # Some HLS media playlists inherit the session key but do not
+            # repeat it on EXT-X-KEY/EXT-X-MAP.  Attach that inherited KID to
+            # encrypted segments so fragment decryption can use the same
+            # expected-KID path as an explicitly declared child playlist.
+            if not media_key_id:
+                inherited = stream.extra["key_id"]
+                for segment in stream.segments:
+                    if getattr(segment, "encrypted", False) and not getattr(segment, "key_id", None):
+                        segment.key_id = inherited
     _filter_hls_segments_for_requested_asset(stream)
     return stream
 
@@ -8741,13 +8821,53 @@ def _hydrate_selected_stream_key_ids(
     headers: dict[str, str],
     request_timeout: int,
     keys: list[RawKey] | None = None,
+    *,
+    force: bool = False,
 ) -> None:
     if _is_sabr_stream(stream):
         if _should_probe_selected_sabr_stream_key_ids(stream):
             _hydrate_selected_sabr_stream_key_ids(stream, headers=headers, request_timeout=request_timeout, keys=keys)
         return
-    if _stream_key_ids(stream):
+    if _stream_key_ids(stream) and not force:
         return
+    if force:
+        init_segment = next(
+            (
+                segment
+                for segment in getattr(stream, "segments", []) or []
+                if getattr(segment, "index", None) == -1
+            ),
+            None,
+        )
+        if init_segment is not None:
+            try:
+                init_data = (
+                    bytes(init_segment.data)
+                    if getattr(init_segment, "data", None) is not None
+                    else fetch_segment_probe_bytes(
+                        init_segment,
+                        headers=headers,
+                        request_timeout=request_timeout,
+                    )
+                )
+            except Exception:
+                init_data = None
+            if init_data:
+                kids = (
+                    webm_key_ids_from_bytes(init_data)
+                    if _stream_uses_webm_container(stream)
+                    else mp4_protected_tenc_default_kids_from_bytes(init_data)
+                )
+                kids = [_normalize_kid_text(kid) for kid in kids]
+                kids = [kid for kid in kids if kid]
+                if kids:
+                    _apply_detected_stream_key_ids(
+                        stream,
+                        kids,
+                        replace=True,
+                        preserve_segment_kids=True,
+                    )
+                    return
     source_url = _selected_probe_url(stream)
     if not source_url:
         return
@@ -8771,7 +8891,7 @@ def _hydrate_selected_stream_key_ids(
         kids = [_normalize_kid_text(kid) for kid in kids]
         kids = [kid for kid in kids if kid]
         if kids:
-            _apply_detected_stream_key_ids(stream, kids)
+            _apply_detected_stream_key_ids(stream, kids, replace=force, preserve_segment_kids=force)
             return
 
 
@@ -8898,7 +9018,13 @@ def _int_like(value) -> int | None:
         return None
 
 
-def _apply_detected_stream_key_ids(stream, kids: list[str], *, replace: bool = False) -> None:
+def _apply_detected_stream_key_ids(
+    stream,
+    kids: list[str],
+    *,
+    replace: bool = False,
+    preserve_segment_kids: bool = False,
+) -> None:
     unique = list(dict.fromkeys(kids))
     if not unique:
         return
@@ -8915,7 +9041,10 @@ def _apply_detected_stream_key_ids(stream, kids: list[str], *, replace: bool = F
         stream.encryption_scheme = "CENC" if not _stream_uses_webm_container(stream) else "ENC"
     for segment in getattr(stream, "segments", []) or []:
         segment.encrypted = True
-        segment.key_id = existing[0] if replace else segment.key_id or existing[0]
+        if preserve_segment_kids or not replace:
+            segment.key_id = segment.key_id or existing[0]
+        else:
+            segment.key_id = existing[0]
         if not segment.encryption_scheme:
             segment.encryption_scheme = stream.encryption_scheme
 

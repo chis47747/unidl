@@ -406,9 +406,14 @@ class SettingsScreen(Screen):
                 "remote_vault_auto_lookup", "remote_vault_auto_store",
                 "vault_read_targets", "vault_write_targets",
             }
+            declared_keys = {spec.key for spec in type(self.service).SETTINGS}
             add_section(
                 self.service.NAME,
-                [spec for spec in scope.service_specs() if spec.key not in policy_keys],
+                [
+                    spec
+                    for spec in scope.service_specs()
+                    if spec.key not in policy_keys or spec.key in declared_keys
+                ],
                 scope,
                 note=service_note,
             )
@@ -426,6 +431,7 @@ class SettingsScreen(Screen):
                         "vault_read_targets",
                         "vault_write_targets",
                     }
+                    and spec.key not in declared_keys
                 ],
                 scope,
                 note=service_note,
