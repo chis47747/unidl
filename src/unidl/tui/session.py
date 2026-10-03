@@ -2745,6 +2745,7 @@ class SessionController:
             platform=platform,
             tag=str(self.settings.get("release_tag", "") or ""),
             layout=str(self.settings.inherited("release_template", "") or ""),
+            style=str(self.settings.inherited("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
         )
         if playback.save_name == before:
             return

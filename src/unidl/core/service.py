@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from . import drm as drm_registry
+from . import naming
 from .brands import service_tag
 from .cache import TokenStore
 from .cdm import WIDEVINE, CdmError, DeviceFile, system_of
@@ -1271,6 +1272,7 @@ class Service:
         return {
             "episode": str(read("name_template_episode", "") or ""),
             "movie": str(read("name_template_movie", "") or ""),
+            "style": str(read("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
         }
 
     # -------------------------------------------------------------------- drm

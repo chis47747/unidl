@@ -172,6 +172,7 @@ heartbeat interval is part of the shared settings contract.
 | `license_after_tracks` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. When enabled, only final selected encrypted tracks' KIDs/PSSH values are resolved; it is not a service API/profile selector. |
 | `dolby_vision_hybrid` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. For VOD only, a selected HDR10/HDR10+ base is combined with the lowest-resolution available DV layer from the same manifest or merged profile ladder using `dovi_tool`. |
 | `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty uses YAML `paths.downloads` when configured, otherwise `~/unidl_downloads`, grouped by service. No YAML editing is required; `~` is expanded and the folder is created if it does not exist. |
+| `filename_style` | `dot` / `space` / `hyphen` | `dot` | Compatibility key controlled by **Files & naming → Naming templates**. Chooses separators for the final title and release name while preserving the selected template fields. |
 | `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
 | `retries` | integer | `5` | Compatibility key controlled by **Download behavior**. Segment retry count for the native engine. |
@@ -210,7 +211,7 @@ keys and are not duplicated in the main menu.
 
 ### Files & naming
 
-The global Settings list shows one **Files & naming** row rather than five
+The global Settings list shows one **Files & naming** row rather than six
 separate path/template rows. Its first-phase tabs are:
 
 - **Output locations** — the `download_dir` setting plus `paths.subtitles`,
@@ -220,6 +221,12 @@ separate path/template rows. Its first-phase tabs are:
 - **Naming templates** — `name_template_episode`, `name_template_movie`,
   `release_template` and `release_tag`, with an episode and film preview. These
   remain ordinary `settings.json` keys; the manager is only their coherent UI.
+  **Filename format** is the quick preset above those templates: **Dots (scene)**
+  keeps the traditional `Real.Time.With.Bill.Maher.S24E29.720p...` form,
+  **Spaces** uses `Real Time With Bill Maher S24E29 720p...`, and
+  **Hyphens between sections** uses `Real Time With Bill Maher-S24E29-720p...`.
+  The choice changes separators only; the templates still control which title,
+  quality, audio, video and tag fields are present.
   The release template can use `audio`, `audio_channels`, `audio_full`, `atmos`
   and `video`. Its default produces names such as `AAC2.0`, `DDP5.1.Atmos` and
   `H.265`. These values are calculated only after the output picker is

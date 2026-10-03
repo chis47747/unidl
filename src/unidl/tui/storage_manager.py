@@ -35,7 +35,7 @@ from .settings_layout import SettingRow, label_width, setting_row
 class StorageRow:
     key: str
     label: str
-    kind: str  # setting-path | config-path | template | tag | advanced
+    kind: str  # setting-path | config-path | template | tag | choice | advanced
     help: str
 
     @property
@@ -72,6 +72,12 @@ _OUTPUT_ROWS = (
 )
 
 _NAMING_ROWS = (
+    StorageRow(
+        "filename_style",
+        "Filename format",
+        "choice",
+        "Choose a ready-made dots, spaces, or hyphens layout. Templates below remain available for fine control.",
+    ),
     StorageRow(
         "name_template_episode",
         "Episode file name",
@@ -308,6 +314,14 @@ class StorageManagerScreen(Screen[None]):
             raw = self.app.config.raw.get("paths") or {}
             explicit = isinstance(raw, dict) and bool(str(raw.get(row.key) or "").strip())
             return str(value), tr("storage.source.yaml") if explicit else tr("storage.source.home_default")
+        if row.kind == "choice":
+            value = self.globals.get(row.key)
+            spec = self.globals.spec_by_key.get(row.key)
+            if spec is not None:
+                for option in spec.options:
+                    if option.value == value:
+                        return option.display(), tr("storage.source.settings")
+            return str(value or ""), tr("storage.source.settings")
         if row.kind in {"template", "tag"}:
             value = str(self.globals.get(row.key) or "")
             return value or tr("value.none"), tr("storage.source.settings")
@@ -350,6 +364,14 @@ class StorageManagerScreen(Screen[None]):
             if value is not None:
                 self._save_value(row, value)
 
+        if row.kind == "choice":
+            from .settings_screen import _ChoiceEditor
+
+            spec = self.globals.spec_by_key.get(row.key)
+            if spec is None:
+                return
+            self.app.push_screen(_ChoiceEditor(spec, self.globals.get(row.key)), finished)
+            return
         self.app.push_screen(
             _StorageEditor(row, self._editor_value(row), lambda value: self._edit_preview(row, value)),
             finished,
@@ -439,30 +461,32 @@ class StorageManagerScreen(Screen[None]):
                 "name_template_movie",
                 "release_template",
                 "release_tag",
+                "filename_style",
             )
         }
         values.update(changes or {})
-        episode = template.render(
-            values["name_template_episode"],
-            {
-                "title": "Example.Show",
-                "year": "2026",
-                "season": "01",
-                "episode": "02",
-                "season_episode": "S01E02",
-                "episode_name": "The.Example",
-            },
+        from ..core.titles import Title, TitleKind
+
+        templates = {
+            "episode": values["name_template_episode"],
+            "movie": values["name_template_movie"],
+            "style": values["filename_style"],
+        }
+        episode = naming.save_name_for(
+            Title(
+                "example-episode",
+                TitleKind.EPISODE,
+                "Example Show",
+                year="2026",
+                season=1,
+                episode=2,
+                episode_name="The Example",
+            ),
+            templates,
         )
-        movie = template.render(
-            values["name_template_movie"],
-            {
-                "title": "Example.Movie",
-                "year": "2026",
-                "season": "",
-                "episode": "",
-                "season_episode": "",
-                "episode_name": "",
-            },
+        movie = naming.save_name_for(
+            Title("example-movie", TitleKind.MOVIE, "Example Movie", year="2026"),
+            templates,
         )
         suffix = naming.release_suffix(
             quality="1080p",
@@ -475,6 +499,7 @@ class StorageManagerScreen(Screen[None]):
             dynamic_range="DV",
             tag=values["release_tag"] or "YOURTAG",
             layout=values["release_template"],
+            style=values["filename_style"],
         )
         return (
             f"[$dim]{tr('storage.preview.episode')}[/]  {visual_markup(episode + suffix)}\n"

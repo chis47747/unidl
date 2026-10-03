@@ -9,12 +9,16 @@ duration of the application and restores them on shutdown.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
-from ctypes import wintypes
+from ctypes import byref, wintypes
 from threading import Event, Thread
 
+from textual import constants
+from textual._xterm_parser import XTermParser
 from textual.drivers import win32
+from textual.drivers._writer_thread import WriterThread
 from textual.drivers.windows_driver import WindowsDriver
 
 _MOUSE_OFF = (
@@ -22,6 +26,76 @@ _MOUSE_OFF = (
     "\x1b[?1006l\x1b[?1015l\x1b[?1016l"
 )
 _MODE_RECOVERY_TIMEOUT = 1.0
+
+
+class UniDLEventMonitor(win32.EventMonitor):
+    """Console reader that preserves printable Unicode from AltGr layouts.
+
+    Textual's stock Windows reader drops any key event that has a control-state
+    bit and no virtual-key code.  Windows uses that combination for some
+    composed characters, including ``@`` on common non-US layouts.  The
+    Unicode character itself is authoritative; only empty modifier records are
+    discarded here.
+    """
+
+    def run(self) -> None:
+        exit_requested = self.exit_event.is_set
+        parser = XTermParser(debug=constants.DEBUG)
+
+        try:
+            read_count = wintypes.DWORD(0)
+            h_in = win32.GetStdHandle(win32.STD_INPUT_HANDLE)
+            max_events = 1024
+            key_event_type = 0x0001
+            window_buffer_size_event = 0x0004
+            input_records = (win32.INPUT_RECORD * max_events)()
+            read_console_input_w = win32.KERNEL32.ReadConsoleInputW
+            keys: list[str] = []
+
+            while not exit_requested():
+                for event in parser.tick():
+                    self.process_event(event)
+
+                if win32.wait_for_handles([h_in], 100) is None:
+                    continue
+
+                read_console_input_w(
+                    h_in, byref(input_records), max_events, byref(read_count)
+                )
+                read_input_records = input_records[: read_count.value]
+                keys.clear()
+                new_size: tuple[int, int] | None = None
+
+                for input_record in read_input_records:
+                    event_type = input_record.EventType
+                    if event_type == key_event_type:
+                        key_event = input_record.Event.KeyEvent
+                        key = key_event.uChar.UnicodeChar
+                        if key_event.bKeyDown and key:
+                            # Keep printable Unicode from AltGr and non-US
+                            # layouts, including ``@``.  Modifier-only and
+                            # synthetic control records must not be fed to the
+                            # parser: a NUL becomes ``ctrl+@`` and can trigger
+                            # the global settings binding for every key.
+                            if (
+                                key_event.dwControlKeyState
+                                and key_event.wVirtualKeyCode == 0
+                                and not key.isprintable()
+                            ):
+                                continue
+                            keys.append(key)
+                    elif event_type == window_buffer_size_event:
+                        size = input_record.Event.WindowBufferSizeEvent.dwSize
+                        new_size = (size.X, size.Y)
+
+                if keys:
+                    text = "".join(keys).encode("utf-16", "surrogatepass").decode("utf-16")
+                    for event in parser.feed(text):
+                        self.process_event(event)
+                if new_size is not None:
+                    self.on_size_change(*new_size)
+        except Exception as error:
+            self.app.log.error("EVENT MONITOR ERROR", error)
 
 
 def restore_terminal_state_windows(
@@ -66,7 +140,24 @@ class UniDLWindowsDriver(WindowsDriver):
         self._input_mode_thread: Thread | None = None
 
     def start_application_mode(self) -> None:
-        super().start_application_mode()
+        # Keep the stock setup, but install the corrected console reader before
+        # it starts.  Calling the base method would create its EventMonitor and
+        # reintroduce the printable-AltGr filtering we need to avoid.
+        loop = asyncio.get_running_loop()
+        self._restore_console = win32.enable_application_mode()
+        self._writer_thread = WriterThread(self._file)
+        self._writer_thread.start()
+        self.write("\x1b[?1049h")
+        self._enable_mouse_support()
+        self.write("\x1b[?25l")
+        self.write("\x1b[?1004h")
+        self.write("\x1b[>1u")
+        self.flush()
+        self._enable_bracketed_paste()
+        self._event_thread = UniDLEventMonitor(
+            loop, self._app, self.exit_event, self.process_message
+        )
+        self._event_thread.start()
         expected_mode = win32.get_console_mode(sys.__stdin__)
         if not expected_mode:
             return

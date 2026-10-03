@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.9] - 2026-10-03
+
+### Windows input and paste
+
+- Fixed Windows Terminal account-field paste events so copied credentials are
+  inserted into the focused field.
+- Preserved printable Unicode characters such as `@` while ignoring modifier
+  and synthetic control records that could incorrectly open Settings.
+
+### Filename formats
+
+- Added selectable dot, space and hyphen filename styles under **Files & naming**
+  while keeping custom title and release templates available.
+
 ## [2.2.8] - 2026-10-02
 
 ### Batch track selection

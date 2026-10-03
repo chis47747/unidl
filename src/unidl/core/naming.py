@@ -136,8 +136,9 @@ def format_title(
     season: int | None = None,
     episode: int | None = None,
     episode_name: str | None = None,
+    separator: str = ".",
 ) -> str:
-    base = clean_part(name)
+    base = _styled_part(name, separator)
     has_season = season is not None
     season_number = int(season or 0)
     episode_number = int(episode or 0)
@@ -149,13 +150,13 @@ def format_title(
             else f"E{episode_number:02d}"
         )
         if episode_name:
-            return f"{base}.{tag}.{clean_part(episode_name)}"
-        return f"{base}.{tag}"
+            return separator.join((base, tag, _styled_part(episode_name, separator)))
+        return separator.join((base, tag))
     if episode_name:
-        combined = f"{base}.{clean_part(episode_name)}"
-        return f"{combined}.{year}" if year else combined
+        combined = separator.join((base, _styled_part(episode_name, separator)))
+        return separator.join((combined, str(year))) if year else combined
     if year:
-        return f"{base}.{year}"
+        return separator.join((base, str(year)))
     return base
 
 
@@ -174,6 +175,52 @@ TITLE_TEMPLATES = {
 RELEASE_TEMPLATE = (
     "{quality?}.{platform?}.{source}.{audio_full?}.{atmos?}.{video?}.{range?}-{tag?}"
 )
+
+# Common filename layouts. The templates remain editable, but these presets make
+# the usual scene, readable-space, and mixed hyphen forms available directly in
+# the Files & naming manager.
+NAME_STYLES = {
+    "dot": {
+        "label": "Dots (scene)",
+        "word_separator": ".",
+        "section_separator": ".",
+        "release_separator": ".",
+        "release_prefix": ".",
+    },
+    "space": {
+        "label": "Spaces",
+        "word_separator": " ",
+        "section_separator": " ",
+        "release_separator": " ",
+        "release_prefix": " ",
+    },
+    "hyphen": {
+        "label": "Hyphens between sections",
+        "word_separator": " ",
+        "section_separator": "-",
+        "release_separator": "-",
+        "release_prefix": "-",
+    },
+}
+DEFAULT_NAME_STYLE = "dot"
+
+
+def name_style_options() -> list[tuple[str, str]]:
+    """Return stable values and labels for the filename-style picker."""
+    return [(key, str(value["label"])) for key, value in NAME_STYLES.items()]
+
+
+def _name_style(value: object) -> dict[str, str]:
+    return NAME_STYLES.get(str(value or DEFAULT_NAME_STYLE), NAME_STYLES[DEFAULT_NAME_STYLE])
+
+
+def _styled_template(value: str, separator: str) -> str:
+    """Apply a style to literal dot separators in a user template."""
+    return str(value or "").replace(".", separator)
+
+
+def _styled_part(value: object, separator: str) -> str:
+    return clean_part(value).replace(".", separator)
 
 #: What a title template may say. Kept as a set so the settings screen can tell the
 #: user what is available instead of letting a typo through to a file name.
@@ -197,7 +244,7 @@ RELEASE_FIELDS = frozenset(
 )
 
 
-def title_fields(title: Title) -> dict[str, str]:
+def title_fields(title: Title, *, separator: str = ".") -> dict[str, str]:
     """What a title template can be filled in with."""
     season = int(title.season or 0)
     episode = int(title.episode or 0)
@@ -206,39 +253,42 @@ def title_fields(title: Title) -> dict[str, str]:
     else:
         tag = ""
     return {
-        "title": clean_part(title.name),
+        "title": _styled_part(title.name, separator),
         "year": str(title.year or ""),
         "season": f"{season:02d}" if title.season is not None else "",
         "episode": f"{episode:02d}" if episode else "",
         "season_episode": tag,
-        "episode_name": clean_part(title.episode_name) if title.episode_name else "",
+        "episode_name": _styled_part(title.episode_name, separator) if title.episode_name else "",
     }
 
 
 def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
     """Build the ``--save-name`` UniDL will use."""
+    style = _name_style((templates or {}).get("style"))
+    section_separator = style["section_separator"]
+    word_separator = style["word_separator"]
     if title.kind in (TitleKind.CHANNEL, TitleKind.PROGRAM, TitleKind.STATION):
-        parts = [clean_part(title.channel or title.name)]
+        parts = [_styled_part(title.channel or title.name, word_separator)]
         if title.kind in (TitleKind.PROGRAM, TitleKind.STATION) and title.episode_name:
-            parts.append(clean_part(title.episode_name))
+            parts.append(_styled_part(title.episode_name, word_separator))
         if title.starts_at:
             parts.append(title.starts_at.strftime("%Y%m%d_%H%M%S"))
-        return ".".join(p for p in parts if p)
+        return section_separator.join(p for p in parts if p)
 
     if title.kind is TitleKind.TRACK:
         # The release date belongs in audio metadata, not in its file name.  In
         # particular, it is not a film year and audio services often group
         # several distinct episodes under the same date.
-        return format_title(title.name, episode_name=title.episode_name)
+        return format_title(title.name, episode_name=title.episode_name, separator=section_separator)
 
-    fields = title_fields(title)
+    fields = title_fields(title, separator=word_separator)
     # An episode can legitimately have no supplied number: sport, news and TV
     # specials still need the episode template so their supplied subtitle is not
     # discarded in favour of the film template.
     template_kind = "episode" if title.kind is TitleKind.EPISODE else "movie"
     wanted = (templates or {}).get(template_kind, "")
     if wanted:
-        rendered = template.render(wanted, fields)
+        rendered = template.render(_styled_template(wanted, section_separator), fields)
         if rendered:
             return rendered
         # a template that renders to nothing is a template with a mistake in it, and
@@ -249,6 +299,7 @@ def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
         season=title.season,
         episode=title.episode,
         episode_name=title.episode_name,
+        separator=section_separator,
     )
 
 
@@ -507,6 +558,7 @@ def release_suffix(
     dynamic_range: str = "",
     tag: str = "",
     layout: str = "",
+    style: str = DEFAULT_NAME_STYLE,
 ) -> str:
     """The release half, e.g. ``.1080p.SERVICE.WEB-DL.DDP5.1.Atmos.H.265.DV-GROUP``.
 
@@ -527,8 +579,12 @@ def release_suffix(
         "range": clean_part(dynamic_range),
         "tag": clean_tag(tag),
     }
-    body = template.render(layout or RELEASE_TEMPLATE, fields)
-    return f".{body}" if body else ""
+    style_fields = _name_style(style)
+    body = template.render(
+        _styled_template(layout or RELEASE_TEMPLATE, style_fields["release_separator"]),
+        fields,
+    )
+    return f"{style_fields['release_prefix']}{body}" if body else ""
 
 
 def with_release(
@@ -539,6 +595,7 @@ def with_release(
     platform: str = "",
     tag: str = "",
     layout: str = "",
+    style: str = DEFAULT_NAME_STYLE,
 ) -> str:
     """``save_name`` with the release half appended, for the kinds that take one.
 
@@ -547,7 +604,7 @@ def with_release(
     """
     if title.kind not in RELEASE_KINDS or not save_name:
         return save_name
-    if f".{SOURCE}" in save_name:
+    if any(marker in save_name for marker in (f".{SOURCE}", f" {SOURCE}", f"-{SOURCE}")):
         # already a release name. A title that genuinely contains ".WEB-DL" is one
         # too, so skipping is the right answer either way.
         return save_name
@@ -559,5 +616,6 @@ def with_release(
         dynamic_range=range_of(streams),
         tag=tag,
         layout=layout,
+        style=style,
     )
     return f"{save_name}{suffix}" if suffix else save_name

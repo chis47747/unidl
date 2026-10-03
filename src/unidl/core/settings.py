@@ -1060,6 +1060,15 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     Setting(
+        "filename_style",
+        "Filename format",
+        "choice",
+        options=[Option(value, label) for value, label in naming.name_style_options()],
+        default=naming.DEFAULT_NAME_STYLE,
+        help="Choose dots, spaces, or hyphens between filename sections. Custom templates remain available below.",
+        visible=False,
+    ),
+    Setting(
         "name_template_movie",
         "Film file name",
         "text",

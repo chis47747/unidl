@@ -274,19 +274,6 @@ class UnidlApp(App):
             priority=True,
         ),
     ]
-    if sys.platform == "win32":
-        # Some Windows Terminal / ConPTY combinations report the physical
-        # Ctrl+S chord as a NUL/ctrl-@ event instead of Ctrl+S.
-        BINDINGS.append(
-            Binding(
-                "ctrl+@",
-                "global_settings",
-                "Settings",
-                show=False,
-                priority=True,
-            )
-        )
-
     def __init__(self, config: Config | None = None):
         super().__init__()
         self.config = config or Config.load()
