@@ -10,6 +10,7 @@ code that needs a restart is deliberately a persistent, atomic choice.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import tomllib
 from collections.abc import Iterable
@@ -53,6 +54,39 @@ def source_root() -> Path:
     """The package's ``services`` directory in a checkout or installation."""
 
     return Path(__file__).resolve().parents[1] / "services"
+
+
+def user_service_root(home: Path | None = None) -> Path:
+    """The writable service directory shared by pip and source installs.
+
+    A pip installation and an editable checkout have different package paths.
+    Keeping user-supplied services under the runtime state home gives both
+    launchers one stable location and avoids asking Windows users to write into
+    ``site-packages``.
+    """
+    if home is None:
+        home = Path(os.environ.get("UNIDL_HOME", Path.home() / ".unidl"))
+    return Path(home).expanduser() / "services"
+
+
+def service_roots(home: Path | None = None) -> list[Path]:
+    """Return package, checkout and user service roots in precedence order."""
+    roots = [source_root()]
+    configured = os.environ.get("UNIDL_SERVICES", "")
+    if configured:
+        roots.extend(Path(item).expanduser() for item in configured.split(os.pathsep) if item.strip())
+    cwd = Path.cwd()
+    roots.extend((cwd / "src" / "unidl" / "services", cwd / "services"))
+    roots.append(user_service_root(home))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        absolute = Path(os.path.abspath(root))
+        key = str(absolute).casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(absolute)
+    return unique
 
 
 def _manifest_metadata(path: Path, package_name: str) -> ServiceSource | None:
@@ -134,10 +168,9 @@ def _class_metadata(tree: ast.AST) -> list[tuple[str, str]]:
     return found
 
 
-def discover_sources(root: Path | None = None) -> list[ServiceSource]:
-    """Read service package metadata from disk, never importing the packages."""
+def _discover_sources_in_root(directory: Path) -> list[ServiceSource]:
+    """Read one service root without importing its packages."""
 
-    directory = Path(root) if root is not None else source_root()
     if not directory.is_dir():
         return []
     # ``load_all`` discovers once before Textual starts; the registration screen
@@ -213,6 +246,26 @@ def discover_sources(root: Path | None = None) -> list[ServiceSource]:
     result = tuple(sorted(found.values(), key=lambda item: item.name.casefold()))
     _DISCOVERY_CACHE[directory] = (signature, result)
     return list(result)
+
+
+def discover_sources(
+    root: Path | None = None,
+    *,
+    home: Path | None = None,
+) -> list[ServiceSource]:
+    """Read service metadata from all supported install roots.
+
+    Passing ``root`` keeps the isolated test/development behaviour.  The normal
+    path merges the active package directory with an optional explicit root,
+    source checkouts and the writable user service directory; package-root
+    entries win when an id is duplicated.
+    """
+    roots = [Path(root)] if root is not None else service_roots(home)
+    found: dict[str, ServiceSource] = {}
+    for directory in roots:
+        for source in _discover_sources_in_root(directory):
+            found.setdefault(source.service_id, source)
+    return sorted(found.values(), key=lambda item: item.name.casefold())
 
 
 def merge_registry_sources(
@@ -375,11 +428,13 @@ __all__ = [
     "SUPPORTED_IMPLEMENTATIONS",
     "discover_sources",
     "merge_registry_sources",
+    "service_roots",
     "ensure_state",
     "export_manifest_type",
     "home_ids",
     "registered_ids",
     "source_root",
+    "user_service_root",
     "update_home",
     "update_export_manifest_type",
     "update_registration",

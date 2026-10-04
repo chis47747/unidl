@@ -11,13 +11,14 @@ license challenges and responses are recorded only when a license request fails.
 
 ## Importing and registering a service package
 
-The package must be copied into the installed `unidl/services` directory. Open
-**Settings → Services → Register a service** and select it; registered packages
-are dimmed, while available packages can be selected. Restart UniDL after the
-confirmation. The restart is required because service code is imported at
-startup and the persisted registration choice is applied when the new process
-builds Home and global search. A single-file service module is accepted as well
-as a package directory.
+The package can be copied into the writable `<paths.home>/services` directory,
+the active package's `unidl/services` directory, or a source checkout's
+`src/unidl/services`. Open **Settings → Services → Register a service** and
+select it; registered packages are dimmed, while available packages can be
+selected. Restart UniDL after the confirmation. The restart is required because
+service code is imported at startup and the persisted registration choice is
+applied when the new process builds Home and global search. A single-file
+service module is accepted as well as a package directory.
 
 On a minimal distribution with no packages, Home shows the directory path and
 the same Settings route. A CDM warning can appear at the same time; it is

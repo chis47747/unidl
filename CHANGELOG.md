@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.3.0] - 2026-10-04
+
+### Service discovery
+
+- Discovered service code installed through pip, source checkouts, and user service folders so registered services are available without an extra `uv sync` step.
+
+### Track metadata
+
+- Kept clear DASH/ISM audio tracks from being marked as encrypted when only the video requires DRM.
+
+### Terminal layout
+
+- Corrected terminal cell widths for Thai and other combining characters so translated labels and track details remain aligned.
+
 ## [2.2.9] - 2026-10-03
 
 ### Windows input and paste

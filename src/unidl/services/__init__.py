@@ -8,12 +8,13 @@ tests.
 """
 
 import logging
+import sys
 from importlib import import_module
 from types import ModuleType
 
 from ..core.compiled_service import CompiledServiceError, register_compiled_services
 from ..core.service import Service, registry
-from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, discover_sources
+from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, discover_sources, service_roots
 
 __all__ = ["compiled_service_errors"]
 
@@ -54,7 +55,13 @@ def load_all(config=None) -> int:
     Packages that use ``@registry.register`` keep that code-level path; packages
     registered from the TUI may rely on the loader's class discovery instead.
     """
-    for source in discover_sources():
+    home = getattr(getattr(config, "paths", None), "home", None)
+    package_paths = getattr(sys.modules[__name__], "__path__", ())
+    for root in service_roots(home):
+        text = str(root)
+        if text not in package_paths and hasattr(package_paths, "append"):
+            package_paths.append(text)
+    for source in discover_sources(home=home):
         if source.implementation == COMPILED_ONLY_IMPLEMENTATION:
             _COMPILED_SERVICE_ERRORS.pop(source.service_id, None)
             try:

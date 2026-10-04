@@ -12,6 +12,11 @@ from __future__ import annotations
 import os
 import sys
 
+from ..core.terminal_cells import install_rich_cell_widths as _install_rich_cell_widths
+
+_install_rich_cell_widths()
+del _install_rich_cell_widths
+
 if sys.platform == "win32":
     # Textual's Windows driver can otherwise negotiate Kitty keyboard mode with
     # Windows Terminal.  On some Windows 11 builds that drops ordinary key and

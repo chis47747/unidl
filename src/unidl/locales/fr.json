@@ -126,7 +126,7 @@
   "update.note.media_types": "Les URL de manifestes servies par script et les espaces sont traités sans reconstruire les paramètres signés.",
   "update.note.documentation": "Les sections initiales HLS conservent leur portée AES ; prise en charge du SAMPLE-AES TS/AAC classique.",
   "update.note.clipboard": "Sortie hybride Dolby Vision + HDR10 configurable globalement ou par service ; sources compatibles et outils externes requis.",
-  "update.note.update_checker": "UniDL v2.2.9 corrige le collage et la saisie de @ dans les champs de compte de Windows Terminal, empêche les touches modificatrices d’ouvrir les réglages et ajoute des formats de nom avec points, espaces et tirets.",
+  "update.note.update_checker": "UniDL v2.3.0 découvre le code de service dans les différents chemins d’installation, identifie correctement les pistes audio DASH/ISM non chiffrées et aligne les libellés thaïlandais et combinés dans le terminal.",
   "update.close_hint": "esc / x ferme cette fenêtre",
   "home.chip.config": "configuration",
   "home.chip.config_create": "créer",

@@ -13,14 +13,18 @@ Changes persist immediately and apply to the next request without a restart.
 Global Settings → **Services** contains the global **License after final track
 selection** default, **Chapter metadata by service**,
 **Register a service**, **Services shown on home**, and **Export manifest type**.
-UniDL discovers service
-packages from `src/unidl/services` and shows already registered packages as
-disabled entries. To add a service, copy its completed service package (or
-single-file service module) into that directory, open **Settings → Services →
-Register a service**, and select it. Registration records the choice and asks
-you to restart UniDL; the restart is required for the package to be imported in
-the new process and for the registration to take effect on the homepage grid or
-global search. Homepage visibility is
+UniDL discovers service packages from the active package directory, the source
+checkout's `src/unidl/services`, the current project's `services` directory and
+the writable `<paths.home>/services` directory. It shows already registered
+packages as disabled entries. To add a service, copy its completed service
+package (or single-file service module) into the writable directory shown on the
+home setup notice, open **Settings → Services → Register a service**, and select
+it. Registration records the choice and asks you to restart UniDL; the restart
+is required for the package to be imported in the new process and for the
+registration to take effect on the homepage grid or global search. If you are
+running a source checkout with the `unidl` command from another installation,
+run `uv sync` (or `python -m pip install -e .`) in that checkout, or set
+`UNIDL_SERVICES` to the directory containing the package. Homepage visibility is
 a separate checkbox list: an unchecked registered service remains available to
 global search but is omitted from the homepage grid.
 

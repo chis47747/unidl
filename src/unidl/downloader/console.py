@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import sys
-import unicodedata
 from typing import IO
+
+from ..core.terminal_cells import cell_width as cell_width
+from ..core.terminal_cells import char_width as char_width
 
 
 class ColorLevel:
@@ -180,23 +182,3 @@ def paint(text: str, color: str | None = None, enabled: bool | None = None) -> s
     if not enabled:
         return text
     return f"{color}{text}{Palette.reset}"
-
-
-_ZERO_WIDTH_CATEGORIES = {"Mn", "Me", "Cf"}
-
-
-def char_width(char: str) -> int:
-    """Terminal cells occupied by one character."""
-    code = ord(char)
-    if code < 32 or 0x7F <= code < 0xA0:
-        return 0
-    if unicodedata.combining(char):
-        return 0
-    if unicodedata.category(char) in _ZERO_WIDTH_CATEGORIES:
-        return 0
-    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-
-
-def cell_width(text: str) -> int:
-    """Terminal cells occupied by a string, counting CJK glyphs as two."""
-    return sum(char_width(char) for char in text)

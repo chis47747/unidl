@@ -968,9 +968,27 @@ class Engine:
         drm = playback.drm
         if drm is None or not drm.needs_license:
             return
-        video_only = bool((drm.context or {}).get("drm_hint_video_only"))
+        drm_context = drm.context or {}
+        video_only = bool(drm_context.get("drm_hint_video_only"))
+        hint_audio = bool(drm_context.get("drm_hint_audio") or drm_context.get("drm_hint_all_tracks"))
         for stream in streams:
             if stream.media_type not in ({"video"} if video_only else {"video", "audio"}):
+                continue
+            # A DASH/ISM parser has per-rendition evidence: an audio stream with
+            # materialized clear segments is not made encrypted merely because
+            # the selected video uses DRM. Services whose packager omits all
+            # protection metadata for encrypted audio can opt in with
+            # ``drm_hint_audio`` (or ``drm_hint_all_tracks``) in DrmInfo.context.
+            # HLS keeps the old fallback because its master-level DRM metadata
+            # commonly arrives before child playlists expose their key lines.
+            if (
+                stream.media_type == "audio"
+                and stream.manifest_type in {"dash", "ism"}
+                and stream.segments
+                and any(segment.index != -1 for segment in stream.segments)
+                and not hint_audio
+                and not any(segment.encrypted for segment in stream.segments)
+            ):
                 continue
             # A service-owned JSON manifest can carry an explicit per-track
             # encryption flag.  Do not turn a declared clear track into an

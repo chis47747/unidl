@@ -339,7 +339,7 @@ class ServicesManagerScreen(Screen[None]):
 
     def _refresh_sources(self) -> None:
         self._sources = service_catalog.merge_registry_sources(
-            service_catalog.discover_sources(), self.app.registry.all()
+            service_catalog.discover_sources(home=self.app.config.paths.home), self.app.registry.all()
         )
 
     def rebuild(self) -> None:

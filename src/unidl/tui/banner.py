@@ -19,6 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .. import __version__
+from ..core.terminal_cells import cell_width as _cell_width
 from .bidi import visual_markup, visual_text
 
 # --------------------------------------------------------------- large: unidl
@@ -303,20 +304,6 @@ def _mosaic_lines(text: str) -> list[str] | None:
         return None
     width = max(len(row) for row in rows)
     return [row.ljust(width) for row in rows]
-
-
-def _cell_width(text: str) -> int:
-    """Return terminal cells for text, including wide East Asian characters."""
-    width = 0
-    for character in text:
-        if unicodedata.combining(character) or unicodedata.category(character) in {
-            "Mn",
-            "Me",
-            "Cf",
-        }:
-            continue
-        width += 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
-    return width
 
 
 def _unicode_title_lines(text: str) -> list[str]:

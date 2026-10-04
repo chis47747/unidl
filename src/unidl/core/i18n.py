@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import unicodedata
 from collections.abc import Mapping
 from importlib import resources
 from pathlib import Path
 from typing import Any
+
+from .terminal_cells import cell_width
 
 SUPPORTED_LOCALES = ("en", "zh-Hans", "zh-Hant", "es", "fr", "pt")
 DEFAULT_LOCALE = "en"
@@ -247,17 +248,6 @@ def resolve_locale(value: object) -> str:
     if language in _LOCALE_ALIASES:
         return _LOCALE_ALIASES[language]
     return DEFAULT_LOCALE
-
-
-def cell_width(text: str) -> int:
-    """Terminal columns for ``text``, counting East-Asian wide characters as two."""
-    width = 0
-    for char in str(text or ""):
-        if char in "\n\t":
-            width += 1
-            continue
-        width += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-    return width
 
 
 def _catalogue_text(locale: str) -> str:

@@ -27,9 +27,11 @@ manifest parsing, track selection, download, decrypt, subtitles and muxing.
   TUI registration. In either case, do not add a second manual import to
   `src/unidl/services/__init__.py`. Follow
   [writing-a-service.md](writing-a-service.md). For a package delivered to an
-  end user, the user must copy it into the installed services directory, choose
-  **Settings → Services → Register a service**, and restart UniDL before it is
-  available on Home or in global search.
+  end user, the user can copy it into `<paths.home>/services` (or the active
+  package/source service directory), choose **Settings → Services → Register a
+  service**, and restart UniDL before it is available on Home or in global
+  search. A source checkout must be run with `uv sync`/editable installation,
+  or the service root can be supplied through `UNIDL_SERVICES`.
 - Do not duplicate manifest parsing, selection or download logic from the native delivery core.
 - Do not hardcode credentials, local absolute paths or helper locations.
 - Declare settings, credentials, helpers and `DRM_SYSTEMS`; do not make the UI

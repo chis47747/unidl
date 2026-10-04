@@ -398,7 +398,7 @@ class HomeScreen(Screen):
         note = found.first(StatusChip)
         service_note = service_found.first(StatusChip)
         if not self.app.registry.all():
-            folder = service_catalog.source_root()
+            folder = service_catalog.user_service_root(self.app.config.paths.home)
             service_note.update(
                 f"[$warn]{tr('home.setup_services')}[/]\n"
                 f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"

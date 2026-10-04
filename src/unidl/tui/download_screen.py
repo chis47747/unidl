@@ -29,6 +29,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
 from ..core.i18n import localize_progress_line, tr
+from ..core.terminal_cells import cell_width, fit_middle
 from .askhost import AskHost
 from .audio import AudioPreview, AudioPreviewWidget
 from .bidi import visual_text
@@ -173,14 +174,7 @@ def fit(name: str, room: int) -> str:
     row it only needs on a narrow terminal, drop the middle: both ends stay
     readable and the full name is still on the log line below.
     """
-    if room <= 0 or len(name) <= room:
-        return name
-    if room <= 3:
-        return "..."
-    keep = room - 1  # the ellipsis is one character
-    head = max(1, int(keep * _HEAD_SHARE))
-    tail = keep - head
-    return f"{name[:head]}…{name[len(name) - tail:]}" if tail else f"{name[:keep]}…"
+    return fit_middle(name, room, head_share=_HEAD_SHARE)
 
 
 def _bar(done: int, total: int) -> str:
@@ -639,13 +633,17 @@ class DownloadScreen(AskHost):
             from ..core.attachments import count_label
 
             attachment_text = count_label(playback.attachments)
-        chip_room = sum(len(value) + 3 for value in (chapter_text, lyrics_text, attachment_text) if value)
+        chip_room = sum(
+            cell_width(value) + 3
+            for value in (chapter_text, lyrics_text, attachment_text)
+            if value
+        )
         # content_size is already inside the padding; the fallback is not, so it
         # has to give the 2+2 columns back
         room = widget.content_size.width or max(0, self.size.width - 4)
         name = fit(
             visual_text(playback.save_name),
-            room - len(lead) - len(separator) - chip_room,
+            room - cell_width(lead) - cell_width(separator) - chip_room,
         )
         head = Text(no_wrap=True, overflow="ellipsis")
         head.append(lead, style=f"bold {palette.ok}")
