@@ -1621,6 +1621,30 @@ class SessionController:
         """Run a service flow, adding a session diagnostic log when enabled."""
         if not self.settings.get("debug"):
             return self._drive_impl()
+        debug_policy = getattr(self.service, "debug_logging_enabled", None)
+        allowed = True
+        if callable(debug_policy):
+            try:
+                allowed = bool(debug_policy())
+            except Exception:  # noqa: BLE001 - a plugin policy must not stop its flow
+                allowed = True
+        else:
+            allowed = bool(getattr(self.service, "DEBUG_LOGGING", True))
+        if not allowed:
+            self.post_log(
+                tr(
+                    "debug.service_disabled",
+                    default=(
+                        "This service disabled debug log collection; no debug log "
+                        "file will be produced for this run."
+                    ),
+                ),
+                "warning",
+            )
+            # Do not inherit a recorder from a surrounding/previous service
+            # flow. The opt-out is a hard privacy boundary for this service.
+            with activate(None):
+                return self._drive_impl()
         safe_service = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(self.service.ID or "service"))
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = self.engine.config.paths.logs / f"session_{safe_service}_{stamp}_{uuid.uuid4().hex[:8]}.log"
@@ -2389,9 +2413,27 @@ class SessionController:
         sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)
         if callable(sync_sidecars):
             sync_sidecars(playback, tracks)
-        command = self.engine.command_for(playback, self.settings, tracks)
         try:
-            path = self.engine.export_command(playback, self.settings, tracks, service_id=self.service.ID)
+            command = self.engine.command_for(playback, self.settings, tracks, service=self.service)
+        except TypeError as exc:
+            # Keep small Engine doubles and third-party hosts on the old
+            # three-argument seam while native Engine uses the service policy.
+            if "unexpected keyword argument 'service'" not in str(exc):
+                raise
+            command = self.engine.command_for(playback, self.settings, tracks)
+        try:
+            try:
+                path = self.engine.export_command(
+                    playback,
+                    self.settings,
+                    tracks,
+                    service_id=self.service.ID,
+                    service=self.service,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument 'service'" not in str(exc):
+                    raise
+                path = self.engine.export_command(playback, self.settings, tracks, service_id=self.service.ID)
             self.post_log(f"command saved -> {path}", "ok")
         except Exception as exc:
             self.post_log(f"could not save command: {exc}", "warning")

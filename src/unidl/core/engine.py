@@ -558,6 +558,19 @@ def _folder_name(service: str) -> str:
     return raw
 
 
+def _service_debug_logging_enabled(service: object | None) -> bool:
+    """Return the service author's debug-log policy without importing plugins."""
+    if service is None:
+        return True
+    checker = getattr(service, "debug_logging_enabled", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:  # noqa: BLE001 - a plugin policy must never break a run
+            return True
+    return bool(getattr(service, "DEBUG_LOGGING", True))
+
+
 class Engine:
     def __init__(
         self,
@@ -3022,12 +3035,14 @@ class Engine:
         playback: Playback,
         settings: Settings,
         tracks: TrackSet,
+        *,
+        service=None,
     ) -> DeliveryPlan:
         """Build the Core contract consumed by UniDL's native downloader."""
         if not tracks.selected:
             raise ValueError("a delivery plan needs at least one selected track")
         overrides = _delivery_overrides(playback.extra_args)
-        debug = bool(settings.get("debug", False))
+        debug = bool(settings.get("debug", False)) and _service_debug_logging_enabled(service)
         download_proxy = (
             playback.proxy if settings.get("proxy_downloads", True) else None
         )
@@ -3246,10 +3261,10 @@ class Engine:
             policy=policy,
         )
 
-    def download_options(self, playback: Playback, settings: Settings):
+    def download_options(self, playback: Playback, settings: Settings, *, service=None):
         """Legacy diagnostic options; production execution uses ``DeliveryPlan``."""
         drm = playback.drm
-        debug = bool(settings.get("debug", False))
+        debug = bool(settings.get("debug", False)) and _service_debug_logging_enabled(service)
         # The one place a proxy can be opted out of without giving it up entirely.
         # Off, UniDL goes direct - and it fetches the manifest again itself, so this
         # is for a slow proxy in front of an open CDN, not for a geofenced manifest.
@@ -3440,11 +3455,13 @@ class Engine:
         playback: Playback,
         settings: Settings,
         tracks: TrackSet | None = None,
+        *,
+        service=None,
     ) -> str:
         if tracks and tracks.selected:
-            plan = self.delivery_plan(playback, settings, tracks)
+            plan = self.delivery_plan(playback, settings, tracks, service=service)
             return self.downloader.command_line(plan)
-        return api.command_line(self.download_options(playback, settings))
+        return api.command_line(self.download_options(playback, settings, service=service))
 
     @staticmethod
     def sync_sidecar_selection(playback: Playback, tracks: TrackSet) -> None:
@@ -3471,11 +3488,12 @@ class Engine:
         tracks: TrackSet | None = None,
         *,
         service_id: str = "",
+        service=None,
     ) -> Path:
         """Write the command to disk, mirroring the old ``download_commands/`` habit."""
         from datetime import datetime
 
-        command = self.command_for(playback, settings, tracks)
+        command = self.command_for(playback, settings, tracks, service=service)
         service = _folder_name(service_id or playback.title.service or "unknown")
         directory = self.config.paths.commands / service
         private_directory(directory)
@@ -3623,14 +3641,14 @@ class Engine:
         ``pause`` holds workers between segments without ending the job; the
         same run continues when it is cleared.
         """
-        command = self.command_for(playback, settings, tracks)
+        command = self.command_for(playback, settings, tracks, service=service)
         debug_recorder = None
         debug_context = None
         debug_path = (
             self.config.paths.logs
             / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', playback.save_name)[:100]}_"
             f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.log"
-            if bool(settings.get("debug", False))
+            if bool(settings.get("debug", False)) and _service_debug_logging_enabled(service)
             else None
         )
         debug_token = None
@@ -3678,7 +3696,7 @@ class Engine:
         try:
             if tracks is None:
                 tracks = self.load_tracks(playback, settings, service=service)
-            plan = self.delivery_plan(playback, settings, tracks)
+            plan = self.delivery_plan(playback, settings, tracks, service=service)
             command = self.downloader.command_line(plan)
             progress_screen = (
                 _StructuredProgressScreen(

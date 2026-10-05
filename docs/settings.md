@@ -26,7 +26,9 @@ running a source checkout with the `unidl` command from another installation,
 run `uv sync` (or `python -m pip install -e .`) in that checkout, or set
 `UNIDL_SERVICES` to the directory containing the package. Homepage visibility is
 a separate checkbox list: an unchecked registered service remains available to
-global search but is omitted from the homepage grid.
+global search but is omitted from the homepage grid. If a previously registered
+package is temporarily unavailable during startup, UniDL keeps its registration
+and will use it again when the package is discovered.
 
 **Export manifest type** is stored independently in each registered service's
 `settings.json` namespace. The legacy/default value is **master manifest**: a
@@ -177,7 +179,7 @@ heartbeat interval is part of the shared settings contract.
 | `dolby_vision_hybrid` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. For VOD only, a selected HDR10/HDR10+ base is combined with the lowest-resolution available DV layer from the same manifest or merged profile ladder using `dovi_tool`. |
 | `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty uses YAML `paths.downloads` when configured, otherwise `~/unidl_downloads`, grouped by service. No YAML editing is required; `~` is expanded and the folder is created if it does not exist. |
 | `filename_style` | `dot` / `space` / `hyphen` | `dot` | Compatibility key controlled by **Files & naming → Naming templates**. Chooses separators for the final title and release name while preserving the selected template fields. |
-| `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
+| `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. A service may explicitly set `DEBUG_LOGGING = False` in its service class to suppress diagnostic files for that service; the TUI reports the opt-out. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
 | `retries` | integer | `5` | Compatibility key controlled by **Download behavior**. Segment retry count for the native engine. |
 | `http_timeout` | seconds | `30` | Compatibility key controlled by **Download behavior**. HTTP timeout for native segment requests. |

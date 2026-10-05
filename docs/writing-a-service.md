@@ -91,6 +91,25 @@ runtime registration automatically after restart.
 That is a complete service. You did not write a menu, a login prompt, a track
 picker, a CDM call, a filename builder or a download command.
 
+## Debug-log policy
+
+Global **Debug mode** normally records the service session and API request
+diagnostics so a failed flow can be reproduced. A service author who ships
+compiled code or otherwise must not expose those request details can opt out in
+the service's `__init__.py`:
+
+```python
+class Example(Service):
+    DEBUG_LOGGING = False
+```
+
+The declaration is deliberately opt-out: omitting it, or leaving it `True`,
+keeps the normal debug files. When the user has Debug mode enabled for a service
+that opted out, UniDL keeps the ordinary TUI status/error messages but does not
+create the session/API diagnostic file, downloader debug metadata, or retained
+debug temporary set. The TUI log states that this service declined file
+collection for the run.
+
 ## File layout
 
 One package per service:

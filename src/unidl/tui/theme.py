@@ -739,8 +739,10 @@ DownloadScreen.active-ask #delivery-audio-side {
 }
 
 #statusline {
+    width: 1fr;
     height: 1;
     padding: 0 2;
+    align: center middle;
 }
 .pill {
     width: auto;

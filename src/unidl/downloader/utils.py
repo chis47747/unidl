@@ -1,9 +1,55 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 import re
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
+
+# Windows' traditional path APIs reject paths at 260 characters. Keep a
+# margin for temporary/decryption suffixes added after a track filename is
+# chosen. Long-path-aware installations keep their original names until this
+# limit is actually needed.
+WINDOWS_PATH_LIMIT = 240
+WINDOWS_INTERMEDIATE_PATH_LIMIT = 220
+
+
+def bounded_path(path: str | Path, *, max_length: int = WINDOWS_PATH_LIMIT, force: bool = False) -> Path:
+    """Shorten only the final path component when Windows needs it.
+
+    The complete original path is part of the digest, so two long titles do
+    not collapse onto the same resume/output name. ``force`` is available for
+    platform-independent regression tests; production calls use the host
+    platform automatically.
+    """
+    target = Path(path)
+    if not force and os.name != "nt":
+        return target
+    text = str(target)
+    if len(text) <= max_length:
+        return target
+    parent = target.parent
+    suffix = target.suffix
+    stem = target.name[: -len(suffix)] if suffix else target.name
+    digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+    available = max_length - len(str(parent)) - len(suffix) - len(digest) - 2
+    if available < 1:
+        # The parent itself is too long. There is no safe filename-only
+        # rewrite; the caller can choose a shorter output directory or enable
+        # Win32 long paths.
+        return target
+    return parent / f"{stem[:available]}_{digest}{suffix}"
+
+
+def windows_long_path(path: str | Path) -> str:
+    """Return an extended-length Windows path for cleanup operations."""
+    text = os.path.abspath(os.fspath(path))
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
 
 
 def is_url(value: str) -> bool:
@@ -340,11 +386,20 @@ def ceil_div_duration(total_seconds: float | None, duration_ticks: int, timescal
 
 
 def unique_path(path: str | Path) -> Path:
-    target = Path(path)
+    target = bounded_path(path)
     if not target.exists():
         return target
     for index in range(1, 10000):
-        candidate = target.with_name(f"{target.stem}_{index}{target.suffix}")
+        candidate = bounded_path(target.with_name(f"{target.stem}_{index}{target.suffix}"))
         if not candidate.exists():
             return candidate
     raise FileExistsError(f"Could not find an unused output path for {target}")
+
+
+__all__ = [
+    "WINDOWS_INTERMEDIATE_PATH_LIMIT",
+    "WINDOWS_PATH_LIMIT",
+    "bounded_path",
+    "windows_long_path",
+    "unique_path",
+]

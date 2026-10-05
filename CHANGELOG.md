@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.3.1] - 2026-10-05
+
+### Windows paths
+
+- Shortened Windows output and temporary paths when legacy path limits would otherwise cause `WinError 206` during download, post-processing, or cleanup.
+
+### Service diagnostics
+
+- Allowed service authors to disable persisted Debug/API diagnostics with `DEBUG_LOGGING = False` while keeping the user-visible TUI notice.
+
+### Service registration
+
+- Preserved registered services across temporary discovery failures and recovered registrations cleared by older startup logic.
+
+### Terminal status
+
+- Centered the status information row across the available terminal width.
+
 ## [2.3.0] - 2026-10-04
 
 ### Service discovery

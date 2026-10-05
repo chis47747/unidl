@@ -37,7 +37,7 @@ from .sabr_ump import (
     probe_sabr_ump_dvr_first_media_sequence,
     probe_sabr_ump_dvr_sequence_window,
 )
-from .utils import is_url, source_path, unique_path
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, is_url, source_path, unique_path, windows_long_path
 
 KNOWN_OUTPUT_SUFFIXES = {
     ".aac",
@@ -507,14 +507,14 @@ def download_stream(
             )
         except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
             if not (keep_temp or resume) and temp_root.exists():
-                shutil.rmtree(temp_root, ignore_errors=True)
+                shutil.rmtree(windows_long_path(temp_root), ignore_errors=True)
             raise DownloadError(f"aria2c download failed: {_error_text(exc)}") from exc
         size = output_path.stat().st_size if output_path.exists() else 0
         part_paths = [temp_root / f"{index:08d}.part" for index in range(len(urls))]
         sections = _write_section_outputs(output_path, part_paths, urls)
         _emit_progress(progress, stream, len(urls), len(urls), size, size, start, done=True)
         if not (keep_temp or resume or sections) and temp_root.exists():
-            shutil.rmtree(temp_root, ignore_errors=True)
+            shutil.rmtree(windows_long_path(temp_root), ignore_errors=True)
         return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root if keep_temp or resume or sections else None, sections=sections or None, parts=part_paths)
     if downloader != "python":
         raise DownloadError(f"Unsupported downloader: {downloader}")
@@ -585,7 +585,7 @@ def download_stream(
                 return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root, parts=part_paths)
         finally:
             if not (preserve_parts or resume or sections) and temp_root.exists():
-                shutil.rmtree(temp_root, ignore_errors=True)
+                shutil.rmtree(windows_long_path(temp_root), ignore_errors=True)
         return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root if resume or preserve_parts else None, parts=part_paths)
 
     temp_root = _resume_temp_dir(stream, output_path, temp_dir, urls) if resume else _transient_temp_dir(output_path, temp_dir, "parts")
@@ -722,7 +722,7 @@ def download_stream(
             return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root, sections=sections or None, parts=part_paths)
     finally:
         if not (preserve_parts or resume or sections) and temp_root.exists():
-            shutil.rmtree(temp_root, ignore_errors=True)
+            shutil.rmtree(windows_long_path(temp_root), ignore_errors=True)
     return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root if preserve_parts or resume or sections else None, sections=sections or None, parts=part_paths)
 
 
@@ -3855,10 +3855,13 @@ def _output_path(stream: StreamInfo, output_dir: str | Path, filename: str | Non
     if filename:
         path = Path(filename)
         if _has_known_output_suffix(path):
-            return unique_path(path if path.is_absolute() else output_dir / path)
-        return unique_path(output_dir / f"{filename}.{_default_extension(stream)}")
+            candidate = path if path.is_absolute() else output_dir / path
+            return unique_path(bounded_path(candidate, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT))
+        candidate = output_dir / f"{filename}.{_default_extension(stream)}"
+        return unique_path(bounded_path(candidate, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT))
     stem = _safe_name(stream.name or stream.id or stream.display_prefix().lower())
-    return unique_path(output_dir / f"{stem}.{_default_extension(stream)}")
+    candidate = output_dir / f"{stem}.{_default_extension(stream)}"
+    return unique_path(bounded_path(candidate, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT))
 
 
 def _copy_file_to_output(path: Path, output) -> None:

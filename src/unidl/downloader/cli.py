@@ -121,6 +121,8 @@ from .sample_aes import decrypt_sample_aes_parts, uses_legacy_sample_aes
 from .selection import SelectionOptions, select_streams
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import (
+    WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    bounded_path,
     compact_join,
     format_bitrate,
     format_frame_rate,
@@ -130,6 +132,7 @@ from .utils import (
     pretty_codec,
     unique_path,
     video_codec_family,
+    windows_long_path,
 )
 from .vgc import VgcError, finalize_vgc_track, is_vgc_stream, prepare_vgc_streams
 from .webm_decrypt import decrypt_webm_file, decrypt_webm_parts, select_webm_key, webm_key_ids, webm_key_ids_from_bytes
@@ -2978,7 +2981,7 @@ def _prepare_live_pipe_temp_dir(output_path: Path, temp_dir: Path | None) -> Pat
         return Path(tempfile.mkdtemp(prefix="unidown_live_pipe_", dir=str(output_path.parent)))
     pipe_dir = Path(temp_dir).expanduser()
     if pipe_dir.exists():
-        shutil.rmtree(pipe_dir, ignore_errors=True)
+        shutil.rmtree(windows_long_path(pipe_dir), ignore_errors=True)
     pipe_dir.mkdir(parents=True, exist_ok=True)
     return pipe_dir
 
@@ -3068,7 +3071,7 @@ class _LivePipeMuxSession:
         self.finalize_succeeded = False
         self.closed = False
         try:
-            self.output_path.unlink()
+            os.unlink(windows_long_path(self.output_path))
         except FileNotFoundError:
             pass
         self._create_pipes()
@@ -3128,7 +3131,7 @@ class _LivePipeMuxSession:
         stderr = self._collect_ffmpeg_stderr(terminate=self.writer_error is not None, timeout=8 if cancelled else 20)
         self._finalize_live_pipe_output(cancelled=cancelled)
         if getattr(self.args, "del_after_done", True) and not getattr(self.args, "keep_temp", False):
-            shutil.rmtree(self.pipe_dir, ignore_errors=True)
+            shutil.rmtree(windows_long_path(self.pipe_dir), ignore_errors=True)
         if not cancelled and self.writer_error is not None and not self._writer_error_is_clean_eof():
             message = self._ffmpeg_exit_message("live pipe mux stopped while writing media")
             raise RuntimeError(message) from self.writer_error
@@ -4104,7 +4107,7 @@ class _LivePipeMuxSession:
         ]
         result = managed_run(args, capture_output=True)
         try:
-            joined.unlink()
+            os.unlink(windows_long_path(joined))
         except OSError:
             pass
         if result.returncode:
@@ -7343,7 +7346,10 @@ def _log_line(args: argparse.Namespace, message: str) -> None:
 def _write_meta_json(output_dir: Path, save_name: str | None, streams, selected) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     base = _save_name_base(save_name) if save_name else "unidl"
-    path = output_dir / f"{_safe_output_name(base)}.meta.json"
+    path = bounded_path(
+        output_dir / f"{_safe_output_name(base)}.meta.json",
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     data = {
         "streams": [stream.as_dict(include_segments=False) for stream in streams],
         "selected": [stream.as_dict(include_segments=True) for stream in selected],
@@ -7362,7 +7368,7 @@ def _task_temp_root(args: argparse.Namespace, streams, default_save_base: str | 
     # prefix is only for diagnostics and does not affect resume matching.
     safe_label = _short_temp_label(_save_name_base(str(label)), 40)
     digest = hashlib.sha1(_task_temp_payload(args, streams).encode("utf-8")).hexdigest()[:12]
-    return base_root / f"{safe_label}_{digest}"
+    return bounded_path(base_root / f"{safe_label}_{digest}", max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
 
 
 def _legacy_task_temp_root(args: argparse.Namespace, streams, default_save_base: str | None) -> Path:
@@ -8456,12 +8462,17 @@ def _mux_output_path(
         target = output
         if force_suffix:
             target = target.with_suffix(f".{mux_format.lstrip('.').lower()}")
-        return unique_path(target)
+        return unique_path(bounded_path(target, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT))
     suffix = f".{mux_format.lstrip('.').lower()}"
     if save_name:
         base = _save_name_base(save_name)
-        return unique_path(output / f"{base}{suffix}")
-    return unique_path(output / f"{default_save_base or time.strftime('unidown_%Y%m%d_%H%M%S')}{suffix}")
+        return unique_path(bounded_path(output / f"{base}{suffix}", max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT))
+    return unique_path(
+        bounded_path(
+            output / f"{default_save_base or time.strftime('unidown_%Y%m%d_%H%M%S')}{suffix}",
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
+    )
 
 
 def _cleanup_intermediate_files(paths: list[Path], protected: list[Path], args: argparse.Namespace, colors: bool | None = None) -> None:
@@ -8485,7 +8496,7 @@ def _cleanup_intermediate_files(paths: list[Path], protected: list[Path], args: 
         if not path.is_file():
             continue
         try:
-            path.unlink()
+            os.unlink(windows_long_path(path))
         except OSError:
             failed.append(path)
             continue
@@ -8522,7 +8533,7 @@ def _cleanup_replaced_intermediate(previous_path: Path, current_path: Path, args
     if not previous.exists() or not previous.is_file():
         return False
     try:
-        previous.unlink()
+        os.unlink(windows_long_path(previous))
     except OSError:
         print(f"{paint('Intermediate cleanup warning:', Palette.yellow, colors)} could not remove {previous}", file=sys.stderr)
         _log_line(args, f"Intermediate cleanup warning: {previous}")
@@ -8544,7 +8555,7 @@ def _cleanup_track_temp_dir(temp_dir: Path | None, args: argparse.Namespace, col
     if not path.exists():
         return None
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(windows_long_path(path))
     except OSError:
         print(f"{paint('Temp cleanup warning:', Palette.yellow, colors)} could not remove {path}", file=sys.stderr)
         _log_line(args, f"Temp cleanup warning: {path}")
@@ -8575,7 +8586,7 @@ def _cleanup_temp_dirs(temp_dirs: list[Path], args: argparse.Namespace, colors: 
         if not temp_dir.exists():
             continue
         try:
-            shutil.rmtree(temp_dir)
+            shutil.rmtree(windows_long_path(temp_dir))
         except OSError:
             failed.append(temp_dir)
             continue

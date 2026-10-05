@@ -24,6 +24,8 @@ from .settings import SettingsStore
 GLOBAL_SCOPE = "@global"
 REGISTERED_KEY = "registered_services"
 HOME_KEY = "home_services"
+REGISTRATION_STATE_VERSION_KEY = "registration_state_version"
+REGISTRATION_STATE_VERSION = 2
 SOURCE_IMPLEMENTATION = "source"
 COMPILED_ONLY_IMPLEMENTATION = "compiled-only"
 SUPPORTED_IMPLEMENTATIONS = frozenset({SOURCE_IMPLEMENTATION, COMPILED_ONLY_IMPLEMENTATION})
@@ -320,39 +322,79 @@ def _stored_ids(store: SettingsStore, key: str) -> tuple[list[str], bool]:
     return _ids(values.get(key)), key in values
 
 
+def _backup_ids(store: SettingsStore, key: str) -> list[str]:
+    """Read one registration list from the atomic settings backup, if valid."""
+    try:
+        backup = store._read(store.backup_path)  # type: ignore[attr-defined]
+    except (OSError, AttributeError):
+        return []
+    values = backup.get(GLOBAL_SCOPE, {}) if isinstance(backup, dict) else {}
+    return _ids(values.get(key)) if isinstance(values, dict) else []
+
+
 def ensure_state(store: SettingsStore, service_ids: Iterable[str]) -> tuple[set[str], set[str]]:
     """Initialize or sanitize registration/home selections.
 
     Existing installs have no registration keys yet. Treat all currently loaded
     services as registered once, preserving the pre-2.0.6 experience. Future
     service packages are then absent from the persisted list until explicitly
-    registered in the TUI.
+    registered in the TUI. Once a user registers an ID, keep it even when the
+    package is temporarily unavailable; discovery is allowed to recover later.
     """
 
     available = {str(value).strip().lower() for value in service_ids if str(value).strip()}
     registered, had_registered = _stored_ids(store, REGISTERED_KEY)
     home, had_home = _stored_ids(store, HOME_KEY)
+    state_version = store.values_for(GLOBAL_SCOPE).get(REGISTRATION_STATE_VERSION_KEY)
     changed = False
+    # UniDL 2.0.6–2.3.0 could overwrite a valid list with [] when discovery
+    # returned no classes. Recover that state once from the atomic backup.
+    if had_registered and not registered and state_version is None:
+        recovered = _backup_ids(store, REGISTERED_KEY)
+        if recovered:
+            registered = recovered
+            store.put(GLOBAL_SCOPE, REGISTERED_KEY, registered)
+            changed = True
+        if had_home and not home:
+            recovered_home = _backup_ids(store, HOME_KEY)
+            if recovered_home:
+                home = recovered_home
+                store.put(GLOBAL_SCOPE, HOME_KEY, home)
+                changed = True
     if not had_registered:
-        registered = sorted(available)
-        store.put(GLOBAL_SCOPE, REGISTERED_KEY, registered)
-        changed = True
+        # A first launch with no discoverable packages is not evidence that the
+        # user wants an empty registration list. Leave the key absent until a
+        # real package scan succeeds; otherwise a transient install/path issue
+        # becomes indistinguishable from an intentional reset.
+        if available:
+            registered = sorted(available)
+            store.put(GLOBAL_SCOPE, REGISTERED_KEY, registered)
+            changed = True
     else:
-        clean = sorted(set(registered) & available)
-        if clean != sorted(registered):
+        # Keep registered IDs even when a service root is temporarily missing
+        # or a package failed to load during startup. Registration is a user
+        # choice, not a mirror of this launch's discovery result; pruning
+        # against ``available`` made a transient empty scan unregister every
+        # service and forced the user through the manager again.
+        clean = list(dict.fromkeys(registered))
+        if clean != registered:
             registered = clean
             store.put(GLOBAL_SCOPE, REGISTERED_KEY, registered)
             changed = True
     if not had_home:
-        home = list(registered)
-        store.put(GLOBAL_SCOPE, HOME_KEY, home)
-        changed = True
+        if registered:
+            home = list(registered)
+            store.put(GLOBAL_SCOPE, HOME_KEY, home)
+            changed = True
     else:
         clean_home = sorted(set(home) & set(registered))
         if clean_home != sorted(home):
             home = clean_home
             store.put(GLOBAL_SCOPE, HOME_KEY, home)
             changed = True
+    if (available or had_registered or had_home) and state_version != REGISTRATION_STATE_VERSION:
+        store.put(GLOBAL_SCOPE, REGISTRATION_STATE_VERSION_KEY, REGISTRATION_STATE_VERSION)
+        changed = True
     if changed:
         store.save()
     return set(registered), set(home)
@@ -376,6 +418,7 @@ def update_registration(store: SettingsStore, service_id: str, enabled: bool) ->
     else:
         current.discard(service_id)
     store.put(GLOBAL_SCOPE, REGISTERED_KEY, sorted(current))
+    store.put(GLOBAL_SCOPE, REGISTRATION_STATE_VERSION_KEY, REGISTRATION_STATE_VERSION)
     home = home_ids(store)
     if enabled:
         home.add(service_id)
@@ -391,6 +434,7 @@ def update_home(store: SettingsStore, service_ids: Iterable[str]) -> None:
     registered = registered_ids(store)
     chosen = {str(value).strip().lower() for value in service_ids if str(value).strip()}
     store.put(GLOBAL_SCOPE, HOME_KEY, sorted(chosen & registered))
+    store.put(GLOBAL_SCOPE, REGISTRATION_STATE_VERSION_KEY, REGISTRATION_STATE_VERSION)
     store.save()
 
 
@@ -421,6 +465,8 @@ def update_export_manifest_type(
 
 __all__ = [
     "HOME_KEY",
+    "REGISTRATION_STATE_VERSION",
+    "REGISTRATION_STATE_VERSION_KEY",
     "COMPILED_ONLY_IMPLEMENTATION",
     "REGISTERED_KEY",
     "SOURCE_IMPLEMENTATION",

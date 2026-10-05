@@ -108,6 +108,7 @@ class ServiceContext:
     settings: Settings
     tokens: TokenStore
     service_id: str
+    debug_logging: bool = True
     device_path: Path | None = None
     device_name: str = ""
     proxy: str | None = None
@@ -226,7 +227,10 @@ class ServiceContext:
         return load_module(self.helper(key), name)
 
     def runner(self, log=None) -> HelperRunner:
-        return HelperRunner(log=log, debug=bool(self.settings.get("debug", False)))
+        return HelperRunner(
+            log=log,
+            debug=bool(self.settings.get("debug", False)) and self.debug_logging,
+        )
 
     def refresh_proxy(self) -> None:
         """Re-resolve the proxy after the choice was changed elsewhere.
@@ -358,6 +362,12 @@ class Service:
     #: day somebody tries to add a second kind.
     MODE: str = "native"
 
+    #: Debug logging is opt-out by service authors. Set this to ``False`` in
+    #: the service's ``__init__.py`` when API/request diagnostics must never be
+    #: written to a user's debug log. The global Debug setting remains visible
+    #: in the TUI, which reports that this service declined file collection.
+    DEBUG_LOGGING: bool = True
+
     USES: Capabilities = Capabilities()
 
     #: service-specific settings; the shared track settings are appended by core
@@ -451,6 +461,11 @@ class Service:
     def tag(cls) -> str:
         """The service tag, declared or derived from the id."""
         return cls.TAG or service_tag(cls.ID)
+
+    @classmethod
+    def debug_logging_enabled(cls) -> bool:
+        """Whether this service permits debug diagnostics to be persisted."""
+        return bool(getattr(cls, "DEBUG_LOGGING", True))
 
     @classmethod
     def media_types(cls) -> tuple[str, ...]:
@@ -1684,6 +1699,7 @@ class ServiceRegistry:
                 legacy_dirs=[config.paths.tokens / legacy for legacy in service_cls.LEGACY_IDS],
             ),
             service_id=service_cls.ID,
+            debug_logging=service_cls.debug_logging_enabled(),
             device_path=config.device_for(
                 service_cls.ID, legacy_ids=service_cls.LEGACY_IDS
             ),
