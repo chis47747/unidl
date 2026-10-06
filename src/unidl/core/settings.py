@@ -1196,7 +1196,7 @@ TRACK_SETTINGS: list[Setting] = [
     _choice(
         "video_codec",
         "Video codec",
-        [("any", "Any"), ("h264", "H.264"), ("h265", "H.265 / HEVC"), ("av1", "AV1"), ("vp9", "VP9")],
+        [("any", "Any"), ("h264", "H.264"), ("h265", "H.265 / HEVC"), ("h266", "H.266 / VVC"), ("av1", "AV1"), ("vp9", "VP9")],
         "any",
     ),
     _choice(
@@ -1208,8 +1208,41 @@ TRACK_SETTINGS: list[Setting] = [
     _choice(
         "audio_codec",
         "Audio codec",
-        [("any", "Any"), ("aac", "AAC"), ("ac3", "AC-3"), ("eac3", "E-AC-3"), ("atmos", "Atmos")],
+        [
+            ("any", "Any"),
+            ("aac", "AAC"),
+            ("ac3", "AC-3"),
+            ("eac3", "E-AC-3"),
+            ("opus", "Opus"),
+            ("flac", "FLAC"),
+            ("alac", "ALAC"),
+            ("mp3", "MP3"),
+            # Kept for old settings files; Core interprets it as the Atmos
+            # profile and new users should use audio_profile instead.
+            ("atmos", "Atmos (legacy profile)"),
+        ],
         "any",
+    ),
+    _choice(
+        "audio_profile",
+        "Audio profile",
+        [
+            ("any", "Any"),
+            ("atmos", "Atmos"),
+            ("main", "Main / primary"),
+            ("description", "Audio description"),
+            ("commentary", "Commentary"),
+            ("dialog", "Dialog"),
+        ],
+        "any",
+        "A profile is an audio feature or role, not the codec. Atmos is normally E-AC-3 plus a JOC/Atmos marker.",
+    ),
+    _choice(
+        "audio_quality",
+        "Audio quality",
+        [("best", "Best available"), ("worst", "Worst available")],
+        "best",
+        "Quality is ranked only after language, codec, profile and channel filters have matched.",
     ),
     _choice(
         "audio_channels",
@@ -1217,8 +1250,41 @@ TRACK_SETTINGS: list[Setting] = [
         [("any", "Any"), ("2", "Stereo"), ("6", "5.1"), ("8", "7.1")],
         "any",
     ),
-    Setting("audio_langs", "Audio languages", "text", default="", help="Comma separated, e.g. en,es. Empty = best only."),
-    Setting("sub_langs", "Subtitle languages", "text", default="all", help="Comma separated, 'all', or empty to skip."),
+    Setting(
+        "audio_langs",
+        "Audio languages",
+        "text",
+        default="",
+        help="Comma separated BCP-47/ISO tags, e.g. en,es-419. Empty = best available language.",
+    ),
+    _choice(
+        "audio_selection",
+        "Audio selection",
+        [("best", "Best one per language"), ("all", "All matching tracks")],
+        "best",
+        "Best one per language keeps commentary and duplicate renditions out unless All is chosen.",
+    ),
+    Setting(
+        "sub_langs",
+        "Subtitle languages",
+        "text",
+        default="all",
+        help="Comma separated BCP-47/ISO tags, 'all', or empty to skip.",
+    ),
+    Setting(
+        "subtitle_kinds",
+        "Subtitle types",
+        "text",
+        default="normal,forced",
+        help="Comma separated: normal, forced, sdh, commentary, audio_description, or all.",
+    ),
+    _choice(
+        "subtitle_selection",
+        "Subtitle selection",
+        [("all", "All matching tracks"), ("best", "Best one per language")],
+        "all",
+        "Normal and forced may both be selected. Choose Best one when only one subtitle per language is wanted.",
+    ),
     Setting(
         "drop_video",
         "Ignore video tracks matching",

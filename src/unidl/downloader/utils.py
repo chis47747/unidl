@@ -4,6 +4,7 @@ import hashlib
 import math
 import os
 import re
+import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -12,7 +13,11 @@ from urllib.parse import unquote, urljoin, urlparse
 # chosen. Long-path-aware installations keep their original names until this
 # limit is actually needed.
 WINDOWS_PATH_LIMIT = 240
-WINDOWS_INTERMEDIATE_PATH_LIMIT = 220
+# Generated paths gain additional components/suffixes during download and
+# post-processing (``vod``, ``sections``, ``.dec``, ``.tmp``).  Keep a second
+# margin below the final safe limit so those derived paths remain creatable on
+# Windows even when the original output title is very long.
+WINDOWS_INTERMEDIATE_PATH_LIMIT = 200
 
 
 def bounded_path(path: str | Path, *, max_length: int = WINDOWS_PATH_LIMIT, force: bool = False) -> Path:
@@ -40,6 +45,53 @@ def bounded_path(path: str | Path, *, max_length: int = WINDOWS_PATH_LIMIT, forc
         # Win32 long paths.
         return target
     return parent / f"{stem[:available]}_{digest}{suffix}"
+
+
+def safe_temp_root(
+    path: str | Path,
+    *,
+    max_length: int = WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    force: bool = False,
+) -> Path:
+    """Return a root that leaves room for UniDL's generated temp children.
+
+    A filename-only shortening cannot repair a temp directory whose parent is
+    already close to MAX_PATH.  On Windows, keep a deterministic, compact
+    mirror under the system temp directory in that case.  The digest preserves
+    isolation between configured roots and keeps resume caches stable across
+    runs.  ``force`` is used by platform-independent path regression tests.
+    """
+    root = Path(path).expanduser()
+    if not force and os.name != "nt":
+        return root
+    text = os.path.abspath(os.fspath(root))
+    # Leave enough room for a task/track directory, a section directory, and a
+    # generated filename/suffix.  This is intentionally stricter than the
+    # final output limit because temp paths are nested several levels deep.
+    if len(text) <= max_length - 72:
+        return root
+    digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+    compact = Path(tempfile.gettempdir()) / "unidl" / digest
+    return compact
+
+
+def bounded_child_path(
+    parent: str | Path,
+    name: str,
+    *,
+    max_length: int = WINDOWS_PATH_LIMIT,
+    force: bool = False,
+) -> Path:
+    """Build a child path while preserving its extension and stable identity."""
+    target = bounded_path(Path(parent) / name, max_length=max_length, force=force)
+    if (force or os.name == "nt") and len(str(target)) > max_length:
+        # The parent itself may already exceed the budget.  This helper is for
+        # generated children (temp/section directories), so it is safe to use
+        # the deterministic compact temp mirror instead of returning a path
+        # that Windows cannot create.
+        compact_parent = safe_temp_root(parent, max_length=max_length, force=force)
+        target = bounded_path(compact_parent / name, max_length=max_length, force=force)
+    return target
 
 
 def windows_long_path(path: str | Path) -> str:
@@ -400,6 +452,8 @@ __all__ = [
     "WINDOWS_INTERMEDIATE_PATH_LIMIT",
     "WINDOWS_PATH_LIMIT",
     "bounded_path",
+    "bounded_child_path",
+    "safe_temp_root",
     "windows_long_path",
     "unique_path",
 ]

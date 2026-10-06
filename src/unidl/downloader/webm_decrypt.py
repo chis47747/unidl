@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .embedding import managed_run
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path
 
 CONTENT_ENCODINGS_ID = 0x6D80
 CONTENT_ENCODING_ID = 0x6240
@@ -70,7 +71,7 @@ def decrypt_webm_parts(
         raise ValueError("WebM decryption key must be 16 bytes / 32 hex characters.")
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output.with_name(f"{output.name}.tmp")
+    tmp = bounded_path(output.with_name(f"{output.name}.tmp"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     with tmp.open("wb") as target:
         for index, part in enumerate(parts):
             with part.open("rb") as source:
@@ -88,7 +89,7 @@ def decrypt_webm_file(input_path: str | Path, key_hex: str, output_path: str | P
     key = bytes.fromhex(key_hex)
     if len(key) != 16:
         raise ValueError("WebM decryption key must be 16 bytes / 32 hex characters.")
-    tmp = output.with_name(f"{output.name}.tmp")
+    tmp = bounded_path(output.with_name(f"{output.name}.tmp"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     with input_file.open("rb") as source, tmp.open("wb") as target:
         _rewrite_webm_stream(source, target, key, strip_track_encryption=True)
     tmp.replace(output)

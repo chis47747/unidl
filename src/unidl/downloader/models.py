@@ -149,6 +149,8 @@ class StreamInfo:
             ]
         elif self.media_type in {"subtitle", "subtitles", "text"}:
             display_name = self.name if self.name not in {self.group_id, self.id} else None
+            subtitle_kind = _subtitle_kind_label(self)
+            descriptor_text = str(descriptor or "").casefold()
             parts = [
                 self.group_id or self.id,
                 self.language,
@@ -156,6 +158,8 @@ class StreamInfo:
                 pretty_codec(self.codecs, self.media_type),
                 *common_tail,
             ]
+            if subtitle_kind.casefold() not in descriptor_text:
+                parts.append(subtitle_kind)
         else:
             actual_bitrate = self.extra.get("actual_bitrate")
             actual_bitrate_text = (
@@ -224,3 +228,29 @@ class StreamInfo:
         if include_segments:
             data["segments"] = [segment.as_dict() for segment in self.segments]
         return data
+
+
+def _subtitle_kind_label(stream: StreamInfo) -> str:
+    """Display normalized subtitle classes without discarding provider metadata."""
+    extra = stream.extra if isinstance(stream.extra, dict) else {}
+    text = " ".join(
+        str(item or "")
+        for item in (stream.id, stream.group_id, stream.name, stream.role, extra.get("characteristics"))
+    ).casefold().replace("-", " ").replace("_", " ")
+    compact = "".join(text.split())
+    labels: list[str] = []
+    if extra.get("forced") or extra.get("forced_track") or "forced" in compact:
+        labels.append("Forced")
+    if (
+        extra.get("sdh")
+        or extra.get("cc")
+        or extra.get("closed_captions")
+        or any(marker in compact for marker in ("sdh", "closedcaption", "hearingimpaired", "describesmusicandsound", "transcribesspokendialog"))
+        or "accessibility" in text
+    ):
+        labels.append("SDH")
+    if "commentary" in compact:
+        labels.append("Commentary")
+    if "audiodescription" in compact or "descriptive" in compact:
+        labels.append("Audio Description")
+    return " + ".join(labels) if labels else "Normal"

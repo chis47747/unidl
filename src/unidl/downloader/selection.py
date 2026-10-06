@@ -17,6 +17,13 @@ class SelectionOptions:
     subtitle_lang: str | None = None
     video_range: str | None = None
     audio_type: str | None = None
+    audio_codec: str | None = None
+    audio_profile: str | None = None
+    audio_quality: str | None = None
+    audio_selection: str | None = None
+    audio_channels: str | None = None
+    subtitle_kind: str | None = None
+    subtitle_selection: str | None = None
     select_video: str | None = None
     select_audio: str | None = None
     select_subtitle: str | None = None
@@ -32,6 +39,13 @@ class SelectionOptions:
                 self.subtitle_lang,
                 self.video_range,
                 self.audio_type,
+                self.audio_codec,
+                self.audio_profile,
+                self.audio_quality,
+                self.audio_selection,
+                self.audio_channels,
+                self.subtitle_kind,
+                self.subtitle_selection,
                 self.select_video,
                 self.select_audio,
                 self.select_subtitle,
@@ -39,21 +53,54 @@ class SelectionOptions:
         )
 
 
+@dataclass(slots=True)
+class SelectionResult:
+    """Selected streams plus any hard constraints that matched nothing."""
+
+    selected: list[StreamInfo]
+    unmatched: tuple[str, ...] = ()
+
+
 def select_streams(streams: list[StreamInfo], options: SelectionOptions) -> list[StreamInfo]:
+    result = select_streams_detailed(streams, options)
+    return [] if result.unmatched else result.selected
+
+
+def select_streams_detailed(streams: list[StreamInfo], options: SelectionOptions) -> SelectionResult:
     selected: list[StreamInfo] = []
+    unmatched: list[str] = []
 
     video_candidates = [stream for stream in streams if stream.media_type == "video"]
     audio_candidates = [stream for stream in streams if stream.media_type == "audio"]
     subtitle_candidates = [stream for stream in streams if stream.media_type in {"subtitle", "subtitles", "text"}]
 
     if options.video or options.video_lang or options.video_range or options.select_video:
-        selected.extend(_select_video(video_candidates, options))
-    if options.audio or options.audio_lang or options.audio_type or options.select_audio:
-        selected.extend(_select_audio(audio_candidates, options))
-    if options.subtitle_lang or options.select_subtitle:
-        selected.extend(_select_subtitle(subtitle_candidates, options))
+        video_selected = _select_video(video_candidates, options)
+        selected.extend(video_selected)
+        if video_candidates and not video_selected:
+            unmatched.append(_video_constraint_text(options))
+    if (
+        options.audio
+        or options.audio_lang
+        or options.audio_type
+        or options.audio_codec
+        or options.audio_profile
+        or options.audio_quality
+        or options.audio_selection
+        or options.audio_channels
+        or options.select_audio
+    ):
+        audio_selected = _select_audio(audio_candidates, options)
+        selected.extend(audio_selected)
+        if audio_candidates and not audio_selected:
+            unmatched.append(_audio_constraint_text(options))
+    if options.subtitle_lang or options.subtitle_kind or options.subtitle_selection or options.select_subtitle:
+        subtitle_selected = _select_subtitle(subtitle_candidates, options)
+        selected.extend(subtitle_selected)
+        if subtitle_candidates and not subtitle_selected:
+            unmatched.append(_subtitle_constraint_text(options))
 
-    return _dedupe(selected)
+    return SelectionResult(_dedupe(selected), tuple(unmatched))
 
 
 def _select_video(candidates: list[StreamInfo], options: SelectionOptions) -> list[StreamInfo]:
@@ -87,12 +134,20 @@ def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> li
     expr = _parse_filter_expr(options.select_audio)
     candidates = _apply_common_expr(candidates, expr)
     candidates = _filter_language(candidates, options.audio_lang or expr.get("lang"))
-    candidates = _filter_audio_type(candidates, options.audio_type or expr.get("type") or expr.get("codec") or expr.get("codecs"))
+    codec = options.audio_codec or expr.get("codec") or expr.get("codecs")
+    legacy_type = options.audio_type or expr.get("type")
+    if codec:
+        candidates = _filter_audio_codec(candidates, codec)
+    if legacy_type:
+        candidates = _filter_audio_type(candidates, legacy_type)
+    candidates = _filter_audio_profile(candidates, options.audio_profile or expr.get("profile"))
+    candidates = _filter_channels(candidates, options.audio_channels or expr.get("channels"))
     candidates = _filter_bandwidth(candidates, expr)
 
     targets = _numbers(options.audio or expr.get("bw") or expr.get("bandwidth") or expr.get("bitrate"))
     mode = _mode(options.audio, expr, default="best")
-    if mode == "all":
+    quality = (options.audio_quality or mode or "best").lower()
+    if options.audio_selection == "all" or mode == "all":
         return candidates
     if targets:
         selected: list[StreamInfo] = []
@@ -105,13 +160,21 @@ def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> li
                 if closest is not None:
                     selected.append(closest)
         return selected
-    if mode.startswith("best"):
+    if quality.startswith("best"):
         buckets = _language_buckets(candidates, options.audio_lang or expr.get("lang"))
         if not buckets:
             buckets = [candidates]
         selected: list[StreamInfo] = []
         for bucket in buckets:
             selected.extend(_top_n(bucket, _best_count(mode), key=_audio_sort_key))
+        return selected
+    if quality.startswith("worst"):
+        buckets = _language_buckets(candidates, options.audio_lang or expr.get("lang"))
+        if not buckets:
+            buckets = [candidates]
+        selected = []
+        for bucket in buckets:
+            selected.extend(_bottom_n(bucket, _best_count(mode), key=_audio_sort_key))
         return selected
     return _top_n(candidates, 1, key=_audio_sort_key)
 
@@ -120,9 +183,17 @@ def _select_subtitle(candidates: list[StreamInfo], options: SelectionOptions) ->
     expr = _parse_filter_expr(options.select_subtitle)
     candidates = _apply_common_expr(candidates, expr)
     candidates = _filter_language(candidates, options.subtitle_lang or expr.get("lang"))
-    mode = _mode(None, expr, default="all")
+    candidates = _filter_subtitle_kind(candidates, options.subtitle_kind or expr.get("kind"))
+    mode = (options.subtitle_selection or _mode(None, expr, default="all")).lower()
     if mode.startswith("best"):
-        return _top_n(candidates, _best_count(mode), key=lambda stream: stream.language or "")
+        language_value = options.subtitle_lang or expr.get("lang")
+        buckets = _language_buckets(candidates, language_value) if language_value else _language_buckets_by_language(candidates)
+        if not buckets:
+            buckets = [candidates]
+        selected: list[StreamInfo] = []
+        for bucket in buckets:
+            selected.extend(_top_n(bucket, _best_count(mode), key=_subtitle_sort_key))
+        return selected
     return candidates
 
 
@@ -175,6 +246,37 @@ def _filter_audio_type(candidates: list[StreamInfo], value: str | None) -> list[
     if not values:
         return candidates
     return [stream for stream in candidates if any(_audio_type_matches(stream, item) for item in values)]
+
+
+def _filter_audio_codec(candidates: list[StreamInfo], value: str | None) -> list[StreamInfo]:
+    values = _tokens(value)
+    if not values or "any" in values:
+        return candidates
+    return [stream for stream in candidates if any(_audio_codec_matches(stream, item) for item in values)]
+
+
+def _filter_audio_profile(candidates: list[StreamInfo], value: str | None) -> list[StreamInfo]:
+    values = _tokens(value)
+    if not values or "any" in values:
+        return candidates
+    return [stream for stream in candidates if any(_audio_profile_matches(stream, item) for item in values)]
+
+
+def _filter_channels(candidates: list[StreamInfo], value: str | None) -> list[StreamInfo]:
+    values = _tokens(value)
+    if not values or "any" in values:
+        return candidates
+    wanted = {_channel_count(number) for token in values for number in re.findall(r"\d+(?:\.\d+)?", token)}
+    if not wanted:
+        return candidates
+    return [stream for stream in candidates if _channel_count(stream.channels) in wanted]
+
+
+def _filter_subtitle_kind(candidates: list[StreamInfo], value: str | None) -> list[StreamInfo]:
+    values = _tokens(value)
+    if not values or "all" in values or "any" in values:
+        return candidates
+    return [stream for stream in candidates if _subtitle_kinds(stream) & set(values)]
 
 
 def _filter_codecs(candidates: list[StreamInfo], value: str | None) -> list[StreamInfo]:
@@ -242,6 +344,10 @@ def _top_n(candidates: list[StreamInfo], count: int, key) -> list[StreamInfo]:
     return sorted(candidates, key=key, reverse=True)[:count]
 
 
+def _bottom_n(candidates: list[StreamInfo], count: int, key) -> list[StreamInfo]:
+    return sorted(candidates, key=key)[:count]
+
+
 def _height(stream: StreamInfo) -> int | None:
     if not stream.resolution or "x" not in stream.resolution:
         return None
@@ -299,6 +405,21 @@ def _channels(stream: StreamInfo) -> float:
     return float(match.group(0)) if match else 0
 
 
+def _channel_count(value: str | float | int | None) -> float:
+    """Normalize `5.1`/`7.1` layouts and numeric channel counts for matching."""
+    if value is None:
+        return 0
+    try:
+        number = float(re.search(r"\d+(?:\.\d+)?", str(value)).group(0))
+    except (AttributeError, ValueError):
+        return 0
+    if number == 5.1:
+        return 6
+    if number == 7.1:
+        return 8
+    return number
+
+
 def _extra_bool(stream: StreamInfo, key: str) -> bool:
     extra = stream.extra if isinstance(stream.extra, dict) else {}
     value = extra.get(key)
@@ -314,9 +435,44 @@ def _extra_bool(stream: StreamInfo, key: str) -> bool:
 def _language_matches(language: str | None, values: list[str]) -> bool:
     if not language:
         return "und" in values or "*" in values
-    language = language.lower()
-    primary = language.split("-", 1)[0]
-    return any(value in {"*", language, primary} for value in values)
+    language_values = _language_tokens(language)
+    wanted = {token for value in values for token in _language_tokens(value)}
+    if "*" in wanted:
+        return True
+    return bool(language_values & wanted)
+
+
+_LANGUAGE_ALIASES = {
+    "eng": "en",
+    "spa": "es",
+    "esl": "es",
+    "fra": "fr",
+    "fre": "fr",
+    "deu": "de",
+    "ger": "de",
+    "ita": "it",
+    "por": "pt",
+    "zho": "zh",
+    "chi": "zh",
+    "jpn": "ja",
+    "kor": "ko",
+    "rus": "ru",
+    "ara": "ar",
+    "hin": "hi",
+}
+
+
+def _language_tokens(value: str | None) -> set[str]:
+    """Return exact, primary and common ISO-639 aliases for a language tag."""
+    raw = str(value or "").strip().replace("_", "-").casefold()
+    if not raw:
+        return set()
+    parts = raw.split("-")
+    primary = _LANGUAGE_ALIASES.get(parts[0], parts[0])
+    tokens = {raw, parts[0], primary}
+    if len(parts) > 1:
+        tokens.add(f"{primary}-{'-'.join(parts[1:])}")
+    return tokens
 
 
 def _range_matches(stream: StreamInfo, value: str) -> bool:
@@ -340,6 +496,11 @@ def _range_matches(stream: StreamInfo, value: str) -> bool:
 
 def _audio_type_matches(stream: StreamInfo, value: str) -> bool:
     value = _normalize_audio_type(value)
+    if value == "atmos":
+        return _audio_profile_matches(stream, value)
+    if value in {"aac", "ac3", "dd", "ddplus", "eac3", "opus", "vorbis", "flac", "alac", "mp3"}:
+        codec = "eac3" if value == "ddplus" else "ac3" if value in {"dd", "ac3"} else value
+        return _audio_codec_matches(stream, codec)
     text = _stream_blob(stream)
     codec = (pretty_codec(stream.codecs, "audio") or stream.codecs or "").lower()
     if value == "atmos":
@@ -353,6 +514,140 @@ def _audio_type_matches(stream: StreamInfo, value: str) -> bool:
     if value == "opus":
         return "opus" in text or "opus" in codec
     return value in text or value in codec
+
+
+def _audio_codec_matches(stream: StreamInfo, value: str) -> bool:
+    value = value.lower().replace("-", "").replace("_", "")
+    codec = (pretty_codec(stream.codecs, "audio") or stream.codecs or "").lower().replace("-", "")
+    text = " ".join(
+        str(item or "").lower()
+        for item in (stream.codecs, stream.name, stream.id, stream.group_id, stream.extra.get("audio_codec"))
+    )
+    aliases = {
+        "aac": ("aac", "mp4a"),
+        "ac3": ("ac3", "ac-3"),
+        "eac3": ("eac3", "ec3", "e-ac-3"),
+        "opus": ("opus",),
+        "vorbis": ("vorbis",),
+        "flac": ("flac",),
+        "alac": ("alac",),
+        "mp3": ("mp3", "mpa"),
+    }
+    if value == "atmos":
+        return False
+    return value in codec or any(alias in text for alias in aliases.get(value, (value,)))
+
+
+def _audio_profile_matches(stream: StreamInfo, value: str) -> bool:
+    value = value.lower().replace("-", "").replace("_", "").replace(" ", "")
+    if value in {"any", ""}:
+        return True
+    if value == "atmos":
+        return _extra_bool(stream, "audio_atmos") or any(
+            marker in _stream_blob(stream) for marker in ("atmos", "joc", "dolbydigitalplusatmos")
+        )
+    kinds = _audio_role_tokens(stream)
+    aliases = {
+        "main": {"main", "primary", "default"},
+        "primary": {"main", "primary", "default"},
+        "description": {"audiodescription", "descriptive", "description"},
+        "audiodescription": {"audiodescription", "descriptive", "description"},
+        "commentary": {"commentary"},
+        "dialog": {"dialog", "dialogue"},
+    }
+    return bool(kinds & aliases.get(value, {value}))
+
+
+def _audio_role_tokens(stream: StreamInfo) -> set[str]:
+    text = _stream_blob(stream).replace("-", " ").replace("_", " ")
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    compact = "".join(tokens)
+    if "description" in compact or "descriptive" in compact or "audiodescription" in compact:
+        tokens.add("audiodescription")
+    if "commentary" in compact:
+        tokens.add("commentary")
+    if "dialog" in compact or "dialogue" in compact:
+        tokens.add("dialog")
+    if "primary" in tokens or "default" in tokens:
+        tokens.add("main")
+    return tokens
+
+
+def _subtitle_kinds(stream: StreamInfo) -> set[str]:
+    extra = stream.extra if isinstance(stream.extra, dict) else {}
+    text = _stream_blob(stream).replace("-", " ").replace("_", " ")
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    kinds: set[str] = set()
+    if _extra_bool(stream, "forced") or _extra_bool(stream, "forced_track") or "forced" in compact:
+        kinds.add("forced")
+    if (
+        _extra_bool(stream, "sdh")
+        or _extra_bool(stream, "cc")
+        or _extra_bool(stream, "closed_captions")
+        or any(marker in compact for marker in ("sdh", "closedcaption", "hearingimpaired", "describesmusicandsound", "transcribesspokendialog"))
+        or "accessibility" in str(extra.get("characteristics") or "").lower()
+    ):
+        kinds.add("sdh")
+    if "commentary" in compact:
+        kinds.add("commentary")
+    if "audiodescription" in compact or "descriptive" in compact:
+        kinds.add("audio_description")
+    if not kinds:
+        kinds.add("normal")
+    return kinds
+
+
+def _subtitle_sort_key(stream: StreamInfo):
+    kinds = _subtitle_kinds(stream)
+    # Prefer a normal full subtitle when the user asks for one best track, then
+    # forced, SDH/CC and service-specific alternatives.
+    priority = 4 if "normal" in kinds else 3 if "forced" in kinds else 2 if "sdh" in kinds else 1
+    return (priority, _extra_bool(stream, "default"), stream.name or "")
+
+
+def _video_constraint_text(options: SelectionOptions) -> str:
+    expr = _parse_filter_expr(options.select_video)
+    bits = []
+    quality = options.video or expr.get("res") or expr.get("height") or expr.get("for")
+    language = options.video_lang or expr.get("lang")
+    range_value = options.video_range or expr.get("range")
+    if quality:
+        bits.append(f"quality={quality}")
+    if language:
+        bits.append(f"language={language}")
+    if range_value:
+        bits.append(f"range={range_value}")
+    return "video (" + ", ".join(bits or ["requested selection"]) + ")"
+
+
+def _audio_constraint_text(options: SelectionOptions) -> str:
+    expr = _parse_filter_expr(options.select_audio)
+    bits = []
+    language = options.audio_lang or expr.get("lang")
+    codec = options.audio_codec or expr.get("codec") or expr.get("codecs") or options.audio_type or expr.get("type")
+    profile = options.audio_profile or expr.get("profile")
+    channels = options.audio_channels or expr.get("channels")
+    if language:
+        bits.append(f"language={language}")
+    if codec:
+        bits.append(f"codec={codec}")
+    if profile:
+        bits.append(f"profile={profile}")
+    if channels:
+        bits.append(f"channels={channels}")
+    return "audio (" + ", ".join(bits or ["requested selection"]) + ")"
+
+
+def _subtitle_constraint_text(options: SelectionOptions) -> str:
+    expr = _parse_filter_expr(options.select_subtitle)
+    bits = []
+    language = options.subtitle_lang or expr.get("lang")
+    kind = options.subtitle_kind or expr.get("kind")
+    if language:
+        bits.append(f"language={language}")
+    if kind:
+        bits.append(f"kind={kind}")
+    return "subtitle (" + ", ".join(bits or ["requested selection"]) + ")"
 
 
 def _codec_matches(stream: StreamInfo, value: str) -> bool:
@@ -428,6 +723,14 @@ def _language_buckets(candidates: list[StreamInfo], value: str | None) -> list[l
         if bucket:
             buckets.append(bucket)
     return buckets
+
+
+def _language_buckets_by_language(candidates: list[StreamInfo]) -> list[list[StreamInfo]]:
+    buckets: dict[str, list[StreamInfo]] = {}
+    for stream in candidates:
+        key = next(iter(sorted(_language_tokens(stream.language))), "und")
+        buckets.setdefault(key, []).append(stream)
+    return list(buckets.values())
 
 
 def _audio_type_buckets(candidates: list[StreamInfo], value: str | None) -> list[list[StreamInfo]]:

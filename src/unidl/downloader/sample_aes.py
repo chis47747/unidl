@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from .embedding import current_download_runtime, managed_run
 from .models import SegmentInfo, StreamInfo
 from .sample_aes_samples import decrypt_aac, decrypt_ac3, decrypt_eac3, decrypt_ts
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, safe_temp_root
 
 if TYPE_CHECKING:
     from .postprocess import RawKey
@@ -124,11 +125,17 @@ def decrypt_sample_aes_parts(
         material.append((path, segment, key, iv))
 
     extension = _extension(stream)
-    output = Path(output_path).resolve().with_suffix(f".{extension}")
+    output = bounded_path(
+        Path(output_path).resolve().with_suffix(f".{extension}"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     if any(path == output for path, *_ in material):
         raise ValueError("SAMPLE-AES output must not overwrite an encrypted segment")
     output.parent.mkdir(parents=True, exist_ok=True)
-    parent = Path(temp_dir) if temp_dir else output.parent
+    parent = safe_temp_root(
+        Path(temp_dir) if temp_dir else output.parent,
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     parent.mkdir(parents=True, exist_ok=True)
     if event_callback:
         event_callback("engine: segment-bound SAMPLE-AES; FFmpeg local remux/validation")

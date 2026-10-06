@@ -12,7 +12,7 @@ from pathlib import Path
 from .cenc_fragment import CencInitMetadata, decrypt_cenc_fragment, load_cenc_init_metadata
 from .embedding import managed_run
 from .subtitles import SubtitleConversionError, convert_subtitle_file
-from .utils import looks_like_h266
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, looks_like_h266, safe_temp_root
 
 DecryptEventCallback = Callable[[str], None]
 
@@ -181,7 +181,10 @@ def decrypt_sections(
     output = Path(output_path) if output_path else _decrypted_output_path(sections[0])
     decrypted_sections: list[Path] = []
     for section in sections:
-        section_output = section.with_name(f"{section.stem}.dec{section.suffix}")
+        section_output = bounded_path(
+            section.with_name(f"{section.stem}.dec{section.suffix}"),
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
         decrypted = decrypt_file(
             section,
             keys=keys,
@@ -221,7 +224,10 @@ def restamp_fragmented_mp4_sequence(
     local_section_timestamps = section_fragment_durations is not None
     for index, section_path in enumerate(section_paths):
         section = Path(section_path)
-        output = section.with_name(f"{section.stem}.time{section.suffix}")
+        output = bounded_path(
+            section.with_name(f"{section.stem}.time{section.suffix}"),
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
         fallback_duration = (
             section_durations[index]
             if section_durations and index < len(section_durations)
@@ -279,13 +285,19 @@ def decrypt_fragmented_mp4_parts(
     output = Path(output_path) if output_path else _decrypted_output_path(parts[0])
     output.parent.mkdir(parents=True, exist_ok=True)
     _ensure_output_free_space(_paths_total_size(parts), output, "decryption output")
-    work_parent = Path(temp_dir).expanduser() if temp_dir else output.parent
+    work_parent = safe_temp_root(
+        Path(temp_dir).expanduser() if temp_dir else output.parent,
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     work_parent.mkdir(parents=True, exist_ok=True)
-    work_dir = Path(tempfile.mkdtemp(prefix=f"{output.stem}_fragments_", dir=str(work_parent)))
+    work_dir = Path(tempfile.mkdtemp(prefix="unidl_fragments_", dir=str(work_parent)))
     current_init: Path | None = None
     current_timescale: int | None = None
     reported_internal = False
-    tmp_output = output.with_name(f"{output.name}.tmp")
+    tmp_output = bounded_path(
+        output.with_name(f"{output.name}.tmp"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     init_metadata_cache: dict[tuple[Path, tuple[str, ...]], CencInitMetadata] = {}
     completed = False
     next_decode_time = 0 if restamp_timestamps else None
@@ -441,7 +453,10 @@ def decrypt_fragmented_mp4_part(
     _ensure_matching_keys(keys, expected_kids)
     part = Path(part_path)
     init = Path(init_path)
-    output = Path(output_path) if output_path else part.with_name(f"{part.stem}.dec{part.suffix}")
+    output = Path(output_path) if output_path else bounded_path(
+        part.with_name(f"{part.stem}.dec{part.suffix}"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     _report_decrypt_event(event_callback, "engine: internal fMP4 CENC fragment")
     internal_error: Exception | None = None
@@ -479,7 +494,10 @@ def decrypt_fragmented_mp4_part(
 
 def normalize_decrypted_mp4_init(input_path: str | Path, output_path: str | Path | None = None) -> Path:
     input_path = Path(input_path)
-    output = Path(output_path) if output_path else input_path.with_name(f"{input_path.stem}.dec{input_path.suffix}")
+    output = Path(output_path) if output_path else bounded_path(
+        input_path.with_name(f"{input_path.stem}.dec{input_path.suffix}"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     data = bytearray(input_path.read_bytes())
     _patch_encrypted_sample_entries(data)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -511,7 +529,10 @@ def patch_mp4_tenc_default_kid(input_path: str | Path, kid: str, output_path: st
         if data[position : position + 16] != kid_bytes:
             data[position : position + 16] = kid_bytes
             changed = True
-    output = Path(output_path) if output_path else input_path.with_name(f"{input_path.stem}.{normalized}.init{input_path.suffix}")
+    output = Path(output_path) if output_path else bounded_path(
+        input_path.with_name(f"{input_path.stem}.{normalized}.init{input_path.suffix}"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     if not changed and output == input_path:
         return input_path
     output.write_bytes(data)
@@ -745,9 +766,9 @@ def mux_files(
 
             chapters = load_chapters_file(chapters_file)
             if chapters:
-                chapter_temp_dir = Path(
-                    tempfile.mkdtemp(prefix=f"{output.stem}_chapters_", dir=str(output.parent))
-                )
+                chapter_root = safe_temp_root(output.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+                chapter_root.mkdir(parents=True, exist_ok=True)
+                chapter_temp_dir = Path(tempfile.mkdtemp(prefix="unidl_chapters_", dir=str(chapter_root)))
                 if selected == "mkvmerge":
                     chapter_path = write_ogm_chapters(
                         chapters, chapter_temp_dir / "chapters.txt"
@@ -823,7 +844,9 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
     ):
         return inputs, None
     # Avoid duplicating the release name in Windows temporary paths.
-    temp_dir = Path(tempfile.mkdtemp(prefix="unidl_mux_", dir=str(output.parent)))
+    temp_root = safe_temp_root(output.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+    temp_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="unidl_mux_", dir=str(temp_root)))
     prepared: list[MuxInput] = []
     try:
         for index, item in enumerate(inputs, start=1):
@@ -881,7 +904,10 @@ def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = No
     if not executable:
         raise RuntimeError("ffmpeg not found.")
     input_path = Path(input_path)
-    output = Path(output_path) if output_path else input_path.with_suffix(f".repack{input_path.suffix}")
+    output = Path(output_path) if output_path else bounded_path(
+        input_path.with_name(f"{input_path.stem}.repack{input_path.suffix}"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     _run_external([executable, "-hide_banner", "-y", "-i", str(input_path), "-c", "copy", str(output)], "repackaging")
     return output
 
@@ -929,8 +955,14 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path) -> Pat
 def _decrypted_output_path(input_path: Path) -> Path:
     suffix = input_path.suffix.lower()
     if suffix in MEDIA_SUFFIXES:
-        return input_path.with_suffix(f".dec{input_path.suffix}")
-    return input_path.with_name(input_path.name + ".dec.mp4")
+        return bounded_path(
+            input_path.with_name(f"{input_path.stem}.dec{input_path.suffix}"),
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
+    return bounded_path(
+        input_path.with_name(input_path.name + ".dec.mp4"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
 
 
 def _split_mux_import(value: str) -> list[str]:

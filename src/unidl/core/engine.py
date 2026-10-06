@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import os
 import re
 import threading
 import time
@@ -27,7 +28,7 @@ import requests
 
 from unidl.downloader import NativeDownloaderBackend, NativeManifestError, api
 from unidl.downloader.models import StreamInfo
-from unidl.downloader.selection import SelectionOptions, select_streams
+from unidl.downloader.selection import SelectionOptions, SelectionResult, select_streams, select_streams_detailed
 from unidl.downloader.utils import is_url, source_path
 
 from . import cdmrules, exports, vaults
@@ -497,6 +498,10 @@ class TrackSet:
     #: rather than by the native manifest downloader. They still participate
     #: in the normal picker and shared auto-selection rules.
     sidecars: list[StreamInfo] = field(default_factory=list, repr=False)
+    #: Explanation kept when automatic hard constraints matched no track. The
+    #: TUI uses it to reopen the manual picker instead of silently widening the
+    #: user's request or cancelling the delivery.
+    selection_error: str = field(default="", repr=False)
 
     @property
     def selectable_streams(self) -> list[StreamInfo]:
@@ -569,6 +574,14 @@ def _service_debug_logging_enabled(service: object | None) -> bool:
         except Exception:  # noqa: BLE001 - a plugin policy must never break a run
             return True
     return bool(getattr(service, "DEBUG_LOGGING", True))
+
+
+def _live_pipe_mux_supported() -> bool:
+    """Whether the real-time live muxer can create its input pipes."""
+
+    # Windows is supported by the downloader's ctypes-backed named-pipe
+    # adapter; POSIX hosts use ``os.mkfifo``.
+    return os.name == "nt" or hasattr(os, "mkfifo")
 
 
 class Engine:
@@ -2530,14 +2543,15 @@ class Engine:
         tracks: TrackSet,
     ) -> list[StreamInfo]:
         """Apply shared Track output selection to an already parsed ladder."""
-        kwargs = {"strict": True} if playback.strict_track_selection else {}
-        tracks.selected = self.auto_select(
+        result = self.auto_select_result(
             tracks.selectable_streams,
             settings,
             audio_only=playback.audio_only,
+            strict=playback.strict_track_selection,
             quality_override=playback.video_quality_hint,
-            **kwargs,
         )
+        tracks.selected = result.selected
+        tracks.selection_error = "; ".join(result.unmatched)
         # Hybrid is a VOD transformation. A live/replay ladder is changing
         # while it is consumed and cannot be paired safely.
         if self.hybrid_enabled(settings, playback=playback, tracks=tracks):
@@ -2640,6 +2654,28 @@ class Engine:
         quality_override: str = "",
     ) -> list[StreamInfo]:
         """Apply the shared track settings against a real ladder."""
+        return self.auto_select_result(
+            streams,
+            settings,
+            audio_only=audio_only,
+            strict=strict,
+            quality_override=quality_override,
+        ).selected
+
+    def auto_select_result(
+        self,
+        streams: Sequence[StreamInfo],
+        settings: Settings,
+        *,
+        audio_only: bool = False,
+        strict: bool = False,
+        quality_override: str = "",
+    ) -> SelectionResult:
+        """Return automatic tracks and the hard constraints that missed.
+
+        A constrained empty result is intentional: callers can present the full
+        ladder for manual correction instead of downloading an unrelated track.
+        """
         streams = self._normalize_audio_only_streams(streams, audio_only=audio_only)
         options = SelectionOptions()
 
@@ -2647,7 +2683,10 @@ class Engine:
             # No video selector at all rather than a filter that drops it: a
             # radio stream has no video ladder to rank, and UniDL refuses
             # --audio-format outright if a video track is selected.
-            return self._select_audio_only(streams, settings)
+            selected = self._select_audio_only(streams, settings)
+            if selected or not any(stream.media_type == "audio" for stream in streams):
+                return SelectionResult(selected)
+            return SelectionResult([], ("audio",))
 
         quality = quality_override or settings.get("video_quality", "best")
         codec = settings.get("video_codec", "any")
@@ -2671,30 +2710,54 @@ class Engine:
         if langs:
             audio_parts.append(f"lang={langs}")
         audio_codec = settings.get("audio_codec", "any")
+        audio_profile = settings.get("audio_profile", "any")
+        # ``atmos`` was historically exposed as a codec. Preserve old config
+        # files while routing it through the normalized profile matcher.
+        if str(audio_codec).lower() == "atmos" and str(audio_profile).lower() in {"", "any"}:
+            audio_codec = "any"
+            audio_profile = "atmos"
         if audio_codec and audio_codec != "any":
             audio_parts.append(f"codecs={audio_codec}")
+        if audio_profile and audio_profile != "any":
+            audio_parts.append(f"profile={audio_profile}")
         channels = settings.get("audio_channels", "any")
         if channels and channels != "any":
             audio_parts.append(f"channels={channels}")
-        audio_parts.append("for=all" if langs else "for=best")
+        audio_selection = str(settings.get("audio_selection", "best") or "best").lower()
+        audio_quality = str(settings.get("audio_quality", "best") or "best").lower()
+        audio_parts.append("for=all" if audio_selection == "all" else f"for={audio_quality}")
         options.select_audio = ":".join(audio_parts)
 
         sub_langs = str(settings.get("sub_langs", "") or "").strip()
         if sub_langs and sub_langs != "none":
-            options.select_subtitle = "for=all" if sub_langs == "all" else f"lang={sub_langs}:for=all"
+            subtitle_kinds = str(settings.get("subtitle_kinds", "normal,forced") or "all").strip()
+            subtitle_selection = str(settings.get("subtitle_selection", "all") or "all").lower()
+            subtitle_parts = []
+            if sub_langs != "all":
+                subtitle_parts.append(f"lang={sub_langs}")
+            if subtitle_kinds and subtitle_kinds != "all":
+                subtitle_parts.append(f"kind={subtitle_kinds}")
+            subtitle_parts.append(f"for={subtitle_selection}")
+            options.select_subtitle = ":".join(subtitle_parts)
 
-        chosen = select_streams(list(streams), options)
+        result = select_streams_detailed(list(streams), options)
+        chosen = result.selected
+        if result.unmatched:
+            # A partial result is still unsafe: selecting the matching video
+            # while the requested audio/subtitle is absent silently widens the
+            # user's rule. Return an empty preselection and let the picker decide.
+            return SelectionResult([], result.unmatched)
         if (
             strict
             and any(stream.media_type == "video" for stream in streams)
             and not any(stream.media_type == "video" for stream in chosen)
         ):
-            return []
+            return SelectionResult([], ("video",))
         if not chosen and streams:
             best_video = next((s for s in streams if s.media_type == "video"), None)
             best_audio = next((s for s in streams if s.media_type == "audio"), None)
             chosen = [s for s in (best_video, best_audio) if s is not None] or [streams[0]]
-        return chosen
+        return SelectionResult(chosen)
 
     @staticmethod
     def _normalize_audio_only_streams(
@@ -2740,18 +2803,19 @@ class Engine:
         if langs:
             parts.append(f"lang={langs}")
         codec = settings.get("audio_codec", "any")
+        profile = settings.get("audio_profile", "any")
+        if str(codec).lower() == "atmos" and str(profile).lower() in {"", "any"}:
+            codec, profile = "any", "atmos"
         if codec and codec != "any":
             parts.append(f"codecs={codec}")
-        parts.append("for=all" if langs else "for=best")
+        if profile and profile != "any":
+            parts.append(f"profile={profile}")
+        quality = str(settings.get("audio_quality", "best") or "best").lower()
+        parts.append(f"for={quality}")
         options.select_audio = ":".join(parts)
 
         chosen = [s for s in select_streams(list(streams), options) if s.media_type == "audio"]
-        if chosen:
-            return chosen
-        # the filters matched nothing; take whatever audio exists rather than
-        # failing a download over a codec preference
-        fallback = next((s for s in streams if s.media_type == "audio"), None)
-        return [fallback] if fallback is not None else []
+        return chosen
 
     # ------------------------------------------------------------------ audio
     def audio_format_for(
@@ -3150,7 +3214,13 @@ class Engine:
         drm = playback.drm
         live_real_time_merge = bool(settings.get("live_real_time_merge", True))
         live_keep_segments = bool(settings.get("live_keep_segments", False))
-        live_pipe_mux = bool(settings.get("live_pipe_mux", True)) and not bool(audio_format)
+        # The downloader supplies POSIX FIFOs and a native Windows named-pipe
+        # adapter, so the live experience stays real-time on both platforms.
+        live_pipe_mux = (
+            bool(settings.get("live_pipe_mux", True))
+            and not bool(audio_format)
+            and _live_pipe_mux_supported()
+        )
         if overrides.live_real_time_merge is not None:
             live_real_time_merge = overrides.live_real_time_merge
         if overrides.live_keep_segments is not None:
@@ -3372,7 +3442,11 @@ class Engine:
             options.live_keep_segments = bool(settings.get("live_keep_segments", False))
             # UniDL rejects --audio-format together with --live-pipe-mux, and
             # piping is pointless for a single audio track anyway
-            options.live_pipe_mux = bool(settings.get("live_pipe_mux", True)) and not audio_format
+            options.live_pipe_mux = (
+                bool(settings.get("live_pipe_mux", True))
+                and not audio_format
+                and _live_pipe_mux_supported()
+            )
             window = playback.live_window
             if window is not None and window.mode == "vod":
                 # the window as it stands: this finishes on its own, so a recording

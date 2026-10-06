@@ -489,6 +489,18 @@ inventory before shared output selection. A service may narrow that inventory
 only through its own explicit `license_*` / `pssh_*` policy. Service code must
 never read shared output settings to decide its API/profile or licence seed.
 
+Track metadata should preserve the provider's raw language tag and expose
+normalized fields where possible. `und` means an undefined language and must not
+be guessed; tags such as `es-419` should remain selectable while also matching
+the `es` primary language. Audio codec, audio profile (for example Atmos), role,
+channel layout and subtitle kind are separate facts. A service should populate
+explicit Atmos/forced/SDH/CC flags from its API or manifest rather than folding
+them into a display name. Core combines shared language, codec, profile, channel
+and subtitle-kind settings as hard output filters, then applies Best/Worst quality
+within the remaining candidates. An empty constrained result is sent to the TUI
+Track Picker for manual correction; service code must not silently substitute an
+unrelated track.
+
 The per-service **License after final track selection** compatibility mode changes
 the inventory Core passes to the same hooks: it is the final selected encrypted
 tracks rather than the complete ladder. This exists for HLS/per-media-playlist

@@ -12,7 +12,7 @@ from urllib.parse import unquote, urljoin, urlparse
 
 from .loader import LoadError, load_bytes
 from .postprocess import _run_external
-from .utils import unique_path
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, safe_temp_root, unique_path
 
 ID3_METADATA_FIELDS = (
     "title",
@@ -204,7 +204,12 @@ def transcode_audio(
     suffix = {"mp3": ".mp3", "flac": ".flac", "alac": ".m4a", "m4a": ".m4a"}[target_format]
     output = Path(output_path) if output_path else unique_path(input_path.with_suffix(suffix))
     if output.resolve() == input_path.resolve():
-        output = unique_path(input_path.with_name(f"{input_path.stem}.converted{suffix}"))
+        output = unique_path(
+            bounded_path(
+                input_path.with_name(f"{input_path.stem}.converted{suffix}"),
+                max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+            )
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     cover = Path(cover_path) if cover_path else None
     chapter_temp_dir: Path | None = None
@@ -220,9 +225,9 @@ def transcode_audio(
 
             chapters = load_chapters_file(chapters_file)
             if chapters:
-                chapter_temp_dir = Path(
-                    tempfile.mkdtemp(prefix=f"{output.stem}_chapters_", dir=str(output.parent))
-                )
+                chapter_root = safe_temp_root(output.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+                chapter_root.mkdir(parents=True, exist_ok=True)
+                chapter_temp_dir = Path(tempfile.mkdtemp(prefix="unidl_chapters_", dir=str(chapter_root)))
                 chapter_path = write_ffmetadata(
                     chapters, chapter_temp_dir / "chapters.ffmeta"
                 )

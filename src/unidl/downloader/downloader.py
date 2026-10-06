@@ -37,7 +37,16 @@ from .sabr_ump import (
     probe_sabr_ump_dvr_first_media_sequence,
     probe_sabr_ump_dvr_sequence_window,
 )
-from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, is_url, source_path, unique_path, windows_long_path
+from .utils import (
+    WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    bounded_child_path,
+    bounded_path,
+    is_url,
+    safe_temp_root,
+    source_path,
+    unique_path,
+    windows_long_path,
+)
 
 KNOWN_OUTPUT_SUFFIXES = {
     ".aac",
@@ -1723,7 +1732,11 @@ def _write_section_outputs(output_path: Path, part_paths: list[Path], segments: 
     ranges = _init_section_ranges(segments)
     if len(ranges) <= 1:
         return []
-    section_dir = part_paths[0].parent / "sections"
+    section_dir = bounded_child_path(
+        part_paths[0].parent,
+        "sections",
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     section_dir.mkdir(parents=True, exist_ok=True)
     suffix = output_path.suffix or ".mp4"
     paths: list[Path] = []
@@ -1757,8 +1770,12 @@ def _default_tmp_root() -> Path:
 
 def _transient_temp_dir(output_path: Path, temp_dir: str | Path | None, label: str) -> Path:
     root = Path(temp_dir).expanduser() if temp_dir else output_path.parent
+    root = safe_temp_root(root, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     root.mkdir(parents=True, exist_ok=True)
-    prefix = _short_temp_label(output_path.stem, 36)
+    # This directory is nested below the task/track root.  Keep its readable
+    # prefix deliberately short; the output title is already present in the
+    # surrounding task metadata and must not consume the Windows path budget.
+    prefix = _short_temp_label(output_path.stem, 18)
     return Path(tempfile.mkdtemp(prefix=f"{prefix}_{label}_", dir=str(root)))
 
 
@@ -1771,9 +1788,14 @@ def _resume_temp_dir(
     search_fallback: bool = True,
 ) -> Path:
     root = Path(temp_dir).expanduser() if temp_dir else _default_tmp_root()
+    root = safe_temp_root(root, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     key = _stream_resume_key(stream, segments=segments)
     label = _safe_name("-".join(part for part in [stream.media_type, stream.resolution, stream.language, str(stream.bandwidth or "")] if part))
-    target = root / f"{_short_temp_label(label or output_path.stem, 36)}_{key[:16]}"
+    target = bounded_child_path(
+        root,
+        f"{_short_temp_label(label or output_path.stem, 20)}_{key[:16]}",
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     if target.exists() or not search_fallback:
         return target
 

@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import BinaryIO
 
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path
+
 EBML_ID = 0x1A45DFA3
 SEGMENT_ID = 0x18538067
 CLUSTER_ID = 0x1F43B675
@@ -173,7 +175,7 @@ def write_continuous_webm_fragments(
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output.with_name(f"{output.name}.tmp")
+    tmp = bounded_path(output.with_name(f"{output.name}.tmp"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     with tmp.open("wb") as target:
         writer = ContinuousWebMWriter(target)
         for fragment in fragments:

@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.3.2] - 2026-10-06
+
+### Windows paths
+
+- Hardened nested temporary, resume, decryption, subtitle, live-pipe and post-processing paths so derived filenames stay within the Windows legacy path limit.
+
+### Windows live recording
+
+- Added native Windows named-pipe support for real-time FFmpeg audio/video muxing while preserving the existing POSIX FIFO path on macOS and Linux.
+
+### Track selection
+
+- Added hard audio codec/profile/channel, subtitle-kind, language and best/worst quality filters, with manual Track Picker recovery when no automatic combination matches.
+
 ## [2.3.1] - 2026-10-05
 
 ### Windows paths

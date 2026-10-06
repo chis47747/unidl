@@ -26,6 +26,7 @@ from .loader import LoadError, load_text
 from .models import SegmentInfo, StreamInfo
 from .parser import parse_source
 from .sabr_ump import SabrUmpError, fetch_sabr_ump_live_segments
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, safe_temp_root
 
 
 @dataclass(slots=True)
@@ -650,8 +651,9 @@ def _int_like(value) -> int | None:
 
 def _live_temp_dir(output_path: Path, options: LiveRecordOptions) -> Path:
     parent = Path(options.temp_dir).expanduser() if options.temp_dir else output_path.parent
+    parent = safe_temp_root(parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     parent.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=f"{_safe_name(output_path.stem)}_live_", dir=str(parent)))
+    return Path(tempfile.mkdtemp(prefix="unidl_live_", dir=str(parent)))
 
 
 def _plan_group_batches(states: list[_LiveRecordState], options: LiveRecordOptions) -> list[_LivePlannedBatch]:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .embedding import managed_run
-from .utils import unique_path
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, unique_path
 
 
 class SubtitleConversionError(RuntimeError):
@@ -49,7 +49,12 @@ def convert_subtitle_file(
     if input_path.suffix.lower().lstrip(".") == target:
         return input_path
 
-    output = Path(output_path) if output_path else unique_path(input_path.with_suffix(f".{target}"))
+    output = Path(output_path) if output_path else unique_path(
+        bounded_path(
+            input_path.with_suffix(f".{target}"),
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
 
     mp4_cues, is_mp4_subtitle = _parse_mp4_subtitle_file_info(input_path)

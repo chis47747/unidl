@@ -333,12 +333,17 @@ provider API request or replace a service's explicit `license_*` policy.
 |---------|--------|---------|
 | `track_mode` | `interactive` / `auto` | `interactive` |
 | `video_quality` | `best` / `2160` / `1440` / `1080` / `720` / `480` / `worst` | `best` |
-| `video_codec` | `any` / `h264` / `h265` / `av1` / `vp9` | `any` |
+| `video_codec` | `any` / `h264` / `h265` / `h266` / `av1` / `vp9` | `any` |
 | `video_range` | `any` / `sdr` / `hdr10` / `hdr10+` / `hlg` / `dv` | `any` |
-| `audio_codec` | `any` / `aac` / `ac3` / `eac3` / `atmos` | `any` |
+| `audio_codec` | `any` / `aac` / `ac3` / `eac3` / `opus` / `flac` / `alac` / `mp3` | `any` |
+| `audio_profile` | `any` / `atmos` / `main` / `description` / `commentary` / `dialog` | `any` |
+| `audio_quality` | `best` / `worst` | `best` |
 | `audio_channels` | `any` / `2` / `6` / `8` | `any` |
-| `audio_langs` | comma separated, empty = best only | empty |
+| `audio_langs` | comma separated BCP-47/ISO tags, empty = best language | empty |
+| `audio_selection` | `best` / `all` | `best` |
 | `sub_langs` | comma separated, `all`, or empty to skip | `all` |
+| `subtitle_kinds` | comma separated `normal`, `forced`, `sdh`, `commentary`, `audio_description`, or `all` | `normal,forced` |
+| `subtitle_selection` | `all` / `best` | `all` |
 | `drop_video` | regex | boundary-aware `trick` / `trickplay` / `thumbnail` / `image` |
 | `sub_format` | `srt` / `vtt` / `raw` | `srt` |
 | `mux_format` | `mkv` / `mp4` | `mkv` |
@@ -354,6 +359,15 @@ tracks handed to native delivery core for output. In the default DRM order they
 appear after key acquisition. With the explicit compatibility switch on, Core
 also uses the resulting track objects to locate their own KIDs/init data, without
 turning any checkbox into a service profile choice.
+
+Automatic selection treats language, codec, profile, channels and subtitle type
+as hard filters combined with AND. `best` or `worst` only ranks tracks remaining
+after those filters; it never widens them. If no track matches, UniDL reports the
+conditions and opens the normal Track Picker so the user can choose manually
+without cancelling the delivery. `Atmos` is an audio profile, not a codec;
+`audio_codec=atmos` remains accepted as a legacy alias for `audio_profile=atmos`.
+Language matching accepts exact BCP-47 tags and their primary language (so
+`es-419` matches `es`), while `und` and unknown provider tags are not guessed.
 
 `audio_format` only applies to audio-only titles. Its choices are discovered
 from native delivery core at runtime, so the settings panel never advertises an encoder the

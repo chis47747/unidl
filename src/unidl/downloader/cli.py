@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -122,6 +123,7 @@ from .selection import SelectionOptions, select_streams
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import (
     WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    bounded_child_path,
     bounded_path,
     compact_join,
     format_bitrate,
@@ -130,6 +132,7 @@ from .utils import (
     format_time,
     looks_like_h266,
     pretty_codec,
+    safe_temp_root,
     unique_path,
     video_codec_family,
     windows_long_path,
@@ -1825,7 +1828,11 @@ def _completed_track_cache_key(stream, filename: str | None, args: argparse.Name
 
 def _completed_track_cache_path(stream, filename: str | None, args: argparse.Namespace) -> Path:
     key = _completed_track_cache_key(stream, filename, args)
-    return _task_temp_subdir(args, "completed") / f"{key}.json"
+    return bounded_child_path(
+        _task_temp_subdir(args, "completed"),
+        f"{key}.json",
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
 
 
 def _load_completed_track_cache(stream, filename: str | None, args: argparse.Namespace) -> _CompletedTrackCache | None:
@@ -2041,7 +2048,7 @@ def _download_selected_stream(
         with status.spinning("Downloaded ✓", "Decrypting {spinner}"):
             current_path = decrypt_bbts_file(
                 current_path,
-                current_path.with_suffix(".dec.ts"),
+                bounded_path(current_path.with_suffix(".dec.ts"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                 _bbts_key_hex(keys, hls_crypto, stream),
             )
         _cleanup_replaced_intermediate(previous_path, current_path, args, colors)
@@ -2061,7 +2068,7 @@ def _download_selected_stream(
                     result,
                     keys,
                     args.decrypter,
-                    current_path.with_suffix(".dec.webm"),
+                    bounded_path(current_path.with_suffix(".dec.webm"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                     event_callback=decrypt_event,
                 )
         except Exception:
@@ -2084,7 +2091,7 @@ def _download_selected_stream(
                 if uses_legacy_sample_aes(stream):
                     current_path = decrypt_sample_aes_parts(
                         result.parts or ([current_path] if len(stream.segments) == 1 else []), stream, keys,
-                        current_path.with_suffix(f".dec{current_path.suffix}"),
+                        bounded_path(current_path.with_suffix(f".dec{current_path.suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                         temp_dir=_task_temp_subdir(args, "postprocess"),
                         event_callback=decrypt_event,
                     )
@@ -2096,7 +2103,7 @@ def _download_selected_stream(
                         stream.segments,
                         keys=keys,
                         stream_type=stream_type,
-                        output_path=current_path.with_suffix(f".dec{current_path.suffix}"),
+                        output_path=bounded_path(current_path.with_suffix(f".dec{current_path.suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                         expected_kids=_stream_key_ids(stream),
                         temp_dir=_task_temp_subdir(args, "postprocess"),
                         event_callback=decrypt_event,
@@ -2109,7 +2116,7 @@ def _download_selected_stream(
                             keys=keys,
                             decrypter=decrypter,
                             stream_type=stream_type,
-                            output_path=current_path.with_suffix(f".dec{current_path.suffix}"),
+                            output_path=bounded_path(current_path.with_suffix(f".dec{current_path.suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                             expected_kids=_stream_key_ids(stream),
                             event_callback=decrypt_event,
                         )
@@ -2121,7 +2128,7 @@ def _download_selected_stream(
                             keys=keys,
                             decrypter=decrypter,
                             stream_type=stream_type,
-                            output_path=current_path.with_suffix(f".dec{current_path.suffix}"),
+                            output_path=bounded_path(current_path.with_suffix(f".dec{current_path.suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                             expected_kids=_stream_key_ids(stream),
                             restamp_timestamps=restamp_sections,
                             section_durations=[sum(durations) for durations in section_fragment_durations] if section_fragment_durations else None,
@@ -2491,7 +2498,12 @@ def _finalize_clear_hls_sections(stream, result, current_path: Path) -> Path:
         section_fragment_durations=section_fragment_durations,
         normalize_large_composition_offsets=getattr(stream, "media_type", None) == "video",
     )
-    temp_output = unique_path(current_path.with_name(f"{current_path.stem}.final{current_path.suffix}"))
+    temp_output = unique_path(
+        bounded_path(
+            current_path.with_name(f"{current_path.stem}.final{current_path.suffix}"),
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
+    )
     try:
         concat_media_files(finalized_sections, temp_output)
         temp_output.replace(current_path)
@@ -2843,8 +2855,17 @@ def _start_live_pipe_mux_session(live_streams, output: Path, save_name: str | No
     encrypted = [stream for stream in pipe_streams if _stream_needs_external_decryption(stream, hls_crypto)]
     if encrypted and not keys:
         raise ValueError("Encrypted live pipe mux needs --key and cannot be used with --no-decrypt.")
-    if not hasattr(os, "mkfifo"):
-        raise RuntimeError("--live-pipe-mux needs POSIX named pipes; this platform is not supported yet.")
+    if os.name != "nt" and not hasattr(os, "mkfifo"):
+        # Keep a defensive fallback for platforms without either POSIX FIFOs or
+        # the Windows named-pipe adapter. Windows itself is handled below by
+        # the ctypes-backed native named-pipe implementation.
+        args.live_pipe_mux = False
+        args._live_pipe_mux_disabled_mux_format = "mkv"
+        args._live_pipe_mux_disabled_note = (
+            "Real-time pipe mux is unavailable on this platform; "
+            "tracks will be muxed after recording."
+        )
+        return None
     output_path = _live_pipe_output_path(output, save_name, default_save_base, streams=pipe_streams, mux_format=getattr(args, "mux_format", None))
     notes = []
     if output_path.suffix.lower() == ".mkv" and not getattr(args, "mux_format", None):
@@ -2978,8 +2999,10 @@ def _mp4_path_has_top_level_box(path: Path, box_type: bytes) -> bool:
 
 def _prepare_live_pipe_temp_dir(output_path: Path, temp_dir: Path | None) -> Path:
     if temp_dir is None:
-        return Path(tempfile.mkdtemp(prefix="unidown_live_pipe_", dir=str(output_path.parent)))
-    pipe_dir = Path(temp_dir).expanduser()
+        root = safe_temp_root(output_path.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+        root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="unidown_pipe_", dir=str(root)))
+    pipe_dir = safe_temp_root(Path(temp_dir).expanduser(), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     if pipe_dir.exists():
         shutil.rmtree(windows_long_path(pipe_dir), ignore_errors=True)
     pipe_dir.mkdir(parents=True, exist_ok=True)
@@ -2998,6 +3021,121 @@ def _live_pipe_segment_marker(segment: SegmentInfo) -> tuple[str, object] | None
     if getattr(segment, "program_date_time", None):
         return ("program", segment.program_date_time)
     return None
+
+
+class _WindowsNamedPipe:
+    """Small byte-stream server for FFmpeg's Windows named-pipe inputs.
+
+    ``os.mkfifo`` is POSIX-only, but FFmpeg can read the native
+    ``\\\\.\\pipe\\...`` file namespace on Windows.  The server handle is
+    created before FFmpeg starts; the writer thread connects it when the first
+    media payload arrives and then exposes the same ``write/flush/close`` shape
+    used by the POSIX file writer below.
+    """
+
+    _ERROR_PIPE_CONNECTED = 535
+    _INVALID_HANDLE_VALUE = -1
+    _PIPE_ACCESS_OUTBOUND = 0x00000002
+    _PIPE_TYPE_BYTE = 0x00000000
+    _PIPE_READMODE_BYTE = 0x00000000
+    _PIPE_WAIT = 0x00000000
+
+    def __init__(self, name: str):
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self.name = name
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32.CreateNamedPipeW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+        ]
+        self._kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+        self._kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+        self._kernel32.ConnectNamedPipe.restype = wintypes.BOOL
+        self._kernel32.WriteFile.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPCVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPVOID,
+        ]
+        self._kernel32.WriteFile.restype = wintypes.BOOL
+        self._kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+        self._kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = self._kernel32.CreateNamedPipeW(
+            name,
+            self._PIPE_ACCESS_OUTBOUND,
+            self._PIPE_TYPE_BYTE | self._PIPE_READMODE_BYTE | self._PIPE_WAIT,
+            1,
+            1024 * 1024,
+            1024 * 1024,
+            0,
+            None,
+        )
+        if handle is None or handle == wintypes.HANDLE(self._INVALID_HANDLE_VALUE).value:
+            error = ctypes.get_last_error()
+            raise OSError(error, f"CreateNamedPipeW failed for {name}")
+        self._handle = handle
+        self._connected = False
+        self._closed = False
+
+    def _connect(self) -> None:
+        if self._connected:
+            return
+        if self._closed:
+            raise BrokenPipeError("Windows named pipe is closed")
+        if not self._kernel32.ConnectNamedPipe(self._handle, None):
+            error = self._ctypes.get_last_error()
+            if error != self._ERROR_PIPE_CONNECTED:
+                raise OSError(error, f"ConnectNamedPipe failed for {self.name}")
+        self._connected = True
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        self._connect()
+        written = self._ctypes.c_ulong(0)
+        buffer = self._ctypes.create_string_buffer(data)
+        if not self._kernel32.WriteFile(
+            self._handle,
+            buffer,
+            len(data),
+            self._ctypes.byref(written),
+            None,
+        ):
+            error = self._ctypes.get_last_error()
+            if error in {109, 232}:  # ERROR_BROKEN_PIPE / ERROR_NO_DATA
+                raise BrokenPipeError(error, "Windows named pipe reader closed")
+            raise OSError(error, f"WriteFile failed for {self.name}")
+        return int(written.value)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._connected:
+            try:
+                self._kernel32.FlushFileBuffers(self._handle)
+            except OSError:
+                pass
+            self._kernel32.DisconnectNamedPipe(self._handle)
+        self._kernel32.CloseHandle(self._handle)
+
+
+def _windows_named_pipe_path(index: int) -> str:
+    return f"\\\\.\\pipe\\unidl_{os.getpid()}_{index:02d}_{uuid.uuid4().hex}"
 
 
 class _LivePipeMuxSession:
@@ -3025,7 +3163,8 @@ class _LivePipeMuxSession:
         self.input_offsets_seconds = dict(input_offsets_seconds or {})
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.pipe_dir = _prepare_live_pipe_temp_dir(output_path, temp_dir)
-        self.pipe_paths: dict[int, Path] = {}
+        self.pipe_paths: dict[int, Path | str] = {}
+        self._windows_pipe_servers: dict[int, _WindowsNamedPipe] = {}
         self.output_container = self._output_container()
         self.pipe_input_formats: dict[int, str] = {id(stream): self._pipe_input_format(stream) for stream in self.streams}
         self.fragment_decrypters: dict[int, str] = {
@@ -3125,6 +3264,9 @@ class _LivePipeMuxSession:
                 pass
         self.writers.clear()
         self.webm_live_writers.clear()
+        for server in self._windows_pipe_servers.values():
+            server.close()
+        self._windows_pipe_servers.clear()
         for thread in self.writer_threads:
             if thread.is_alive():
                 thread.join(timeout=5)
@@ -3177,15 +3319,19 @@ class _LivePipeMuxSession:
             getattr(self, "output_container", None),
         ) and _live_pipe_finalize_to_mp4_allowed(self.args)
         suffix = self.output_path.suffix or ".mkv"
-        temp_base = f".{self.output_path.name}.{os.getpid()}.{time.monotonic_ns()}.finalize"
-        temp_mp4_path = self.output_path.with_name(f"{temp_base}.mp4")
-        temp_hevc_path = self.output_path.with_name(f"{temp_base}.hevc")
-        temp_mkv_path = self.output_path.with_name(f"{temp_base}{suffix}")
-        temp_compatible_mp4_path = self.output_path.with_name(f"{temp_base}.compatible.mp4")
+        # Do not repeat the complete title in every finalization artifact.  A
+        # long output title plus the generated suffixes was still enough to
+        # trigger WinError 206 after the first path shortening pass.
+        finalize_digest = hashlib.sha1(str(self.output_path).encode("utf-8", "replace")).hexdigest()[:12]
+        temp_base = f".unidl_finalize_{finalize_digest}_{os.getpid()}"
+        temp_mp4_path = bounded_path(self.output_path.with_name(f"{temp_base}.mp4"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+        temp_hevc_path = bounded_path(self.output_path.with_name(f"{temp_base}.hevc"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+        temp_mkv_path = bounded_path(self.output_path.with_name(f"{temp_base}{suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+        temp_compatible_mp4_path = bounded_path(self.output_path.with_name(f"{temp_base}.compatible.mp4"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
         # Rename the raw recording within the same directory before remuxing.
         # This keeps it recoverable without counting a second full-size copy
         # against the filesystem while the finalization stages run.
-        source_path = self.output_path.with_name(f"{temp_base}.source{suffix}")
+        source_path = bounded_path(self.output_path.with_name(f"{temp_base}.source{suffix}"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
         source_moved = False
         try:
             self.output_path.replace(source_path)
@@ -3473,6 +3619,11 @@ class _LivePipeMuxSession:
 
     def _create_pipes(self) -> None:
         for index, stream in enumerate(self.streams, start=1):
+            if os.name == "nt":
+                path = _windows_named_pipe_path(index)
+                self._windows_pipe_servers[id(stream)] = _WindowsNamedPipe(path)
+                self.pipe_paths[id(stream)] = path
+                continue
             path = self.pipe_dir / f"{index:02d}_{stream.display_prefix().lower()}.fifo"
             os.mkfifo(path)
             self.pipe_paths[id(stream)] = path
@@ -3585,7 +3736,10 @@ class _LivePipeMuxSession:
         key = id(stream)
         writer = self.writers.get(key)
         if writer is None:
-            writer = self.pipe_paths[key].open("wb", buffering=0)
+            if os.name == "nt":
+                writer = self._windows_pipe_servers[key]
+            else:
+                writer = self.pipe_paths[key].open("wb", buffering=0)
             self.writers[key] = writer
         return writer
 
@@ -4385,7 +4539,7 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
             with status.spinning("Recorded ✓", "Decrypting {spinner}"):
                 current_path = decrypt_bbts_file(
                     current_path,
-                    current_path.with_suffix(".dec.ts"),
+                    bounded_path(current_path.with_suffix(".dec.ts"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                     _bbts_key_hex(keys, hls_crypto, result.stream),
                 )
             cleanup_paths.append(current_path)
@@ -4401,7 +4555,7 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
                         result,
                         keys,
                         args.decrypter,
-                        current_path.with_suffix(".dec.webm"),
+                        bounded_path(current_path.with_suffix(".dec.webm"), max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT),
                         event_callback=decrypt_event,
                     )
             except Exception:
@@ -4422,7 +4576,10 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
                             result.segments or [],
                             keys=keys,
                             stream_type=stream_type,
-                            output_path=current_path.with_suffix(f".dec{current_path.suffix}"),
+                            output_path=bounded_path(
+                                current_path.with_suffix(f".dec{current_path.suffix}"),
+                                max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+                            ),
                             expected_kids=_stream_key_ids(result.stream),
                             temp_dir=_task_temp_subdir(args, "postprocess"),
                             event_callback=decrypt_event,
@@ -4824,7 +4981,11 @@ def _transcode_audio_output(
 def _audio_cover_path(stream, args: argparse.Namespace, headers: dict[str, str] | None) -> Path | None:
     return prepare_audio_cover(
         stream,
-        _task_temp_subdir(args, "postprocess") / "covers",
+        bounded_child_path(
+            _task_temp_subdir(args, "postprocess"),
+            "covers",
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        ),
         headers=headers,
         timeout=max(1, getattr(args, "http_request_timeout", 30)),
         retries=max(1, getattr(args, "retries", 3)),
@@ -7360,6 +7521,7 @@ def _write_meta_json(output_dir: Path, save_name: str | None, streams, selected)
 
 def _task_temp_root(args: argparse.Namespace, streams, default_save_base: str | None) -> Path:
     base_root = Path(args.tmp_dir).expanduser() if getattr(args, "tmp_dir", None) else _default_tmp_root()
+    base_root = safe_temp_root(base_root, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     label = args.save_name or _input_temp_label(getattr(args, "input", "unidl"))
     # Temporary paths are nested below per-track directories and section
     # files.  Keeping the full title here can push the final section path
@@ -7368,7 +7530,12 @@ def _task_temp_root(args: argparse.Namespace, streams, default_save_base: str | 
     # prefix is only for diagnostics and does not affect resume matching.
     safe_label = _short_temp_label(_save_name_base(str(label)), 40)
     digest = hashlib.sha1(_task_temp_payload(args, streams).encode("utf-8")).hexdigest()[:12]
-    return bounded_path(base_root / f"{safe_label}_{digest}", max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+    # Keep room for ``vod``/``postprocess`` and the per-track resume directory
+    # below this root; cleanup owns this exact directory as well.
+    return bounded_path(
+        base_root / f"{safe_label}_{digest}",
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT - 100,
+    )
 
 
 def _legacy_task_temp_root(args: argparse.Namespace, streams, default_save_base: str | None) -> Path:
@@ -7396,8 +7563,12 @@ def _task_temp_subdir(args: argparse.Namespace, name: str) -> Path:
     root = getattr(args, "_unidown_task_temp_root", None)
     if root is None:
         base_root = Path(args.tmp_dir).expanduser() if getattr(args, "tmp_dir", None) else _default_tmp_root()
-        root = base_root / "unidown_task"
-    return Path(root).expanduser() / name
+        root = safe_temp_root(base_root, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT) / "unidown_task"
+    return bounded_child_path(
+        Path(root).expanduser(),
+        _safe_output_name(name),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
 
 
 def _short_temp_label(value: str, limit: int = 40) -> str:

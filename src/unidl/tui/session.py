@@ -2270,7 +2270,30 @@ class SessionController:
         self.post_log(f"tracks: {tracks.summary()}")
 
         interactive = self.settings.get("track_mode") == "interactive"
-        if interactive and mode != "command":
+        selection_error = str(getattr(tracks, "selection_error", "") or "")
+        if selection_error and mode == "list":
+            self.post_log(
+                f"automatic track selection found no match ({selection_error}); "
+                "the track list is shown for manual review",
+                "warning",
+            )
+        if selection_error and mode != "list":
+            # Hard auto-selection constraints never widen silently. Keep the
+            # delivery alive and let the user choose from the complete ladder.
+            self.post_log(
+                f"automatic track selection found no match ({selection_error}); "
+                "choose tracks manually",
+                "warning",
+            )
+            chosen = self._ask_tracks(tracks, presenter, ctx, playback)
+            if chosen is None:
+                self.post_log("skipped", "warning")
+                return SKIPPED, "tracks not chosen"
+            tracks.selected = chosen
+            tracks.selection_error = ""
+            if self.engine.hybrid_enabled(self.settings, playback=playback, tracks=tracks):
+                tracks.selected = self.engine.ensure_hybrid_tracks(tracks, tracks.selected)
+        elif interactive and mode != "command":
             chosen = self._ask_tracks(tracks, presenter, ctx, playback)
             if chosen is None:
                 self.post_log("skipped", "warning")

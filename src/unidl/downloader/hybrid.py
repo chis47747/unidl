@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .embedding import current_download_runtime, managed_run
+from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, safe_temp_root
 
 
 def _range(stream: Any) -> str:
@@ -127,7 +128,10 @@ def _ensure(path: Path) -> None:
 def _hybrid_one(hdr: Any, dv: Any, work: Path, tools: dict[str, str]) -> Any:
     fps = _validate(_probe(Path(hdr.path), tools), _probe(Path(dv.path), tools))
     hdr_hevc, dv_hevc, rpu, injected = (work / name for name in ("hdr10.hevc", "dv.hevc", "rpu.bin", "hybrid.hevc"))
-    output = Path(hdr.path).with_name(Path(hdr.path).name + ".hybrid.mkv")
+    output = bounded_path(
+        Path(hdr.path).with_name(Path(hdr.path).name + ".hybrid.mkv"),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
     try:
         for source, target in ((hdr.path, hdr_hevc), (dv.path, dv_hevc)):
             _run([tools["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source), "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", str(target)], "HEVC extraction")
@@ -158,11 +162,14 @@ def process_hybrid_tracks(tracks: list[Any], *, enabled: bool, temp_dir: str | P
     tools = _tools()
     by_stream = {id(item.stream): item for item in tracks}
     donors = {id(dv) for _, dv in pairs}
-    if temp_dir:
-        Path(temp_dir).mkdir(parents=True, exist_ok=True)
+    temp_root = safe_temp_root(
+        Path(temp_dir).expanduser() if temp_dir else Path(tempfile.gettempdir()),
+        max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    )
+    temp_root.mkdir(parents=True, exist_ok=True)
     replacements: dict[int, Any] = {}
     for base, dv in pairs:
-        with tempfile.TemporaryDirectory(prefix="unidl-hybrid-", dir=str(temp_dir) if temp_dir else None) as work:
+        with tempfile.TemporaryDirectory(prefix="unidl-hybrid-", dir=str(temp_root)) as work:
             replacements[id(base)] = _hybrid_one(by_stream[id(base)], by_stream[id(dv)], Path(work), tools)
     return [replacements.get(id(item.stream), item) for item in tracks if id(item.stream) not in donors]
 
