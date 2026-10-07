@@ -10,6 +10,7 @@ and extending the project.
   Flow asks, playback, DRM, credentials and testing.
 - [Configuration](configuration.md) — YAML, paths, devices and runtime state.
 - [Settings](settings.md) — global, service and output-track preferences.
+- [Track selection](track-selection.md) — output scope, filters, Best/All rules and batch behavior.
 - [Requirements and installation](requirements.md) — supported Python versions,
   external tools, package installs and runtime data.
 - [Readiness](readiness.md) — core, global and optional-enhancement dependencies.

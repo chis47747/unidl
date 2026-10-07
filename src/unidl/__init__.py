@@ -2,7 +2,7 @@
 
 from .core.binaries import configure_binary_path
 
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 
 # Keep system installations first while making project-local tools available to
 # every existing subprocess lookup and to child processes spawned by the

@@ -554,6 +554,11 @@ class SessionController:
         self._frame_lock = threading.Lock()
         self._frame_version = 0
         self._live_frame_mode = False
+        # At most one worker-to-UI frame notification may be pending. The
+        # callback reads the newest shared snapshot, so bursts from concurrent
+        # tracks are coalesced without leaving the delivery card blank on
+        # terminals whose timer/layout scheduling is less eager.
+        self._frame_ui_pending = False
 
         self.root: ServiceScreen | None = None
         self.flow_screen: FlowScreen | None = None
@@ -889,10 +894,10 @@ class SessionController:
         would produce a wall of near-identical lines - which is exactly what it used
         to do. An empty list means there is nothing running to show.
 
-        VOD and live frames use the same latest-picture slot. Textual's
-        ``call_from_thread`` waits for the UI callback, so marshalling every
-        segment or byte update stalls workers behind layout and visibly flashes
-        the terminal. :class:`DownloadScreen` samples this slot at a bounded rate.
+        VOD and live frames use the same latest-picture slot. A single coalesced
+        UI notification paints the newest snapshot immediately, while the
+        screen's bounded sampler remains a fallback for resizes and late mounts;
+        per-segment callbacks never queue one UI job each.
 
         An empty VOD frame is a terminal state and is delivered immediately. A
         live recorder may briefly clear while rebuilding its picture, so that
@@ -906,8 +911,18 @@ class SessionController:
                 return
             self.last_frame = snapshot
             self._frame_version += 1
+            if snapshot:
+                if self._frame_ui_pending:
+                    return
+                self._frame_ui_pending = True
+            else:
+                self._frame_ui_pending = False
         if not snapshot:
             self._on_ui(self._frame_all, snapshot)
+            return
+        if not self._on_ui(self._flush_latest_frame):
+            with self._frame_lock:
+                self._frame_ui_pending = False
 
     def update_frame_columns(self, width: int) -> None:
         """Keep embedded UniDL's progress width aligned with the TUI panel."""
@@ -946,6 +961,13 @@ class SessionController:
                     show(rows)
                 except Exception:
                     pass
+
+    def _flush_latest_frame(self) -> None:
+        """Paint the newest coalesced progress picture on the UI thread."""
+        with self._frame_lock:
+            rows = list(self.last_frame)
+            self._frame_ui_pending = False
+        self._frame_all(rows)
 
     def post_status(self, message: str, state: str = logline.LIVE_STATE) -> None:
         """What is happening right now, on one line that replaces the last one.
@@ -2270,6 +2292,8 @@ class SessionController:
         self.post_log(f"tracks: {tracks.summary()}")
 
         interactive = self.settings.get("track_mode") == "interactive"
+        automatic = not interactive
+        batch = (self.batch_total or 0) > 1
         selection_error = str(getattr(tracks, "selection_error", "") or "")
         if selection_error and mode == "list":
             self.post_log(
@@ -2278,6 +2302,17 @@ class SessionController:
                 "warning",
             )
         if selection_error and mode != "list":
+            if automatic and batch:
+                # A batch must never stop for a picker that has no answer
+                # shared by the remaining titles. Keep the current title honest
+                # and let the queue advance; a user can retry it later with the
+                # interactive picker or adjust the shared rule.
+                self.post_log(
+                    f"automatic track selection found no match ({selection_error}); "
+                    "skipping this title in the batch",
+                    "warning",
+                )
+                return SKIPPED, "automatic track selection had no match"
             # Hard auto-selection constraints never widen silently. Keep the
             # delivery alive and let the user choose from the complete ladder.
             self.post_log(
@@ -2473,6 +2508,7 @@ class SessionController:
                 written = self.engine.export_document(
                     playback,
                     tracks,
+                    settings=self.settings,
                     service_id=self.service.ID,
                     service_name=self.service.NAME,
                     path=self.export_path,
@@ -2481,6 +2517,33 @@ class SessionController:
                         exports.MASTER_MANIFEST,
                     ),
                 )
+            except TypeError as exc:
+                if "unexpected keyword argument 'settings'" not in str(exc):
+                    self.post_error(
+                        "Could not write the export",
+                        str(exc),
+                        "The keys are in the log and the vault either way - nothing about this title has been lost.",
+                    )
+                    return FAILED, "export not written"
+                try:
+                    written = self.engine.export_document(
+                        playback,
+                        tracks,
+                        service_id=self.service.ID,
+                        service_name=self.service.NAME,
+                        path=self.export_path,
+                        export_manifest_type=self.settings.get(
+                            exports.EXPORT_MANIFEST_TYPE_KEY,
+                            exports.MASTER_MANIFEST,
+                        ),
+                    )
+                except Exception as fallback_exc:
+                    self.post_error(
+                        "Could not write the export",
+                        str(fallback_exc),
+                        "The keys are in the log and the vault either way - nothing about this title has been lost.",
+                    )
+                    return FAILED, "export not written"
             except Exception as exc:
                 self.post_error(
                     "Could not write the export",

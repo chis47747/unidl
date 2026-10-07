@@ -2656,7 +2656,7 @@ def _stream_prefers_matroska_live_pipe(stream) -> bool:
 
 
 _HLS_SEGMENT_CRYPTO_SCHEMES = {"AES_128", "AES_128_ECB", "CHACHA20", "SIGMA"}
-_AUDIO_CODEC_LABELS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "Opus"}
+_AUDIO_CODEC_LABELS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "Opus"}
 _FRAGMENTED_MP4_EXTS = {"m4s", "mp4", "m4a", "m4v", "cmfv", "cmfa", "mp4a", "mp4v"}
 _JSON_FMP4_PART_DECRYPT_MIN_SEGMENTS = 512
 _JSON_FMP4_PART_DECRYPT_MIN_BYTES = 1024 * 1024 * 1024

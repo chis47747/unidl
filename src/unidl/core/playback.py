@@ -281,6 +281,15 @@ class Playback:
     #: over the app-wide video-quality setting for this playback only.
     video_quality_hint: str = ""
 
+    #: Automatic output rules captured by an export. Empty values mean use the
+    #: current settings, while non-empty values preserve the original batch
+    #: scope when the export is imported on another machine.
+    output_scope: str = ""
+    output_types: tuple[str, ...] = ()
+    video_selection: str = ""
+    audio_selection: str = ""
+    subtitle_selection: str = ""
+
     #: What the service asked its playback API for, and what that API explicitly
     #: reported back. These are deliberately separate from the parsed manifest:
     #: a requested UHD profile can legitimately return an HD rendition.

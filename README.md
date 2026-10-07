@@ -192,6 +192,13 @@ then choose whether to download now or save a command/export. A service's own
 settings control provider API/profile choices; the shared track settings control
 the final output tracks only. See [docs/settings.md](docs/settings.md).
 
+Automatic track selection can be limited to a single media type with **Output
+scope** (video, audio or subtitle), or use **Custom output types**. Each type
+supports selecting the best matching track or all matching tracks, which makes
+subtitle-only, audio-only and video-only episode batches possible without
+opening the picker. A normal package remains the default. See
+[docs/settings.md](docs/settings.md) for the matching and batch behavior.
+
 For live channels, choose the tracks first, then choose recording, replay/DVR
 behavior and duration. Leave the duration at `00:00:00` for an unlimited
 recording and use Stop/Back/Esc to finish it.

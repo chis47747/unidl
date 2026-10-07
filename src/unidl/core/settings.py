@@ -1179,6 +1179,33 @@ TRACK_SETTINGS: list[Setting] = [
         "Whether to show the track picker or select silently using these rules.",
     ),
     _choice(
+        "output_scope",
+        "Output scope",
+        [
+            ("package", "Normal package"),
+            ("video", "Video only"),
+            ("audio", "Audio only"),
+            ("subtitle", "Subtitle only"),
+            ("custom", "Custom"),
+        ],
+        "package",
+        "Choose which media types automatic selection should output. Normal package keeps the existing video, audio and subtitle behaviour.",
+    ),
+    Setting(
+        "output_types",
+        "Custom output types",
+        "text",
+        default="video,audio,subtitle",
+        help="Used when Output scope is Custom. Comma separated: video, audio, subtitle.",
+    ),
+    _choice(
+        "video_selection",
+        "Video selection",
+        [("best", "Best one"), ("all", "All matching tracks")],
+        "best",
+        "Best one chooses the highest-quality video after filters. All keeps every video matching the selected constraints.",
+    ),
+    _choice(
         "video_quality",
         "Video quality",
         [
@@ -1213,6 +1240,7 @@ TRACK_SETTINGS: list[Setting] = [
             ("aac", "AAC"),
             ("ac3", "AC-3"),
             ("eac3", "E-AC-3"),
+            ("ac4", "AC-4"),
             ("opus", "Opus"),
             ("flac", "FLAC"),
             ("alac", "ALAC"),

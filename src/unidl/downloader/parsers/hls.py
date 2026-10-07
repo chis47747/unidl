@@ -395,7 +395,7 @@ def _variant_has_muxed_audio(attrs: dict[str, str], media_type: str) -> bool:
 
 
 def _codecs_have_audio(codecs: str | None) -> bool:
-    return pretty_codec(codecs, "audio") in {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "DTS", "DTS-HD", "DTS:X", "Opus"}
+    return pretty_codec(codecs, "audio") in {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "DTS", "DTS-HD", "DTS:X", "Opus"}
 
 
 def _variant_video_range(attrs: dict[str, str], child_reference: str | None = None) -> str | None:
@@ -839,7 +839,7 @@ def _infer_media_type_from_variant(attrs: dict[str, str]) -> str:
     if attrs.get("RESOLUTION"):
         return "video"
     pretty = pretty_codec(codecs, "audio")
-    if pretty and pretty in {"AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "DTS", "DTS-HD", "DTS:X", "Opus"} and "," not in codecs:
+    if pretty and pretty in {"AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "DTS", "DTS-HD", "DTS:X", "Opus"} and "," not in codecs:
         return "audio"
     return "video"
 

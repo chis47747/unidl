@@ -21,6 +21,7 @@ class SelectionOptions:
     audio_profile: str | None = None
     audio_quality: str | None = None
     audio_selection: str | None = None
+    video_selection: str | None = None
     audio_channels: str | None = None
     subtitle_kind: str | None = None
     subtitle_selection: str | None = None
@@ -43,6 +44,7 @@ class SelectionOptions:
                 self.audio_profile,
                 self.audio_quality,
                 self.audio_selection,
+                self.video_selection,
                 self.audio_channels,
                 self.subtitle_kind,
                 self.subtitle_selection,
@@ -114,8 +116,15 @@ def _select_video(candidates: list[StreamInfo], options: SelectionOptions) -> li
     buckets = [_filter_video_range(candidates, item) for item in range_tokens] if range_tokens else [candidates]
 
     heights = _numbers(options.video or expr.get("res") or expr.get("height"))
-    mode = _mode(options.video, expr, default="best")
+    mode = (options.video_selection or _mode(options.video, expr, default="best")).lower()
     if mode == "all":
+        if heights:
+            return _dedupe(
+                stream
+                for bucket in buckets
+                for stream in bucket
+                if _height(stream) in heights
+            )
         return _dedupe(stream for bucket in buckets for stream in bucket)
     if mode.startswith("best") and not heights:
         return _dedupe(stream for bucket in buckets for stream in _top_n(bucket, _best_count(mode), key=_video_sort_key))
@@ -498,7 +507,7 @@ def _audio_type_matches(stream: StreamInfo, value: str) -> bool:
     value = _normalize_audio_type(value)
     if value == "atmos":
         return _audio_profile_matches(stream, value)
-    if value in {"aac", "ac3", "dd", "ddplus", "eac3", "opus", "vorbis", "flac", "alac", "mp3"}:
+    if value in {"aac", "ac3", "ac4", "dd", "ddplus", "eac3", "opus", "vorbis", "flac", "alac", "mp3"}:
         codec = "eac3" if value == "ddplus" else "ac3" if value in {"dd", "ac3"} else value
         return _audio_codec_matches(stream, codec)
     text = _stream_blob(stream)
@@ -526,6 +535,7 @@ def _audio_codec_matches(stream: StreamInfo, value: str) -> bool:
     aliases = {
         "aac": ("aac", "mp4a"),
         "ac3": ("ac3", "ac-3"),
+        "ac4": ("ac4", "ac-4", "dac4"),
         "eac3": ("eac3", "ec3", "e-ac-3"),
         "opus": ("opus",),
         "vorbis": ("vorbis",),

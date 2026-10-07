@@ -6,6 +6,21 @@ says nothing until it is over is a run you cannot supervise.
 
 So screen 4 grows a queue.
 
+## Automatic single-type batches
+
+The shared Track settings can make a batch download only one media type. Set
+**Track selection** to `auto`, choose **Output scope** as **Video only**, **Audio
+only**, or **Subtitle only**, and choose **All matching tracks** when every
+matching rendition is wanted. **Custom** accepts a comma-separated combination
+of `video`, `audio`, and `subtitle`. The default **Normal package** remains the
+usual video/audio/subtitle selection.
+
+Automatic batches never open a picker between episodes. If one episode has no
+track matching the complete rule (for example, no English forced subtitle), it
+is marked **skipped** and the remaining episodes continue. For a single title,
+the same no-match result opens the normal picker so the user can correct the
+selection manually.
+
 ```
 finished with errors  ·  1 of 2 failed  ·  ^b to go back
 

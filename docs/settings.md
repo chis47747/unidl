@@ -332,10 +332,13 @@ provider API request or replace a service's explicit `license_*` policy.
 | Setting | Values | Default |
 |---------|--------|---------|
 | `track_mode` | `interactive` / `auto` | `interactive` |
+| `output_scope` | `package` / `video` / `audio` / `subtitle` / `custom` | `package` |
+| `output_types` | comma separated `video`, `audio`, `subtitle` (Custom only) | `video,audio,subtitle` |
+| `video_selection` | `best` / `all` | `best` |
 | `video_quality` | `best` / `2160` / `1440` / `1080` / `720` / `480` / `worst` | `best` |
 | `video_codec` | `any` / `h264` / `h265` / `h266` / `av1` / `vp9` | `any` |
 | `video_range` | `any` / `sdr` / `hdr10` / `hdr10+` / `hlg` / `dv` | `any` |
-| `audio_codec` | `any` / `aac` / `ac3` / `eac3` / `opus` / `flac` / `alac` / `mp3` | `any` |
+| `audio_codec` | `any` / `aac` / `ac3` / `eac3` / `ac4` / `opus` / `flac` / `alac` / `mp3` | `any` |
 | `audio_profile` | `any` / `atmos` / `main` / `description` / `commentary` / `dialog` | `any` |
 | `audio_quality` | `best` / `worst` | `best` |
 | `audio_channels` | `any` / `2` / `6` / `8` | `any` |
@@ -360,6 +363,26 @@ appear after key acquisition. With the explicit compatibility switch on, Core
 also uses the resulting track objects to locate their own KIDs/init data, without
 turning any checkbox into a service profile choice.
 
+`output_scope` controls the media types that automatic selection is allowed to
+choose. `package` is the compatibility default and selects video, audio and
+subtitle tracks as before. `video`, `audio`, and `subtitle` are useful for batch
+jobs such as collecting every episode's subtitles without opening the picker.
+`custom` reads the comma-separated `output_types` value. `video_selection` and
+the existing `audio_selection`/`subtitle_selection` then choose either the best
+matching track(s) or all tracks that pass the filters. Narrow scopes disable
+automatic muxing so each selected track remains an independent output with a
+track-aware filename.
+
+The selected scope and Best/All rules are written into saved command metadata
+and native exports. Re-running a command uses its exact selected indexes; an
+imported native export restores its saved output scope before automatic
+selection.
+
+When an automatic rule has no match, a single title is offered the normal manual
+picker. In a batch, the title is recorded as skipped and the remaining titles
+continue; the batch never pauses waiting for a picker that cannot share one
+answer across episodes.
+
 Automatic selection treats language, codec, profile, channels and subtitle type
 as hard filters combined with AND. `best` or `worst` only ranks tracks remaining
 after those filters; it never widens them. If no track matches, UniDL reports the
@@ -369,7 +392,7 @@ without cancelling the delivery. `Atmos` is an audio profile, not a codec;
 Language matching accepts exact BCP-47 tags and their primary language (so
 `es-419` matches `es`), while `und` and unknown provider tags are not guessed.
 
-`audio_format` only applies to audio-only titles. Its choices are discovered
+`audio_format` applies to audio-only titles and Audio-only output scope. Its choices are discovered
 from native delivery core at runtime, so the settings panel never advertises an encoder the
 installed engine cannot provide. See [audio.md](audio.md).
 

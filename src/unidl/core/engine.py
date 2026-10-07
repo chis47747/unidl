@@ -2549,6 +2549,11 @@ class Engine:
             audio_only=playback.audio_only,
             strict=playback.strict_track_selection,
             quality_override=playback.video_quality_hint,
+            output_scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+            video_selection=playback.video_selection or None,
+            audio_selection=playback.audio_selection or None,
+            subtitle_selection=playback.subtitle_selection or None,
         )
         tracks.selected = result.selected
         tracks.selection_error = "; ".join(result.unmatched)
@@ -2662,6 +2667,41 @@ class Engine:
             quality_override=quality_override,
         ).selected
 
+    @staticmethod
+    def output_scope_types(
+        settings: Settings,
+        *,
+        scope: str | None = None,
+        output_types: Sequence[str] | None = None,
+    ) -> set[str]:
+        """Return the media types automatic output selection should consider.
+
+        ``package`` is deliberately the compatibility default. The narrower
+        scopes are opt-in and prevent an absent audio/subtitle rendition from
+        blocking a batch whose purpose is to collect only the requested type.
+        """
+        scope = str(scope or settings.get("output_scope", "package") or "package").strip().lower()
+        if scope == "video":
+            return {"video"}
+        if scope == "audio":
+            return {"audio"}
+        if scope == "subtitle":
+            return {"subtitle"}
+        if scope == "custom":
+            raw_value = output_types if output_types is not None else settings.get("output_types", "")
+            raw = (
+                list(raw_value)
+                if isinstance(raw_value, (list, tuple, set))
+                else str(raw_value or "").split(",")
+            )
+            selected = {
+                str(token).strip().lower()
+                for token in raw
+                if str(token).strip().lower() in {"video", "audio", "subtitle"}
+            }
+            return selected or {"video", "audio", "subtitle"}
+        return {"video", "audio", "subtitle"}
+
     def auto_select_result(
         self,
         streams: Sequence[StreamInfo],
@@ -2670,6 +2710,11 @@ class Engine:
         audio_only: bool = False,
         strict: bool = False,
         quality_override: str = "",
+        output_scope: str | None = None,
+        output_types: Sequence[str] | None = None,
+        video_selection: str | None = None,
+        audio_selection: str | None = None,
+        subtitle_selection: str | None = None,
     ) -> SelectionResult:
         """Return automatic tracks and the hard constraints that missed.
 
@@ -2678,6 +2723,11 @@ class Engine:
         """
         streams = self._normalize_audio_only_streams(streams, audio_only=audio_only)
         options = SelectionOptions()
+        selected_types = {"audio"} if audio_only else self.output_scope_types(
+            settings,
+            scope=output_scope,
+            output_types=output_types,
+        )
 
         if audio_only:
             # No video selector at all rather than a filter that drops it: a
@@ -2688,50 +2738,53 @@ class Engine:
                 return SelectionResult(selected)
             return SelectionResult([], ("audio",))
 
-        quality = quality_override or settings.get("video_quality", "best")
-        codec = settings.get("video_codec", "any")
-        video_range = settings.get("video_range", "any")
-        parts = []
-        if quality == "best":
-            parts.append("for=best")
-        elif quality == "worst":
-            parts.append("for=worst")
-        elif quality:
-            parts.append(f"res={quality}")
-            parts.append("for=best")
-        if codec and codec != "any":
-            parts.append(f"codecs={codec}")
-        if video_range and video_range != "any":
-            parts.append(f"range={video_range}")
-        options.select_video = ":".join(parts) if parts else "best"
+        if "video" in selected_types:
+            quality = quality_override or settings.get("video_quality", "best")
+            codec = settings.get("video_codec", "any")
+            video_range = settings.get("video_range", "any")
+            parts = []
+            if quality == "best":
+                parts.append("for=best")
+            elif quality == "worst":
+                parts.append("for=worst")
+            elif quality:
+                parts.append(f"res={quality}")
+                parts.append("for=best")
+            if codec and codec != "any":
+                parts.append(f"codecs={codec}")
+            if video_range and video_range != "any":
+                parts.append(f"range={video_range}")
+            options.select_video = ":".join(parts) if parts else "best"
+            options.video_selection = str(video_selection or settings.get("video_selection", "best") or "best").lower()
 
         audio_parts = []
-        langs = str(settings.get("audio_langs", "") or "").strip()
-        if langs:
-            audio_parts.append(f"lang={langs}")
-        audio_codec = settings.get("audio_codec", "any")
-        audio_profile = settings.get("audio_profile", "any")
-        # ``atmos`` was historically exposed as a codec. Preserve old config
-        # files while routing it through the normalized profile matcher.
-        if str(audio_codec).lower() == "atmos" and str(audio_profile).lower() in {"", "any"}:
-            audio_codec = "any"
-            audio_profile = "atmos"
-        if audio_codec and audio_codec != "any":
-            audio_parts.append(f"codecs={audio_codec}")
-        if audio_profile and audio_profile != "any":
-            audio_parts.append(f"profile={audio_profile}")
-        channels = settings.get("audio_channels", "any")
-        if channels and channels != "any":
-            audio_parts.append(f"channels={channels}")
-        audio_selection = str(settings.get("audio_selection", "best") or "best").lower()
-        audio_quality = str(settings.get("audio_quality", "best") or "best").lower()
-        audio_parts.append("for=all" if audio_selection == "all" else f"for={audio_quality}")
-        options.select_audio = ":".join(audio_parts)
+        if "audio" in selected_types:
+            langs = str(settings.get("audio_langs", "") or "").strip()
+            if langs:
+                audio_parts.append(f"lang={langs}")
+            audio_codec = settings.get("audio_codec", "any")
+            audio_profile = settings.get("audio_profile", "any")
+            # ``atmos`` was historically exposed as a codec. Preserve old config
+            # files while routing it through the normalized profile matcher.
+            if str(audio_codec).lower() == "atmos" and str(audio_profile).lower() in {"", "any"}:
+                audio_codec = "any"
+                audio_profile = "atmos"
+            if audio_codec and audio_codec != "any":
+                audio_parts.append(f"codecs={audio_codec}")
+            if audio_profile and audio_profile != "any":
+                audio_parts.append(f"profile={audio_profile}")
+            channels = settings.get("audio_channels", "any")
+            if channels and channels != "any":
+                audio_parts.append(f"channels={channels}")
+            audio_selection = str(audio_selection or settings.get("audio_selection", "best") or "best").lower()
+            audio_quality = str(settings.get("audio_quality", "best") or "best").lower()
+            audio_parts.append("for=all" if audio_selection == "all" else f"for={audio_quality}")
+            options.select_audio = ":".join(audio_parts)
 
         sub_langs = str(settings.get("sub_langs", "") or "").strip()
-        if sub_langs and sub_langs != "none":
+        if "subtitle" in selected_types and sub_langs and sub_langs != "none":
             subtitle_kinds = str(settings.get("subtitle_kinds", "normal,forced") or "all").strip()
-            subtitle_selection = str(settings.get("subtitle_selection", "all") or "all").lower()
+            subtitle_selection = str(subtitle_selection or settings.get("subtitle_selection", "all") or "all").lower()
             subtitle_parts = []
             if sub_langs != "all":
                 subtitle_parts.append(f"lang={sub_langs}")
@@ -2741,6 +2794,13 @@ class Engine:
             options.select_subtitle = ":".join(subtitle_parts)
 
         result = select_streams_detailed(list(streams), options)
+        if selected_types != {"video", "audio", "subtitle"}:
+            available_types = {
+                "subtitle" if stream.media_type in {"subtitle", "subtitles", "text"} else stream.media_type
+                for stream in streams
+            }
+            for media_type in sorted(selected_types - available_types):
+                result = SelectionResult(result.selected, (*result.unmatched, media_type))
         chosen = result.selected
         if result.unmatched:
             # A partial result is still unsafe: selecting the matching video
@@ -3192,7 +3252,16 @@ class Engine:
         if unknown_selected:
             raise ValueError("selected track is not part of the parsed manifest")
 
-        audio_format = self.audio_format_for(playback, settings, tracks)
+        selected_output_types = self.output_scope_types(
+            settings,
+            scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+        )
+        audio_format = (
+            self.audio_format_for(playback, settings, tracks)
+            if playback.audio_only or "audio" in selected_output_types
+            else None
+        )
         audio_sidecar = (
             self.write_audio_sidecar(
                 playback,
@@ -3206,11 +3275,18 @@ class Engine:
             if self.embed_chapters(settings)
             else None
         )
+        output_types = self.output_scope_types(
+            settings,
+            scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+        )
+        separate_output = output_types != {"video", "audio", "subtitle"}
         mux_format = (
             None
-            if playback.audio_only
+            if playback.audio_only or separate_output
             else str(settings.get("mux_format", "mkv"))
         )
+        mux = False if separate_output or playback.audio_only else None
         drm = playback.drm
         live_real_time_merge = bool(settings.get("live_real_time_merge", True))
         live_keep_segments = bool(settings.get("live_keep_segments", False))
@@ -3265,6 +3341,7 @@ class Engine:
             check_segments_count=bool(settings.get("check_segments_count", True)),
             resume=bool(settings.get("resume_parts", True)),
             downloader=downloader,
+            mux=mux,
             mux_format=mux_format,
             muxer=muxer,
             mux_imports=tuple(
@@ -3274,6 +3351,7 @@ class Engine:
             chapters_file=chapters_sidecar,
             subtitle_format=str(settings.get("sub_format", "srt")),
             auto_subtitle_fix=bool(settings.get("auto_subtitle_fix", True)),
+            subtitle_only=output_types == {"subtitle"},
             audio_format=audio_format,
             audio_metadata_file=audio_sidecar,
             decode_audio_vivid=overrides.decode_audio_vivid,
@@ -3351,7 +3429,13 @@ class Engine:
         # Audio-only output is already a single final file after UniDL's
         # transcode/tagging pass. Passing the app-wide MKV default would make
         # UniDL mux that MP3 again and discard the audio-only output contract.
-        mux_format = None if playback.audio_only else str(settings.get("mux_format", "mkv"))
+        output_types = self.output_scope_types(
+            settings,
+            scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+        )
+        separate_output = output_types != {"video", "audio", "subtitle"}
+        mux_format = None if playback.audio_only or separate_output else str(settings.get("mux_format", "mkv"))
         muxer = str(settings.get("muxer", "auto") or "auto")
         if muxer not in {"auto", "ffmpeg", "mkvmerge"}:
             muxer = "auto"
@@ -3383,11 +3467,13 @@ class Engine:
             mux_format=mux_format,
             muxer=muxer,
             sub_format=str(settings.get("sub_format", "srt")),
+            sub_only=output_types == {"subtitle"},
             auto_subtitle_fix=bool(settings.get("auto_subtitle_fix", True)),
             http_request_timeout=max(1, int(settings.get("http_timeout", 30) or 30)),
             check_segments_count=bool(settings.get("check_segments_count", True)),
             no_resume=not bool(settings.get("resume_parts", True)),
             downloader=downloader,
+            mux=False if separate_output or playback.audio_only else None,
             tmp_dir=str(self.config.paths.temp),
             is_live=playback.is_live,
             extra_args=list(playback.extra_args),
@@ -3427,7 +3513,16 @@ class Engine:
         )
         if chapters_sidecar is not None:
             options.chapters_file = str(chapters_sidecar)
-        audio_format = self.audio_format_for(playback, settings)
+        selected_output_types = self.output_scope_types(
+            settings,
+            scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+        )
+        audio_format = (
+            self.audio_format_for(playback, settings)
+            if playback.audio_only or "audio" in selected_output_types
+            else None
+        )
         if audio_format:
             options.audio_format = audio_format
             sidecar = self.write_audio_sidecar(
@@ -3582,6 +3677,20 @@ class Engine:
         def note(value: str = "") -> None:
             lines.append(f"# {value}" if value else "#")
 
+        output_types = self.output_scope_types(
+            settings,
+            scope=playback.output_scope or None,
+            output_types=playback.output_types or None,
+        )
+        note(
+            "selection: "
+            f"output_scope={playback.output_scope or settings.get('output_scope', 'package') or 'package'} "
+            f"output_types={','.join(sorted(output_types))} "
+            f"video_selection={playback.video_selection or settings.get('video_selection', 'best') or 'best'} "
+            f"audio_selection={playback.audio_selection or settings.get('audio_selection', 'best') or 'best'} "
+            f"subtitle_selection={playback.subtitle_selection or settings.get('subtitle_selection', 'all') or 'all'}"
+        )
+        note()
         if playback.keys:
             note("keys:")
             lines += [f"#   {key}" for key in playback.keys]
@@ -3624,6 +3733,7 @@ class Engine:
         playback: Playback,
         tracks: TrackSet | None = None,
         *,
+        settings: Settings | None = None,
         service_id: str = "",
         service_name: str = "",
         path: Path | None = None,
@@ -3663,6 +3773,17 @@ class Engine:
                 playback,
                 tracks,
                 media_manifest=media_manifest,
+                selection=(
+                    {
+                        "output_scope": str((settings or {}).get("output_scope", "package") or "package"),
+                        "output_types": sorted(self.output_scope_types(settings)) if settings is not None else ["video", "audio", "subtitle"],
+                        "video_selection": str((settings or {}).get("video_selection", "best") or "best"),
+                        "audio_selection": str((settings or {}).get("audio_selection", "best") or "best"),
+                        "subtitle_selection": str((settings or {}).get("subtitle_selection", "all") or "all"),
+                    }
+                    if settings is not None
+                    else {}
+                ),
             )
 
         def new_document() -> exports.Document:

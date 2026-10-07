@@ -215,6 +215,9 @@ class Entry:
     attachments: list[Attachment] = field(default_factory=list)
     lyrics: Lyrics | None = None
     audio_codec_hint: str = ""
+    #: Automatic output rules captured with the title so import can preserve
+    #: subtitle/audio/video-only batch intent.
+    selection: dict[str, Any] = field(default_factory=dict)
 
     def key_ids(self) -> list[str]:
         """The key ids this entry can open, lower-case hex, no dashes."""
@@ -277,6 +280,15 @@ class Entry:
             attachments=list(self.attachments),
             lyrics=self.lyrics,
             audio_codec_hint=self.audio_codec_hint,
+            output_scope=_text(self.selection.get("output_scope")),
+            output_types=tuple(
+                str(value).strip().lower()
+                for value in (self.selection.get("output_types") or [])
+                if str(value).strip()
+            ),
+            video_selection=_text(self.selection.get("video_selection")),
+            audio_selection=_text(self.selection.get("audio_selection")),
+            subtitle_selection=_text(self.selection.get("subtitle_selection")),
         )
 
     def as_document(self) -> dict[str, Any]:
@@ -332,6 +344,8 @@ class Entry:
             document["lyrics"] = self.lyrics.as_document()
         if self.audio_codec_hint:
             document["audio_codec_hint"] = self.audio_codec_hint
+        if self.selection:
+            document["selection"] = dict(self.selection)
         return document
 
 
@@ -393,6 +407,7 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         attachments=attachments,
         lyrics=lyrics,
         audio_codec_hint=_text(document.get("audio_codec_hint")),
+        selection=dict(document.get("selection") or {}) if isinstance(document.get("selection"), dict) else {},
     )
 
 
@@ -455,6 +470,7 @@ def entry_for(
     tracks: Any = None,
     *,
     media_manifest: dict[str, Any] | None = None,
+    selection: dict[str, Any] | None = None,
 ) -> Entry:
     """Everything about ``playback`` worth writing down, as one entry.
 
@@ -518,6 +534,7 @@ def entry_for(
         attachments=list(playback.attachments),
         lyrics=playback.lyrics,
         audio_codec_hint=playback.audio_codec_hint,
+        selection=dict(selection or {}),
     )
 
 

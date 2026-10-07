@@ -371,7 +371,7 @@ def pretty_codec(codecs: str | None, media_type: str = "unknown") -> str | None:
             (
                 token
                 for token in tokens
-                if token.lower().startswith(("mp4a", "aac", "ac-3", "ec-3", "ec3", "dts", "opus", "flac"))
+                if token.lower().startswith(("mp4a", "aac", "ac-3", "ac-4", "ac4", "ec-3", "ec3", "dts", "opus", "flac"))
             ),
             tokens[0],
         )
@@ -412,6 +412,8 @@ def pretty_codec(codecs: str | None, media_type: str = "unknown") -> str | None:
         return "Audio Vivid"
     if lowered.startswith("ac-3") or lowered.startswith("dac3"):
         return "AC-3"
+    if lowered.startswith(("ac-4", "ac4", "dac4")):
+        return "AC-4"
     if lowered.startswith(("ddplus", "ddp", "eac3", "e-ac-3")) or "ddplus" in lowered:
         return "E-AC-3 Atmos" if "atmos" in lowered or "joc" in lowered else "E-AC-3"
     if lowered.startswith(("ec-3", "ec3")) or lowered.startswith("dec3"):

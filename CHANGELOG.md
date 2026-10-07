@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.3.3] - 2026-10-07
+
+### Windows progress
+
+- Fixed download progress cards that could remain empty in narrow Windows terminals, including Python 3.14 environments.
+
+### Track selection
+
+- Added detailed language, codec, audio-profile, channel, subtitle-type and quality selection controls with safe manual picker recovery.
+- Documented the track-selection filters, ranking behavior and manual fallback in the new track-selection guide.
+
 ## [2.3.2] - 2026-10-06
 
 ### Windows paths

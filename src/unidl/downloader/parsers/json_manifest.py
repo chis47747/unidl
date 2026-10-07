@@ -1310,7 +1310,7 @@ def _extension(item: dict[str, Any], url: str, media_type: str) -> str | None:
         if any(token in codec for token in ("ttml", "dfxp", "stpp")):
             return "ttml"
         return "vtt"
-    if media_type == "audio" and any(token in codec for token in ("aac", "ddplus", "eac3", "ac3", "opus", "av3a", "audio-vivid")):
+    if media_type == "audio" and any(token in codec for token in ("aac", "ddplus", "eac3", "ac3", "ac4", "ac-4", "opus", "av3a", "audio-vivid")):
         return "mp4"
     return "mp4"
 

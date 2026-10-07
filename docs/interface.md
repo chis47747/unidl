@@ -89,6 +89,15 @@ controls only whether those chapters are written into the final MKV/MP4 containe
 it does not hide or discard the metadata shown here or stored in exports.
 A multi-title selection adds the queue described in [batch.md](batch.md).
 
+When **Track selection** is set to automatic, **Output scope** controls which
+media types participate: **Normal package** keeps video, audio and subtitles;
+**Video only**, **Audio only**, **Subtitle only**, and **Custom** are intended
+for focused output batches. **Best one** keeps the highest-ranked match for a
+type, while **All matching tracks** keeps every track that passes that type's
+filters. Focused scopes do not mux the selected tracks together, so each output
+gets its own track-aware filename. A single title with no match can fall back to
+the picker; a batch records that title as skipped and continues.
+
 A portable export import enters the same delivery screen and queue. Import first
 matches the service ID (including declared legacy IDs). A match uses the installed
 Service context so custom download preparation, key formatting, sidecars and
