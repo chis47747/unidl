@@ -129,9 +129,11 @@ class SettingsGroupScreen(Screen[None]):
 
         # Reuse the established editors so choice rows keep the same keyboard and
         # focus semantics as the ordinary Settings screen.
-        from .settings_screen import _ChoiceEditor, _MultiChoiceEditor, _TextEditor
+        from .settings_screen import _ChoiceEditor, _DefaultAudioEditor, _MultiChoiceEditor, _TextEditor
 
-        if spec.kind == "multi":
+        if spec.key == "default_audio":
+            editor = _DefaultAudioEditor(spec, self.scope.get(spec.key))
+        elif spec.kind == "multi":
             editor = _MultiChoiceEditor(spec, self.scope.get(spec.key))
         elif spec.kind == "choice":
             editor = _ChoiceEditor(spec, self.scope.get(spec.key))

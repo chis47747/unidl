@@ -721,6 +721,7 @@ def mux_files(
     chapters_file: str | Path | None = None,
     *,
     force_vvc_mp4: bool = True,
+    default_audio: str | None = None,
 ) -> Path:
     primary = [_coerce_mux_input(item) for item in inputs]
     imported = imports or []
@@ -784,8 +785,25 @@ def mux_files(
             args = [executable, "--output", str(output)]
             if chapter_path is not None:
                 args.extend(["--chapters", str(chapter_path)])
-            for item in prepared_inputs:
-                args.extend(_mkvmerge_import_args(item))
+            audio_layout, chosen_audio, _mapped = (
+                _mux_audio_layout(prepared_inputs, selected, executable, default_audio)
+                if default_audio is not None else ([], None, [])
+            )
+            for input_index, item in enumerate(prepared_inputs):
+                flags = []
+                for source_index, track_id, stream in audio_layout:
+                    if source_index == input_index:
+                        flags.extend(["--default-track-flag", f"{track_id}:{'yes' if stream is chosen_audio else 'no'}"])
+                        if item.language:
+                            flags.extend(["--language", f"{track_id}:{item.language}"])
+                        if item.name:
+                            flags.extend(["--track-name", f"{track_id}:{item.name}"])
+                metadata_item = (
+                    replace(item, default=None, language=None, name=None)
+                    if default_audio is not None and item.media_type == "audio" else item
+                )
+                imported_args = _mkvmerge_import_args(metadata_item)
+                args.extend([*imported_args[:-1], *flags, imported_args[-1]])
         elif selected == "ffmpeg":
             executable = shutil.which("ffmpeg")
             if not executable:
@@ -806,9 +824,21 @@ def mux_files(
                 args.extend(["-f", "ffmetadata", "-i", str(chapter_path)])
             for index, item in enumerate(prepared_inputs):
                 args.extend(["-map", _ffmpeg_mux_map_spec(index, item)])
-            for index, item in enumerate(prepared_inputs):
-                args.extend(_ffmpeg_import_metadata_args(index, item))
+            if default_audio is not None and output.suffix.lower() not in {".ts", ".m2ts"}:
+                audio_layout, chosen_audio, mapped = _mux_audio_layout(prepared_inputs, selected, executable, default_audio)
+                for output_index, (input_index, media_type) in enumerate(mapped):
+                    item = prepared_inputs[input_index]
+                    if item.media_type in {None, media_type, "subtitles", "text"}:
+                        args.extend(_ffmpeg_import_metadata_args(output_index, item))
+                args.extend(_ffmpeg_default_audio_args(audio_layout, chosen_audio))
+            else:
+                for index, item in enumerate(prepared_inputs):
+                    args.extend(_ffmpeg_import_metadata_args(index, item))
             args.extend(["-c", "copy"])
+            if output.suffix.lower() in {".mp4", ".mov", ".m4v"}:
+                # MP4 cannot copy ASS/WebVTT/SubRip. mov_text is compatible,
+                # but does not retain the complete ASS/WebVTT layout.
+                args.extend(["-c:s", "mov_text"])
             if chapter_input is not None:
                 args.extend(["-map_chapters", str(chapter_input)])
             if vvc_video:
@@ -825,6 +855,101 @@ def mux_files(
             shutil.rmtree(temp_dir, ignore_errors=True)
         if chapter_temp_dir is not None:
             shutil.rmtree(chapter_temp_dir, ignore_errors=True)
+
+
+def _probe_mux_tracks(item: MuxInput, muxer: str, executable: str) -> list[dict]:
+    """Read local container headers so embedded/sidecar audio is counted too."""
+    if item.path.suffix.lower() in {".srt", ".vtt", ".ass", ".ssa"}:
+        return [{"id": 0, "type": "subtitle"}]
+    if muxer == "mkvmerge":
+        command = [executable, "--identification-format", "json", "--identify", str(item.path)]
+    elif probe := shutil.which("ffprobe"):
+        command = [
+            probe, "-v", "error", "-show_entries",
+            "stream=index,codec_type,codec_name,channels,bit_rate:stream_tags=language,title:stream_disposition=default",
+            "-of", "json", str(item.path),
+        ]
+    else:
+        # ffprobe normally accompanies ffmpeg, but it is not a new requirement.
+        result = managed_run([executable, "-hide_banner", "-i", str(item.path)], capture_output=True, timeout=15)
+        text = result.stderr.decode("utf-8", errors="replace")
+        tracks = []
+        for match in re.finditer(r"Stream #0:(\d+)(?:\[[^\]]*\])?(?:\(([^)]*)\))?[^\n]*?: (Audio|Video|Subtitle): ([^\n]+)", text):
+            tracks.append({
+                "id": int(match[1]), "type": match[3].casefold(), "codec": match[4].split(",", 1)[0],
+                "properties": {"language": match[2], "default_track": "(default)" in match[0]},
+            })
+        if not tracks:
+            raise RuntimeError("Could not identify mux input tracks to set the default audio.")
+        return tracks
+    result = managed_run(command, capture_output=True, timeout=15)
+    if result.returncode > (1 if muxer == "mkvmerge" else 0):
+        raise RuntimeError("Could not identify mux input tracks to set the default audio.")
+    document = json.loads(result.stdout)
+    if muxer == "mkvmerge":
+        return document.get("tracks") or []
+    return [
+        {
+            "id": track["index"], "type": track.get("codec_type"), "codec": track.get("codec_name"),
+            "properties": {
+                "language": (track.get("tags") or {}).get("language"),
+                "track_name": (track.get("tags") or {}).get("title"),
+                "default_track": (track.get("disposition") or {}).get("default"),
+                "audio_channels": track.get("channels"), "bit_rate": track.get("bit_rate"),
+            },
+        }
+        for track in document.get("streams") or []
+    ]
+
+
+def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, preference: str):
+    """Resolve one actual output audio, including audio embedded in video inputs."""
+    from .models import StreamInfo
+    from .mux_audio import resolve_default_audio
+
+    layout = []
+    preferred = []
+    mapped = []
+    for input_index, item in enumerate(inputs):
+        for track in _probe_mux_tracks(item, muxer, executable):
+            media_type = track.get("type")
+            if item.track_type_filter and media_type != item.track_type_filter:
+                continue
+            mapped.append((input_index, media_type))
+            if media_type != "audio":
+                continue
+            properties = track.get("properties") or {}
+            logical_audio = item.media_type == "audio"
+            stream = StreamInfo(
+                manifest_type="file", media_type="audio",
+                language=item.language or properties.get("language"),
+                name=item.name or properties.get("track_name"),
+                codecs=item.codecs or track.get("codec"),
+                channels=str(properties.get("audio_channels") or "") or None,
+                bandwidth=int(properties.get("bit_rate") or 0),
+                extra={"default": item.default if logical_audio else properties.get("default_track")},
+            )
+            layout.append((input_index, int(track["id"]), stream))
+            if logical_audio and item.default is True:
+                preferred.append(stream)
+    candidates = preferred or [stream for _, _, stream in layout]
+    # The picker already resolved its typed audio. Keep that identity even when
+    # an unrelated embedded/sidecar audio has a default flag in its own file.
+    choice = resolve_default_audio(candidates, "auto" if preferred else preference)
+    return layout, choice.stream, mapped
+
+
+def _ffmpeg_default_audio_args(layout, chosen) -> list[str]:
+    args = []
+    for audio_index, (_, _, stream) in enumerate(layout):
+        args.extend([
+            f"-disposition:a:{audio_index}", "+default" if stream is chosen else "-default",
+        ])
+        if stream.language:
+            args.extend([f"-metadata:s:a:{audio_index}", f"language={stream.language}"])
+        if stream.name:
+            args.extend([f"-metadata:s:a:{audio_index}", f"title={stream.name}"])
+    return args
 
 
 def _coerce_mux_input(item: str | Path | MuxInput) -> MuxInput:
@@ -851,16 +976,17 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
     try:
         for index, item in enumerate(inputs, start=1):
             if item.path.suffix.lower() in xml_subtitles:
-                converted = temp_dir / f"{index:02d}.srt"
+                subtitle_format = "ass" if output.suffix.lower() in {".mkv", ".mka", ".mks"} else "srt"
+                converted = temp_dir / f"{index:02d}.{subtitle_format}"
                 try:
-                    convert_subtitle_file(item.path, output_path=converted, auto_fix=False)
+                    convert_subtitle_file(item.path, output_format=subtitle_format, output_path=converted, auto_fix=False)
                     if not converted.is_file() or not converted.stat().st_size:
                         raise SubtitleConversionError("no subtitle cues were produced")
                 except (SubtitleConversionError, OSError) as exc:
                     raise SubtitleConversionError(
                         f"Could not prepare subtitle {item.path.name} for muxing: {exc}"
                     ) from exc
-                item = replace(item, path=converted, media_type="subtitles", codecs="srt")
+                item = replace(item, path=converted, media_type="subtitles", codecs=subtitle_format)
             if item.trim_start_ms and item.trim_start_ms > 0:
                 suffix = item.path.suffix or ".mp4"
                 trimmed = temp_dir / f"{index:02d}.trim{suffix}"

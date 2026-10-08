@@ -2451,6 +2451,16 @@ class SessionController:
                 self.post_log("skipped", "warning")
                 return SKIPPED, "live window not chosen"
 
+        default_audio_resolver = getattr(self.engine, "default_audio_choice", None)
+        if callable(default_audio_resolver):
+            choice = default_audio_resolver(playback, self.settings, tracks)
+            if choice is not None and choice.stream is not None and not choice.supported:
+                self.post_log(tr("mux_audio.unsupported"), "warning")
+            elif choice is not None and choice.stream is not None:
+                self.post_field(tr("delivery.field.default_audio"), choice.label, "ok")
+                if choice.fallback:
+                    self.post_log(tr(f"mux_audio.{choice.fallback}", language=choice.preference), "warning")
+
         if mode == "download":
             try:
                 sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)

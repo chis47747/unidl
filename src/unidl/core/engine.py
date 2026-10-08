@@ -28,8 +28,9 @@ import requests
 
 from unidl.downloader import NativeDownloaderBackend, NativeManifestError, api
 from unidl.downloader.models import StreamInfo
+from unidl.downloader.mux_audio import normalize_default_audio, resolve_default_audio
 from unidl.downloader.selection import SelectionOptions, SelectionResult, select_streams, select_streams_detailed
-from unidl.downloader.utils import is_url, source_path
+from unidl.downloader.utils import is_url, looks_like_h266, source_path
 
 from . import cdmrules, exports, vaults
 from . import drm as drm_registry
@@ -3344,6 +3345,7 @@ class Engine:
             mux=mux,
             mux_format=mux_format,
             muxer=muxer,
+            default_audio=self.default_audio_preference(playback, settings),
             mux_imports=tuple(
                 f"path={track.path}:lang={track.language}:name={track.name or track.language}"
                 for track in playback.mux_imports
@@ -3409,6 +3411,25 @@ class Engine:
             policy=policy,
         )
 
+    @staticmethod
+    def default_audio_preference(playback: Playback, settings: Settings) -> str:
+        return normalize_default_audio(playback.default_audio or settings.get("default_audio", "auto"))
+
+    def default_audio_choice(self, playback: Playback, settings: Settings, tracks: TrackSet):
+        """Preview the same final-selection preference used by native muxing."""
+        if playback.audio_only or self.output_scope_types(
+            settings, scope=playback.output_scope or None, output_types=playback.output_types or None,
+        ) != {"video", "audio", "subtitle"}:
+            return None
+        choice = resolve_default_audio(tracks.selected, self.default_audio_preference(playback, settings))
+        vvc_mp4 = not playback.is_live and any(
+            stream.media_type == "video" and looks_like_h266(stream.codecs, stream.url, stream.name)
+            for stream in tracks.selected
+        )
+        if str(settings.get("mux_format", "mkv")).lower() in {"ts", "m2ts"} and not vvc_mp4:
+            return replace(choice, supported=False)
+        return choice
+
     def download_options(self, playback: Playback, settings: Settings, *, service=None):
         """Legacy diagnostic options; production execution uses ``DeliveryPlan``."""
         drm = playback.drm
@@ -3466,6 +3487,7 @@ class Engine:
             no_probe=direct_audio_no_probe,
             mux_format=mux_format,
             muxer=muxer,
+            default_audio=self.default_audio_preference(playback, settings),
             sub_format=str(settings.get("sub_format", "srt")),
             sub_only=output_types == {"subtitle"},
             auto_subtitle_fix=bool(settings.get("auto_subtitle_fix", True)),
@@ -3688,6 +3710,7 @@ class Engine:
             f"output_types={','.join(sorted(output_types))} "
             f"video_selection={playback.video_selection or settings.get('video_selection', 'best') or 'best'} "
             f"audio_selection={playback.audio_selection or settings.get('audio_selection', 'best') or 'best'} "
+            f"default_audio={self.default_audio_preference(playback, settings)} "
             f"subtitle_selection={playback.subtitle_selection or settings.get('subtitle_selection', 'all') or 'all'}"
         )
         note()
@@ -3779,10 +3802,11 @@ class Engine:
                         "output_types": sorted(self.output_scope_types(settings)) if settings is not None else ["video", "audio", "subtitle"],
                         "video_selection": str((settings or {}).get("video_selection", "best") or "best"),
                         "audio_selection": str((settings or {}).get("audio_selection", "best") or "best"),
+                        "default_audio": self.default_audio_preference(playback, settings or {}),
                         "subtitle_selection": str((settings or {}).get("subtitle_selection", "all") or "all"),
                     }
                     if settings is not None
-                    else {}
+                    else ({"default_audio": playback.default_audio} if playback.default_audio else {})
                 ),
             )
 

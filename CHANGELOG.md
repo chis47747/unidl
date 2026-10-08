@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.3.4] - 2026-10-08
+
+### Default audio
+
+- Added a separate default-audio preference for muxed output, including language and original-audio matching, batch-safe fallback, export persistence and container capability reporting.
+
+### Subtitle conversion
+
+- Improved subtitle conversion for SRT, WebVTT, ASS and TTML/fragmented-MP4 sources while preserving supported cue positioning, styling and document metadata.
+
 ## [2.3.3] - 2026-10-07
 
 ### Windows progress

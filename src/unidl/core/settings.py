@@ -69,6 +69,10 @@ class Setting:
         return [o.display() for o in self.options]
 
     def coerce(self, value: Any) -> Any:
+        if self.key == "default_audio":
+            from ..downloader.mux_audio import normalize_default_audio
+
+            return normalize_default_audio(value)
         if self.kind == "bool":
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -1285,6 +1289,14 @@ TRACK_SETTINGS: list[Setting] = [
         default="",
         help="Comma separated BCP-47/ISO tags, e.g. en,es-419. Empty = best available language.",
     ),
+    Setting(
+        "default_audio",
+        "Default audio language",
+        "text",
+        options=[Option("auto", "Auto"), Option("original", "Original")],
+        default="auto",
+        help="Choose the default muxed audio from selected tracks only: Auto, Original, or one language tag. This does not download extra tracks.",
+    ),
     _choice(
         "audio_selection",
         "Audio selection",
@@ -1323,7 +1335,11 @@ TRACK_SETTINGS: list[Setting] = [
             "without matching those letters inside an ordinary title."
         ),
     ),
-    _choice("sub_format", "Subtitle format", [("srt", "SRT"), ("vtt", "WebVTT"), ("raw", "Original")], "srt"),
+    _choice(
+        "sub_format", "Subtitle format",
+        [("srt", "SRT"), ("vtt", "WebVTT"), ("ass", "ASS"), ("raw", "Original")], "srt",
+        "ASS with MKV preserves common subtitle positions. SRT keeps top-alignment tags where supported; WebVTT retains cue settings and styles. MP4 may lose positioning.",
+    ),
     _choice("mux_format", "Container", [("mkv", "MKV"), ("mp4", "MP4")], "mkv"),
     Setting(
         "embed_chapters",

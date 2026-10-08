@@ -288,6 +288,7 @@ class Playback:
     output_types: tuple[str, ...] = ()
     video_selection: str = ""
     audio_selection: str = ""
+    default_audio: str = ""
     subtitle_selection: str = ""
 
     #: What the service asked its playback API for, and what that API explicitly

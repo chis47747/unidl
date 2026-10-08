@@ -288,6 +288,7 @@ class Entry:
             ),
             video_selection=_text(self.selection.get("video_selection")),
             audio_selection=_text(self.selection.get("audio_selection")),
+            default_audio=_text(self.selection.get("default_audio")),
             subtitle_selection=_text(self.selection.get("subtitle_selection")),
         )
 

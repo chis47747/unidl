@@ -5,10 +5,11 @@ import re
 import shutil
 import subprocess  # noqa: F401 - retained as the module's patch seam for hosts/tests
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .embedding import managed_run
+from .subtitle_layout import SubtitleLayout, ass_color, ass_text, srt_text, vtt_blocks, vtt_layout
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, unique_path
 
 
@@ -21,6 +22,14 @@ class SubtitleCue:
     start: float
     end: float
     text: str
+    settings: str = ""
+    markup: str | None = None
+    blocks: tuple[str, ...] = ()
+    layout: SubtitleLayout | None = None
+
+    @property
+    def appearance(self) -> tuple:
+        return self.settings, self.markup, self.blocks, self.layout
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +55,8 @@ def convert_subtitle_file(
     target = _normalize_output_format(output_format)
     if target == "raw":
         return input_path
-    if input_path.suffix.lower().lstrip(".") == target:
+    if (input_path.suffix.lower().lstrip(".") == target
+            and (output_path is None or Path(output_path) == input_path)):
         return input_path
 
     output = Path(output_path) if output_path else unique_path(
@@ -97,7 +107,7 @@ def convert_subtitle_file(
 
 def _normalize_output_format(value: str) -> str:
     normalized = (value or "srt").strip().lower()
-    if normalized in {"srt", "vtt", "raw"}:
+    if normalized in {"srt", "vtt", "ass", "raw"}:
         return normalized
     raise SubtitleConversionError(f"unsupported subtitle format: {value}")
 
@@ -107,10 +117,10 @@ def _parse_text_subtitle(text: str, suffix: str = "") -> list[SubtitleCue]:
         return []
     if _looks_like_ttml(text, suffix):
         return _parse_ttml(text)
-    if _looks_like_webvtt(text, suffix):
-        return _parse_vtt(text)
     if _looks_like_srt(text, suffix):
         return _parse_srt(text)
+    if _looks_like_webvtt(text, suffix):
+        return _parse_vtt(text)
     return _parse_vtt(text)
 
 
@@ -142,6 +152,7 @@ def _parse_mp4_webvtt(data: bytes) -> list[SubtitleCue]:
     trex_duration, trex_size = _mp4_trex_defaults(data)
     pending_samples: list[tuple[int, int, int]] = []
     cues: list[SubtitleCue] = []
+    blocks = _mp4_vtt_blocks(data)
     for box in _iter_mp4_boxes(data):
         if box.type == b"moof":
             pending_samples = _mp4_fragment_samples(data, box, trex_duration, trex_size)
@@ -155,9 +166,9 @@ def _parse_mp4_webvtt(data: bytes) -> list[SubtitleCue]:
                 continue
             sample = data[cursor : cursor + size]
             cursor += size
-            cue = _parse_webvtt_sample(sample, decode_time / timescale, (decode_time + duration) / timescale)
-            if cue is not None:
-                cues.append(cue)
+            cues.extend(_parse_webvtt_sample_cues(
+                sample, decode_time / timescale, (decode_time + duration) / timescale, blocks,
+            ))
         pending_samples = []
     return cues
 
@@ -335,19 +346,44 @@ def _parse_trun_samples(
 
 
 def _parse_webvtt_sample(sample: bytes, start: float, end: float) -> SubtitleCue | None:
+    # Keep the single-cue helper for callers; fragments may carry multiple vttc.
+    cues = _parse_webvtt_sample_cues(sample, start, end)
+    return cues[0] if cues else None
+
+
+def _mp4_vtt_blocks(data: bytes) -> tuple[str, ...]:
+    blocks: list[str] = []
+    # vttC is inside a sample entry (not one of the generic box containers).
+    for match in re.finditer(b"vttC", data):
+        offset = match.start()
+        if offset < 4:
+            continue
+        size = int.from_bytes(data[offset - 4:offset], "big")
+        if size >= 8 and offset - 4 + size <= len(data):
+            config = data[offset + 4:offset - 4 + size].decode("utf-8", errors="replace")
+            blocks.extend(vtt_blocks(config))
+    return tuple(dict.fromkeys(blocks))
+
+
+def _parse_webvtt_sample_cues(
+    sample: bytes, start: float, end: float, blocks: tuple[str, ...] = (),
+) -> list[SubtitleCue]:
+    cues: list[SubtitleCue] = []
     for box in _iter_mp4_boxes(sample):
-        if box.type == b"vtte":
-            return None
         if box.type != b"vttc":
             continue
         payloads: list[str] = []
+        settings = ""
         for child in _iter_mp4_boxes(sample, box.data_start, box.end):
             if child.type == b"payl":
                 payloads.append(sample[child.data_start : child.end].decode("utf-8", errors="replace"))
-        text = _clean_subtitle_text("\n".join(payloads))
+            elif child.type == b"sttg":
+                settings = sample[child.data_start : child.end].decode("utf-8", errors="replace").strip()
+        markup = "\n".join(payloads).strip()
+        text = _clean_subtitle_text(markup)
         if text and end > start:
-            return SubtitleCue(start, end, text)
-    return None
+            cues.append(SubtitleCue(start, end, text, settings, markup, blocks))
+    return cues
 
 
 def _parse_ttml_sample(sample: bytes, start: float, end: float) -> list[SubtitleCue]:
@@ -402,7 +438,7 @@ def _parse_vtt(text: str) -> list[SubtitleCue]:
         if base_mpegts is None:
             base_mpegts = mpegts
         offset = (mpegts - base_mpegts) / 90000 - (local_time or 0.0)
-        cues.extend(SubtitleCue(cue.start + offset, cue.end + offset, cue.text) for cue in document_cues)
+        cues.extend(replace(cue, start=cue.start + offset, end=cue.end + offset) for cue in document_cues)
     return cues
 
 
@@ -419,6 +455,7 @@ def _parse_vtt_document(text: str) -> tuple[list[SubtitleCue], int | None, float
     mpegts: int | None = None
     local_time: float | None = None
     index = 0
+    blocks = vtt_blocks(text)
     while index < len(lines):
         line = lines[index].strip("\ufeff")
         stripped = line.strip()
@@ -452,9 +489,11 @@ def _parse_vtt_document(text: str) -> tuple[list[SubtitleCue], int | None, float
         while index < len(lines) and lines[index].strip():
             payload.append(lines[index])
             index += 1
-        text_value = _clean_subtitle_text("\n".join(payload))
+        markup = "\n".join(payload).strip()
+        text_value = _clean_subtitle_text(markup)
+        settings = timing.split("-->", 1)[1].strip().split(maxsplit=1)
         if text_value and end > start:
-            cues.append(SubtitleCue(start, end, text_value))
+            cues.append(SubtitleCue(start, end, text_value, settings[1] if len(settings) > 1 else "", markup, blocks))
     return cues, mpegts, local_time
 
 
@@ -485,9 +524,13 @@ def _parse_srt(text: str) -> list[SubtitleCue]:
             continue
         start, end = _parse_timing_line(lines[timing_index].strip())
         payload = lines[timing_index + 1 :]
-        text_value = _clean_subtitle_text("\n".join(payload))
+        markup = "\n".join(payload).strip()
+        alignment = re.search(r"\{\\an([1-9])\}", markup)
+        layout = SubtitleLayout(alignment=int(alignment[1])) if alignment else None
+        markup = re.sub(r"\{\\an[1-9]\}", "", markup)
+        text_value = _clean_subtitle_text(markup)
         if text_value and end > start:
-            cues.append(SubtitleCue(start, end, text_value))
+            cues.append(SubtitleCue(start, end, text_value, markup=markup, layout=layout))
     return cues
 
 
@@ -499,6 +542,9 @@ def _parse_ttml(text: str) -> list[SubtitleCue]:
             root = ET.fromstring(document)
         except ET.ParseError:
             continue
+        parents = {child: node for node in root.iter() for child in node}
+        styles = {_attr(node, "id"): node for node in root.iter() if _local_name(node.tag) == "style"}
+        regions = {_attr(node, "id"): node for node in root.iter() if _local_name(node.tag) == "region"}
         for node in root.iter():
             if _local_name(node.tag) != "p":
                 continue
@@ -511,10 +557,103 @@ def _parse_ttml(text: str) -> list[SubtitleCue]:
                 end = begin + dur
             if end is None or end <= begin:
                 continue
-            text_value = _clean_subtitle_text(_ttml_node_text(node))
+            attributes, region = _ttml_attributes(node, parents, styles)
+            region_style = _ttml_style(regions[region], styles) if region in regions else {}
+            attributes = {**region_style, **attributes}
+            blocks: list[str] = []
+            markup = _ttml_node_markup(node, styles, blocks).strip()
+            text_value = _clean_subtitle_text(markup)
             if text_value:
-                cues.append(SubtitleCue(begin, end, text_value))
+                cues.append(SubtitleCue(begin, end, text_value, markup=markup, blocks=tuple(dict.fromkeys(blocks)),
+                                        layout=_ttml_layout(attributes, root)))
     return cues
+
+
+def _ttml_style(node: ET.Element, styles: dict, visited: frozenset = frozenset()) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for ref in (_attr(node, "style") or "").split():
+        if ref in styles and ref not in visited:
+            attributes.update(_ttml_style(styles[ref], styles, visited | {ref}))
+    attributes.update((_local_name(key), value) for key, value in node.attrib.items() if _local_name(key) != "style")
+    return attributes
+
+
+def _ttml_attributes(node: ET.Element, parents: dict, styles: dict) -> tuple[dict[str, str], str | None]:
+    lineage = []
+    while node is not None:
+        lineage.append(node)
+        node = parents.get(node)
+    attributes: dict[str, str] = {}
+    for ancestor in reversed(lineage):
+        inherited = _ttml_style(ancestor, styles)
+        if _local_name(ancestor.tag) == "tt":
+            inherited.pop("extent", None)  # This is the pixel canvas, not a cue region.
+        attributes.update(inherited)
+    return attributes, attributes.get("region")
+
+
+def _ttml_layout(attributes: dict[str, str], root: ET.Element) -> SubtitleLayout:
+    horizontal = {"left": 1, "start": 1, "right": 3, "end": 3}.get(attributes.get("textAlign", ""), 2)
+    origin = attributes.get("origin", "").split()
+    extent = attributes.get("extent", "").split()
+    canvas = (_attr(root, "extent") or "").split()
+    cells = (_attr(root, "cellResolution") or "32 15").split()
+
+    def dimension(value: str, axis: int) -> float | None:
+        match = re.fullmatch(r"(-?[\d.]+)(%|px|c)", value)
+        if not match:
+            return None
+        try:
+            number = float(match[1])
+            if match[2] == "px":
+                if len(canvas) != 2 or not canvas[axis].endswith("px"):
+                    return None
+                number = number / float(canvas[axis][:-2]) * 100
+            elif match[2] == "c":
+                number = number / float(cells[axis]) * 100
+            return number
+        except (ValueError, ZeroDivisionError, IndexError):
+            return None
+
+    x = y = None
+    vertical = 1
+    if len(origin) == 2:
+        x, y = dimension(origin[0], 0), dimension(origin[1], 1)
+        vertical = {"before": 3, "center": 2, "after": 1}.get(attributes.get("displayAlign", "before"), 3)
+        width = dimension(extent[0], 0) if len(extent) == 2 else None
+        height = dimension(extent[1], 1) if len(extent) == 2 else None
+        if x is not None and width is not None:
+            x += width * (horizontal - 1) / 2
+        if y is not None and height is not None:
+            y += height * (3 - vertical) / 2
+    elif "displayAlign" in attributes:
+        vertical = {"before": 3, "center": 2, "after": 1}.get(attributes["displayAlign"], 1)
+    return SubtitleLayout(
+        (vertical - 1) * 3 + horizontal, x, y,
+        attributes.get("fontWeight") == "bold", attributes.get("fontStyle") == "italic",
+        "underline" in attributes.get("textDecoration", ""), attributes.get("color"),
+    )
+
+
+def _ttml_node_markup(node: ET.Element, styles: dict, blocks: list[str]) -> str:
+    parts = [html.escape(node.text or "", quote=False)]
+    for child in node:
+        if _local_name(child.tag).lower() == "br":
+            parts.append("\n")
+        else:
+            style = _ttml_style(child, styles)
+            tags = [tag for key, value, tag in (("fontWeight", "bold", "b"), ("fontStyle", "italic", "i"),
+                                               ("textDecoration", "underline", "u")) if style.get(key) == value]
+            markup = _ttml_node_markup(child, styles, blocks)
+            color = _vtt_color_style(style.get("color"))
+            if color:
+                class_name, block = color
+                blocks.append(block)
+                markup = f"<c.{class_name}>{markup}</c>"
+            parts.append("".join(f"<{tag}>" for tag in tags) + markup
+                         + "".join(f"</{tag}>" for tag in reversed(tags)))
+        parts.append(html.escape(child.tail or "", quote=False))
+    return "".join(parts)
 
 
 def _ttml_documents(text: str) -> list[str]:
@@ -620,18 +759,19 @@ def _clean_subtitle_text(value: str) -> str:
 
 def _fix_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
     fixed: list[SubtitleCue] = []
-    seen: set[tuple[int, int, str]] = set()
+    seen: set[SubtitleCue] = set()
     for cue in sorted(cues, key=lambda item: (item.start, item.end, item.text)):
         start = max(0.0, cue.start)
         end = max(start + 0.001, cue.end)
-        key = (round(start * 1000), round(end * 1000), cue.text)
+        key = replace(cue, start=round(start * 1000) / 1000, end=round(end * 1000) / 1000)
         if key in seen:
             continue
         seen.add(key)
-        normalized = SubtitleCue(start, end, cue.text)
-        if fixed and fixed[-1].text == normalized.text and normalized.start <= fixed[-1].end + 0.35:
+        normalized = replace(cue, start=start, end=end)
+        if (fixed and fixed[-1].text == normalized.text and fixed[-1].appearance == normalized.appearance
+                and normalized.start <= fixed[-1].end + 0.35):
             previous = fixed[-1]
-            fixed[-1] = SubtitleCue(previous.start, max(previous.end, normalized.end), previous.text)
+            fixed[-1] = replace(previous, end=max(previous.end, normalized.end))
             continue
         fixed.append(normalized)
     return _collapse_incremental_cues(fixed)
@@ -644,9 +784,9 @@ def _fit_cues_to_duration(cues: list[SubtitleCue], duration: float | None) -> li
     last_end = max(cue.end for cue in cues)
     tolerance = max(30.0, min(300.0, duration * 0.05))
     if first_start > 30.0 and last_end > duration + tolerance and last_end - first_start <= duration + tolerance:
-        cues = [SubtitleCue(max(0.0, cue.start - first_start), max(0.001, cue.end - first_start), cue.text) for cue in cues]
+        cues = [replace(cue, start=max(0.0, cue.start - first_start), end=max(0.001, cue.end - first_start)) for cue in cues]
     return [
-        SubtitleCue(cue.start, min(cue.end, duration), cue.text)
+        replace(cue, end=min(cue.end, duration))
         for cue in cues
         if cue.start < duration and min(cue.end, duration) > cue.start
     ]
@@ -665,12 +805,17 @@ def _collapse_incremental_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
         end = cue.end
         if group_start is not None and next_cue and next_cue.start > end:
             end = next_cue.start
-        collapsed.append(SubtitleCue(start, max(start + 0.001, end), cue.text))
+        collapsed.append(replace(cue, start=start, end=max(start + 0.001, end)))
         group_start = None
     return collapsed
 
 
 def _is_incremental_prefix(cue: SubtitleCue, next_cue: SubtitleCue) -> bool:
+    if (cue.settings, cue.blocks, cue.layout) != (next_cue.settings, next_cue.blocks, next_cue.layout):
+        return False
+    # Styled payloads may differ in emphasis/class even when their text extends.
+    if _markup_tags(cue.markup) != _markup_tags(next_cue.markup):
+        return False
     current = _subtitle_compare_text(cue.text)
     following = _subtitle_compare_text(next_cue.text)
     if not current or len(current) >= len(following):
@@ -686,6 +831,10 @@ def _subtitle_compare_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _markup_tags(markup: str | None) -> tuple[str, ...]:
+    return tuple(re.findall(r"<[^>]+>", markup or ""))
+
+
 def _write_subtitle(path: Path, cues: list[SubtitleCue], output_format: str) -> None:
     if output_format == "srt":
         path.write_text(_compose_srt(cues), encoding="utf-8")
@@ -693,21 +842,111 @@ def _write_subtitle(path: Path, cues: list[SubtitleCue], output_format: str) -> 
     if output_format == "vtt":
         path.write_text(_compose_vtt(cues), encoding="utf-8")
         return
+    if output_format == "ass":
+        path.write_text(_compose_ass(cues), encoding="utf-8")
+        return
     raise SubtitleConversionError(f"unsupported subtitle format: {output_format}")
 
 
 def _compose_srt(cues: list[SubtitleCue]) -> str:
     blocks = []
     for index, cue in enumerate(cues, start=1):
-        blocks.append(f"{index}\n{_format_srt_time(cue.start)} --> {_format_srt_time(cue.end)}\n{cue.text}")
+        layout = _cue_layout(cue)
+        # SRT cannot encode exact coordinates. Many players honour this common
+        # top-alignment extension; default bottom cues need no override.
+        top = layout.y is not None and layout.y < 50 or layout.y is None and layout.alignment >= 7
+        prefix = r"{\an8}" if top else ""
+        text = srt_text(_layout_vtt_markup(cue))
+        blocks.append(f"{index}\n{_format_srt_time(cue.start)} --> {_format_srt_time(cue.end)}\n{prefix}{text}")
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
 
 def _compose_vtt(cues: list[SubtitleCue]) -> str:
     blocks = ["WEBVTT"]
+    blocks.extend(dict.fromkeys(block for cue in cues for block in cue.blocks))
     for cue in cues:
-        blocks.append(f"{_format_vtt_time(cue.start)} --> {_format_vtt_time(cue.end)}\n{cue.text}")
+        color = _vtt_color_style(cue.layout.color) if cue.layout else None
+        if color and color[1] not in blocks:
+            blocks.append(color[1])
+    for cue in cues:
+        settings = cue.settings or _layout_vtt_settings(cue.layout)
+        suffix = f" {settings}" if settings else ""
+        text = _layout_vtt_markup(cue)
+        blocks.append(f"{_format_vtt_time(cue.start)} --> {_format_vtt_time(cue.end)}{suffix}\n{text}")
     return "\n\n".join(blocks) + "\n"
+
+
+def _cue_layout(cue: SubtitleCue) -> SubtitleLayout:
+    return cue.layout or vtt_layout(cue.settings, cue.blocks)
+
+
+def _layout_vtt_settings(layout: SubtitleLayout | None) -> str:
+    if layout is None:
+        return ""
+    row, column = divmod(layout.alignment - 1, 3)
+    x = layout.x if layout.x is not None else (5, 50, 95)[column]
+    y = layout.y if layout.y is not None else (95, 50, 5)[row]
+    return (f"line:{y:g}%,{('end', 'center', 'start')[row]} "
+            f"position:{x:g}%,{('line-left', 'center', 'line-right')[column]} "
+            f"align:{('start', 'center', 'end')[column]}")
+
+
+def _layout_vtt_markup(cue: SubtitleCue) -> str:
+    markup = cue.markup if cue.markup is not None else html.escape(cue.text, quote=False)
+    if cue.layout:
+        for enabled, tag in ((cue.layout.bold, "b"), (cue.layout.italic, "i"), (cue.layout.underline, "u")):
+            if enabled:
+                markup = f"<{tag}>{markup}</{tag}>"
+        color = _vtt_color_style(cue.layout.color)
+        if color:
+            markup = f"<c.{color[0]}>{markup}</c>"
+    return markup
+
+
+def _vtt_color_style(value: str | None) -> tuple[str, str] | None:
+    color = ass_color(value)
+    if not color:
+        return None
+    bgr = color[2:-1]
+    rgb = bgr[4:6] + bgr[2:4] + bgr[:2]
+    name = f"unidl_color_{rgb.lower()}"
+    return name, f"STYLE\n::cue(.{name}) {{ color: #{rgb}; }}"
+
+
+def _compose_ass(cues: list[SubtitleCue]) -> str:
+    if not cues:
+        return ""
+    header = (
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n"
+        "WrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,54,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,0,2,96,96,54,1\n"
+        "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    events = []
+    for cue in cues:
+        layout = _cue_layout(cue)
+        tags = f"\\an{layout.alignment}"
+        if layout.x is not None or layout.y is not None:
+            row, column = divmod(layout.alignment - 1, 3)
+            x = layout.x if layout.x is not None else (5, 50, 95)[column]
+            y = layout.y if layout.y is not None else (95, 50, 5)[row]
+            tags += f"\\pos({x * 19.2:g},{y * 10.8:g})"
+        text = ass_text(cue.markup if cue.markup is not None else html.escape(cue.text, quote=False), layout, cue.blocks)
+        end = max(round(cue.end * 100), round(cue.start * 100) + 1) / 100
+        events.append(f"Dialogue: 0,{_format_ass_time(cue.start)},{_format_ass_time(end)},Default,,0,0,0,,{{{tags}}}{text}\n")
+    return header + "".join(events)
+
+
+def _format_ass_time(seconds: float) -> str:
+    # ASS uses centiseconds, with at least one centisecond for a valid cue.
+    total = max(0, round(seconds * 100))
+    hours, remainder = divmod(total, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    seconds, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
 
 def _format_srt_time(seconds: float) -> str:

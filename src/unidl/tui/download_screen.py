@@ -725,6 +725,14 @@ class DownloadScreen(AskHost):
 
             if tracks is not None:
                 field(tr("delivery.field.selected"), tracks.summary(), palette.fg2)
+                resolver = getattr(engine, "default_audio_choice", None)
+                choice = resolver(playback, self.controller.settings, tracks) if callable(resolver) else None
+                if choice is not None and choice.stream is not None and not choice.supported:
+                    field(tr("delivery.field.default_audio"), tr("mux_audio.unsupported"), palette.warn)
+                elif choice is not None and choice.stream is not None:
+                    field(tr("delivery.field.default_audio"), visual_text(choice.label), palette.ok)
+                    if choice.fallback:
+                        field("", tr(f"mux_audio.{choice.fallback}", language=choice.preference), palette.warn)
                 for index, stream in enumerate(tracks.selected, start=1):
                     field(
                         tr("delivery.field.stream", index=index),

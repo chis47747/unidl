@@ -170,6 +170,7 @@ class DownloadPolicy:
     mux: bool | None = None
     mux_format: str | None = None
     muxer: str | None = None
+    default_audio: str = "auto"
     mux_imports: tuple[str, ...] = ()
     #: JSON chapter sidecar generated from service-owned Playback metadata.
     chapters_file: Path | None = None

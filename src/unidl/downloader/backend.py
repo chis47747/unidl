@@ -565,6 +565,11 @@ class NativeDownloaderBackend:
         ):
             if key in stream.extra:
                 record[key] = stream.extra[key]
+        if stream.media_type == "audio":
+            from .mux_audio import original_audio, source_default_audio
+
+            record["is_original"] = original_audio(stream)
+            record["is_default"] = source_default_audio(stream)
         return {key: value for key, value in record.items() if value is not None}
 
     @staticmethod
@@ -853,6 +858,7 @@ class NativeDownloaderBackend:
             mux=policy.mux,
             mux_format=mux_format,
             muxer=muxer,
+            default_audio=policy.default_audio,
             mux_imports=list(policy.mux_imports),
             chapters_file=(
                 str(policy.chapters_file) if policy.chapters_file else None

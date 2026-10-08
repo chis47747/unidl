@@ -105,6 +105,65 @@ Language matching accepts exact and primary BCP-47 forms (`es-419` and `es`, for
 example), plus common ISO-639 aliases. Unknown `und` tracks are not guessed as a
 user language unless `und` is explicitly requested.
 
+## Default audio in the muxed file
+
+**Audio languages** chooses which tracks to download. **Default audio language**
+(`default_audio`) chooses which of the final selected audio tracks receives the
+default playback flag. It never adds a track, widens a filter, changes licence
+selection, or changes the order of the downloaded tracks.
+
+The setting is available per service, immediately below Audio languages. Choose
+Auto, Original, or Specify a language and enter one tag:
+
+| Value | Result |
+|---|---|
+| `auto` (default) | Prefer ordinary/main selected audio, then a source-default track, then explicitly marked original audio. Without either marker, keep the first selected language. |
+| `original` | Prefer selected audio explicitly marked as original. Do not infer original language from the service's country or interface language. |
+| A single tag such as `en`, `fr-CA`, `es-419`, `und`, or a provider tag | Prefer selected audio matching that language. ISO aliases and case/underscore normalization are accepted. A primary tag such as `en` includes regional forms; a regional tag such as `en-GB` requires that region and does not silently become `en-US`. |
+
+Within matching candidates, ordinary/main audio takes precedence over commentary
+or audio description. If only commentary/description was selected, it remains
+eligible. Multiple candidates at the same priority use the existing Audio Best
+ranking; exact ties keep their stable selected-track order.
+
+If the requested language or original marker is missing, UniDL reports a warning
+and falls back to Auto. It does not fetch additional tracks or cancel the job.
+A single selected audio track becomes default. With no audio, separate-file
+output, or audio-only delivery without muxing, this preference has no effect.
+
+The rule runs after the final picker choices and is evaluated separately for
+every batch title. For MKV/MP4 output, UniDL sets one audio default flag and clears
+the other audio default flags, including audio embedded in input containers.
+Video and subtitle defaults are independent. Live pipe muxing uses the same
+preference. MPEG-TS does not reliably retain a default-audio flag; UniDL reports
+that limitation instead of promising a default playback language.
+
+The download details and log show the resolved default audio and any fallback.
+Native exports preserve `default_audio`; the saved export value takes precedence
+over the current service setting on import. Older exports use the current
+service setting, or Auto when there is none. Saved commands include
+`--default-audio` so replay keeps the preference.
+
+Example: download English and French, with French as the default:
+
+```yaml
+audio_langs: en,fr
+audio_selection: best
+default_audio: fr
+```
+
+To verify the final file, inspect its audio tracks in MediaInfo for
+`Default: Yes`, or use:
+
+```sh
+ffprobe -v error -select_streams a \
+  -show_entries stream=index:stream_tags=language,title:stream_disposition=default \
+  -of json "file.mkv"
+```
+
+The file's default flag is a playback hint. A player's preferred-language
+settings may override it.
+
 ## Subtitle selection
 
 `sub_langs` selects the final subtitle languages. `subtitle_kinds` is a
@@ -118,6 +177,38 @@ using the normal/forced/SDH role information and provider default markers.
 Services that obtain subtitles from a separate API should expose the complete
 inventory through Core's sidecar-track interface before selection. Those rows use
 the same language and kind filters as manifest subtitles.
+
+## Subtitle format and positioning
+
+Select **Tracks and output → Subtitle format** independently of subtitle
+languages and types. The default remains SRT.
+
+| Format | Positioning and styles |
+| --- | --- |
+| SRT | Keeps basic inline emphasis and adds `{\an8}` to cues explicitly positioned in the upper part of the screen. Many players support this extension; some ignore it. Exact coordinates, regions and CSS cannot be represented. |
+| WebVTT | Retains native cue settings such as `line`, `position`, `align`, `size`, `vertical` and `region`, plus STYLE/REGION blocks and cue markup. The player must support them. |
+| ASS | Maps common horizontal cue positions to a 1920×1080 script canvas, including top/bottom alignment, explicit coordinates and basic bold/italic/underline/colour. Use MKV to retain these instructions. |
+| Original | Keeps the downloaded subtitle file unchanged. The container and player must accept its format. |
+
+For dialogue above on-screen credits, choose **ASS** and **MKV**. UniDL uses
+each cue's own placement; it does not move every subtitle to the top. The
+equivalent saved command option is `--sub-format ass --mux-format mkv`.
+
+The shared converter reads placement from text WebVTT, MP4 WebVTT `sttg` boxes,
+and common TTML regions, inherited styles, `origin`, `extent`, `displayAlign`
+and `textAlign`. Timing correction, clipping, duplicate removal and incremental
+cue repair retain this information. Identical words at different positions are
+kept as separate cues.
+
+ASS mapping approximates WebVTT snap-to-line positions and common horizontal
+TTML regions; arbitrary CSS, vertical writing, animation, ruby and complete
+TTML typography are not reproduced. Native WebVTT is preferable when its full
+layout matters and the player supports it. External TTML/XML sidecars are
+converted to ASS for MKV because muxers cannot read them directly.
+
+MP4 cannot copy ASS, WebVTT or SRT tracks directly, so UniDL muxes them as
+`mov_text`. That conversion may lose positioning and styling. Use MKV for
+positioned subtitles, or keep standalone originals if required.
 
 ## Interactive, automatic, and batch behavior
 

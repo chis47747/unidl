@@ -216,6 +216,52 @@ class _MultiChoiceEditor(_Editor):
         self._toggle_index(event.option_index)
 
 
+class _DefaultAudioEditor(_Editor):
+    """A single preference: two presets or one user-entered language."""
+
+    def compose_editor(self) -> ComposeResult:
+        yield OptionList(
+            Option(tr("setting.default_audio.option.auto"), id="auto"),
+            Option(tr("setting.default_audio.option.original"), id="original"),
+            Option(tr("mux_audio.specify_language"), id="language"),
+            id="default-audio-options",
+        )
+        yield Input(
+            value=str(self.current or "") if self.current not in {"auto", "original", None} else "",
+            placeholder="en / fr-CA / es-419",
+            classes="ask-input",
+            id="default-audio-language",
+        )
+
+    def on_mount(self) -> None:
+        options = self.query_one(OptionList)
+        field = self.query_one(Input)
+        custom = self.current not in {"auto", "original", None}
+        options.highlighted = 2 if custom else (1 if self.current == "original" else 0)
+        field.display = custom
+        (field if custom else options).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option.id in {"auto", "original"}:
+            self.dismiss(event.option.id)
+            return
+        field = self.query_one(Input)
+        field.display = True
+        field.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        from ..downloader.mux_audio import normalize_default_audio
+
+        event.stop()
+        try:
+            value = normalize_default_audio(event.value)
+        except ValueError:
+            self.notify(tr("mux_audio.invalid_language"), severity="warning")
+            return
+        self.dismiss(value)
+
+
 class _TextEditor(_Editor):
     def compose_editor(self) -> ComposeResult:
         yield Input(
@@ -679,7 +725,9 @@ class SettingsScreen(Screen):
             self._pick_vaults(spec, scope, _done)
             return
 
-        if spec.kind == "multi" and spec.options:
+        if spec.key == "default_audio":
+            self.app.push_screen(_DefaultAudioEditor(spec, scope.get(spec.key)), _done)
+        elif spec.kind == "multi" and spec.options:
             self.app.push_screen(_MultiChoiceEditor(spec, scope.get(spec.key)), _done)
         elif spec.kind == "choice" and spec.options:
             self.app.push_screen(_ChoiceEditor(spec, scope.get(spec.key)), _done)

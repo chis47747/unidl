@@ -343,12 +343,13 @@ provider API request or replace a service's explicit `license_*` policy.
 | `audio_quality` | `best` / `worst` | `best` |
 | `audio_channels` | `any` / `2` / `6` / `8` | `any` |
 | `audio_langs` | comma separated BCP-47/ISO tags, empty = best language | empty |
+| `default_audio` | `auto` / `original` / one language tag; only final selected audio participates | `auto` |
 | `audio_selection` | `best` / `all` | `best` |
 | `sub_langs` | comma separated, `all`, or empty to skip | `all` |
 | `subtitle_kinds` | comma separated `normal`, `forced`, `sdh`, `commentary`, `audio_description`, or `all` | `normal,forced` |
 | `subtitle_selection` | `all` / `best` | `all` |
 | `drop_video` | regex | boundary-aware `trick` / `trickplay` / `thumbnail` / `image` |
-| `sub_format` | `srt` / `vtt` / `raw` | `srt` |
+| `sub_format` | `srt` / `vtt` / `ass` / `raw` | `srt` |
 | `mux_format` | `mkv` / `mp4` | `mkv` |
 | `embed_chapters` | `on` / `off` | `on` |
 | `audio_format` | `source` plus `mp3`, `flac`, and `alac` when supported | `mp3` when supported, otherwise `source` |
@@ -392,9 +393,26 @@ without cancelling the delivery. `Atmos` is an audio profile, not a codec;
 Language matching accepts exact BCP-47 tags and their primary language (so
 `es-419` matches `es`), while `und` and unknown provider tags are not guessed.
 
+Subtitle conversion preserves each cue's positioning during timing repair and
+deduplication. Choose **ASS + MKV** to retain common top/bottom positions, cue
+coordinates and basic emphasis. SRT retains the common `{\an8}` top-alignment
+extension, whose support depends on the player; it cannot express full layouts.
+WebVTT preserves cue settings, STYLE/REGION blocks and markup. Original keeps the
+downloaded subtitle unchanged. MP4 requires compatible `mov_text` subtitles and
+may lose positioning when muxed. See
+[track-selection.md](track-selection.md#subtitle-format-and-positioning).
+
 `audio_format` applies to audio-only titles and Audio-only output scope. Its choices are discovered
 from native delivery core at runtime, so the settings panel never advertises an encoder the
 installed engine cannot provide. See [audio.md](audio.md).
+
+`default_audio` controls the default playback audio in a muxed MKV/MP4, separately
+from `audio_langs`, which controls downloading. Choose Auto, Original, or one
+language. Missing preferences warn and fall back to Auto; they never add tracks
+or cancel a download. Each batch title resolves the preference after its final
+selection. Exports and saved commands preserve it. See
+[track-selection.md](track-selection.md#default-audio-in-the-muxed-file) for
+priority, regional matching, live recording, and container limitations.
 
 ### Do not remove `drop_video` without reading this
 

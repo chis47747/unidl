@@ -93,6 +93,7 @@ from .live_rules import (
 )
 from .loader import LoadError, normalize_headers
 from .models import SegmentInfo
+from .mux_audio import normalize_default_audio, resolve_default_audio
 from .parser import parse_source
 from .postprocess import (
     MuxInput,
@@ -383,7 +384,7 @@ def _build_parser(
     g_net.add_argument("--no-del-after-done", dest="del_after_done", action="store_false", help="Keep temporary segment directories after a successful task.")
     g_select.add_argument("--auto-select", action="store_true", help="Automatically select best video and best audio.")
     g_select.add_argument("--sub-only", action="store_true", help="Only select subtitle tracks.")
-    g_text.add_argument("--sub-format", choices=["srt", "vtt", "raw", "SRT", "VTT", "RAW"], default="srt", help="Subtitle output format. Default: srt.")
+    g_text.add_argument("--sub-format", choices=["srt", "vtt", "ass", "raw", "SRT", "VTT", "ASS", "RAW"], default="srt", help="Subtitle output format. ASS with MKV preserves common positioning; SRT top-alignment support depends on the player. Default: srt.")
     g_text.add_argument("--audio-format", type=str.lower, choices=["mp3", "flac", "alac", "m4a"], help="Export selected audio tracks as MP3, FLAC, ALAC in M4A, or a codec-preserving M4A; live audio is finalized after recording stops.")
     g_text.add_argument("--audio-metadata-file", help="Read audio metadata and cover configuration from a JSON sidecar file.")
     g_text.add_argument("--decode-audio-vivid", action="store_true", help="Inspect downloaded TS/MP4 audio and decode only confirmed Audio Vivid tracks.")
@@ -406,6 +407,7 @@ def _build_parser(
     g_mux.add_argument("--mux-import", action="append", help='Import external media during mux, e.g. --mux-import "path=sub.srt:lang=eng:name=English".')
     g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final audio or video container.")
     g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge"], default="auto")
+    g_mux.add_argument("--default-audio", type=normalize_default_audio, default="auto", help="Default muxed audio: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
     g_net.add_argument("--custom-range", help="Only download selected media segment range, e.g. 1-100,120-160.")
     g_crypt.add_argument("--custom-hls-method", choices=["AES_128", "AES_128_ECB", "BBTS", "CENC", "CHACHA20", "NONE", "SAMPLE_AES", "SAMPLE_AES_CTR", "UNKNOWN"])
@@ -497,6 +499,7 @@ def _looks_like_download(argv: list[str]) -> bool:
         "--mux-import",
         "--chapters-file",
         "--mux-format",
+        "--default-audio",
         "-R",
         "--max-speed",
         "--custom-range",
@@ -592,6 +595,7 @@ def _looks_like_download(argv: list[str]) -> bool:
                 "--retries=",
                 "--tmp-dir=",
                 "--mux-format=",
+                "--default-audio=",
                 "--key-text-file=",
                 "--mux-import=",
                 "--chapters-file=",
@@ -989,12 +993,13 @@ def _download(args: argparse.Namespace) -> int:
                 )
                 with task_line.spinning("Muxing {spinner}"):
                     muxed = mux_files(
-                        _mux_inputs_for_tracks(live_mux_tracks),
+                        _mux_inputs_for_tracks(live_mux_tracks, getattr(args, "default_audio", "auto")),
                         mux_output,
                         muxer=_muxer_for_tracks(live_mux_tracks, args, live=True),
                         imports=mux_imports,
                         chapters_file=getattr(args, "chapters_file", None),
                         force_vvc_mp4=False,
+                        default_audio=getattr(args, "default_audio", "auto"),
                     )
                 task_line.update("Muxed ✓", done=True)
                 _log_line(args, f"Muxed: {muxed}")
@@ -1143,12 +1148,13 @@ def _download(args: argparse.Namespace) -> int:
         )
         with task_line.spinning("Muxing {spinner}"):
             muxed = mux_files(
-                _mux_inputs_for_tracks(downloaded_tracks),
+                _mux_inputs_for_tracks(downloaded_tracks, getattr(args, "default_audio", "auto")),
                 mux_output,
                 muxer=_muxer_for_tracks(downloaded_tracks, args, live=False),
                 imports=mux_imports,
                 chapters_file=getattr(args, "chapters_file", None),
                 force_vvc_mp4=True,
+                default_audio=getattr(args, "default_audio", "auto"),
             )
         task_line.update("Muxed ✓", done=True)
         _log_line(args, f"Muxed: {muxed}")
@@ -2722,6 +2728,24 @@ def _stream_has_muxed_audio(stream) -> bool:
     return pretty_codec(getattr(stream, "codecs", None), "audio") in _AUDIO_CODEC_LABELS
 
 
+def _live_pipe_default_audio_args(streams, preference: str = "auto") -> list[str]:
+    audio = []
+    for stream in streams:
+        if stream.media_type == "audio":
+            audio.append(stream)
+        elif _stream_has_muxed_audio(stream):
+            audio.append(replace(stream, media_type="audio", language=stream.extra.get("audio_language") or stream.language))
+    choice = resolve_default_audio(audio, preference)
+    args = []
+    for index, stream in enumerate(audio):
+        args.extend([f"-disposition:a:{index}", "+default" if stream is choice.stream else "-default"])
+        if stream.language:
+            args.extend([f"-metadata:s:a:{index}", f"language={_normalize_mux_language(stream.language)}"])
+        if name := _mux_track_name(stream):
+            args.extend([f"-metadata:s:a:{index}", f"title={name}"])
+    return args
+
+
 def _live_pipe_map_specs(stream, input_index: int) -> list[str]:
     if _stream_has_muxed_audio(stream):
         return [f"{input_index}:v?", f"{input_index}:a?"]
@@ -3657,6 +3681,8 @@ class _LivePipeMuxSession:
         for index, stream in enumerate(self.streams):
             for spec in _live_pipe_map_specs(stream, index):
                 args.extend(["-map", spec])
+        if self.output_container != "mpegts":
+            args.extend(_live_pipe_default_audio_args(self.streams, getattr(getattr(self, "args", None), "default_audio", "auto")))
         args.extend([
             "-strict",
             "unofficial",
@@ -8185,7 +8211,7 @@ def _default_extension_for_pattern(stream) -> str:
     extension = (stream.extension or "").lower()
     if extension == "bbts":
         return "ts"
-    if extension in {"ts", "mp3", "m4a", "mp4", "vtt", "srt", "ttml", "aac", "ac3", "eac3", "webm"}:
+    if extension in {"ts", "mp3", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "aac", "ac3", "eac3", "webm"}:
         return extension
     if stream.media_type in {"subtitle", "subtitles", "text"}:
         codec = (stream.codecs or "").lower()
@@ -8203,7 +8229,7 @@ def _safe_output_name(value: str) -> str:
 
 def _save_name_base(save_name: str) -> str:
     path = Path(save_name)
-    known_suffixes = {".aac", ".ac3", ".bbts", ".eac3", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".srt", ".ts", ".ttml", ".vtt", ".webm"}
+    known_suffixes = {".aac", ".ac3", ".ass", ".bbts", ".eac3", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".srt", ".ssa", ".ts", ".ttml", ".vtt", ".webm"}
     return path.stem if path.suffix.lower() in known_suffixes else path.name
 
 
@@ -8433,13 +8459,13 @@ def _live_mux_tracks(tracks: list[_DownloadedTrack], args: argparse.Namespace) -
     return tracks
 
 
-def _mux_inputs_for_tracks(tracks: list[_DownloadedTrack]) -> list[MuxInput]:
+def _mux_inputs_for_tracks(tracks: list[_DownloadedTrack], default_audio: str = "auto") -> list[MuxInput]:
     tracks = [track for track in tracks if not _empty_subtitle_track(track)]
     selected_streams = [track.stream for track in tracks]
     starts = [_dash_mux_start(track.stream) for track in tracks]
     known_starts = [start for start in starts if start is not None]
     base_start = min(known_starts) if known_starts else None
-    return [
+    inputs = [
         _mux_input_for_track(
             track,
             _mux_delay_ms(start, base_start),
@@ -8447,6 +8473,11 @@ def _mux_inputs_for_tracks(tracks: list[_DownloadedTrack]) -> list[MuxInput]:
             selected_streams=selected_streams,
         )
         for track, start in zip(tracks, starts, strict=False)
+    ]
+    choice = resolve_default_audio(selected_streams, default_audio)
+    return [
+        replace(item, default=track.stream is choice.stream) if track.stream.media_type == "audio" else item
+        for item, track in zip(inputs, tracks, strict=True)
     ]
 
 
