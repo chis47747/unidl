@@ -511,27 +511,39 @@ class KeyVault:
         kid_hex = normalize_hex(kid)
         if not kid_hex:
             return None
+        # PlayReady uses the same GUID in canonical UUID order and in the
+        # little-endian MP4 fragment order. Keep vault rows in the spelling they
+        # were stored with, but accept either spelling during a read.
+        candidates = (kid_hex, playready_kid_alias(kid_hex))
         conn = self._connections.get()
         for service_name in service_names(service):
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                row = conn.execute(
+                    """
+                    SELECT key FROM keys
+                    WHERE kid = ? AND service = ? AND key != ?
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (candidate, service_name, _NULL_KEY),
+                ).fetchone()
+                if row:
+                    return row["key"]
+        for candidate in candidates:
+            if not candidate:
+                continue
             row = conn.execute(
                 """
                 SELECT key FROM keys
-                WHERE kid = ? AND service = ? AND key != ?
+                WHERE kid = ? AND key != ?
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """,
-                (kid_hex, service_name, _NULL_KEY),
+                (candidate, _NULL_KEY),
             ).fetchone()
             if row:
                 return row["key"]
-        row = conn.execute(
-            """
-            SELECT key FROM keys
-            WHERE kid = ? AND key != ?
-            ORDER BY created_at DESC, id DESC LIMIT 1
-            """,
-            (kid_hex, _NULL_KEY),
-        ).fetchone()
-        return row["key"] if row else None
+        return None
 
     def get_keys(self, kids: Iterable[str], service: str | None = None) -> dict[str, str]:
         """Batch lookup. Returns only the KIDs that were found."""

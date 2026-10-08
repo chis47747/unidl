@@ -638,8 +638,10 @@ GLOBAL_SETTINGS: list[Setting] = [
         default=True,
         help=(
             "After the final video tracks are selected and the download screen is "
-            "open, sample media response sizes to show an actual bitrate. Turning "
-            "this off keeps the manifest bitrate only and skips the probe."
+            "open, sample media response sizes from distributed segments to show "
+            "an actual bitrate. A range prefix is counted only when the server "
+            "reports the complete segment size; unreliable probes are omitted. "
+            "Turning this off keeps the manifest bitrate only and skips the probe."
         ),
         visible=False,
     ),
@@ -741,9 +743,13 @@ GLOBAL_SETTINGS: list[Setting] = [
             ("en", "English"),
             ("zh-Hans", "Simplified Chinese"),
             ("zh-Hant", "Traditional Chinese"),
-            ("es", "Español"),
-            ("fr", "Français"),
-            ("pt", "Português"),
+            ("es", "Spanish"),
+            ("fr", "French"),
+            ("pt", "Portuguese"),
+            ("it", "Italian"),
+            ("ja", "Japanese"),
+            ("ko", "Korean"),
+            ("ru", "Russian"),
         ],
         "system",
         "Language of UniDL's own labels, prompts and settings. Service names, "

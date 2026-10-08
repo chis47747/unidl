@@ -585,6 +585,48 @@ def _live_pipe_mux_supported() -> bool:
     return os.name == "nt" or hasattr(os, "mkfifo")
 
 
+def _spread_bitrate_samples(segments: Sequence[object], max_samples: int = 8) -> list[object]:
+    """Return evenly spaced media segments, preserving their source order."""
+    if not segments:
+        return []
+    limit = max(2, min(int(max_samples or 8), len(segments)))
+    if len(segments) <= limit:
+        selected = list(segments)
+    else:
+        positions = {
+            round(index * (len(segments) - 1) / (limit - 1))
+            for index in range(limit)
+        }
+        selected = [segments[index] for index in sorted(positions)]
+    unique: list[object] = []
+    seen: set[tuple[object, object]] = set()
+    for segment in selected:
+        key = (getattr(segment, "url", ""), getattr(segment, "byte_range", None))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(segment)
+    return unique
+
+
+def _measured_segment_size(response: object, expected_range: int | None) -> int | None:
+    """Extract a complete segment size without mistaking a probe prefix for it."""
+    if expected_range:
+        return expected_range
+    headers = getattr(response, "headers", {}) or {}
+    content_range = str(headers.get("Content-Range", ""))
+    match = re.search(r"bytes\s+\d+-\d+/(\d+)\s*$", content_range, flags=re.IGNORECASE)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    if getattr(response, "status_code", None) == 200:
+        value = str(headers.get("Content-Length", ""))
+        return int(value) if value.isdigit() else None
+    return None
+
+
 class Engine:
     def __init__(
         self,
@@ -931,16 +973,15 @@ class Engine:
                 if len(media_segments) > 1 and stream.duration and stream.duration > 0
                 else None
             )
-            samples = [
-                (segment, float(segment.duration or fallback_duration or 0))
-                for segment in media_segments[:3]
-                if (segment.duration or fallback_duration or 0) > 0
-            ]
-            if not samples:
-                continue
-            total_bytes = 0
-            total_duration = 0.0
-            for segment, duration in samples:
+            # Sample throughout the presentation. The first few DASH segments
+            # can be a quiet intro and are not representative of a long VBR
+            # title.
+            samples = _spread_bitrate_samples(media_segments, max_samples=8)
+            measured_samples: list[tuple[int, float]] = []
+            for segment in samples:
+                duration = float(segment.duration or fallback_duration or 0)
+                if duration <= 0:
+                    continue
                 headers = dict(playback.headers)
                 expected_range = None
                 if segment.byte_range:
@@ -948,6 +989,8 @@ class Engine:
                     expected_range = max(0, end - start + 1)
                     headers["Range"] = f"bytes={start}-{end}"
                 else:
+                    # Use a small prefix only when the origin reports the
+                    # complete segment size in Content-Range.
                     headers["Range"] = "bytes=0-1048575"
                 try:
                     with requests.get(
@@ -958,27 +1001,29 @@ class Engine:
                         stream=True,
                     ) as response:
                         response.raise_for_status()
-                        content_range = response.headers.get("Content-Range", "")
-                        total_match = re.search(r"/(\d+)\s*$", content_range)
-                        if expected_range:
-                            measured_size = expected_range
-                        elif total_match:
-                            measured_size = int(total_match.group(1))
-                        elif response.status_code == 200:
-                            raw_length = response.headers.get("Content-Length", "")
-                            measured_size = int(raw_length) if raw_length.isdigit() else 0
-                        else:
-                            measured_size = 0
+                        measured_size = _measured_segment_size(response, expected_range)
                 except requests.RequestException as exc:
                     self.log(f"video bitrate probe skipped: {exc}")
                     break
-                if not measured_size:
-                    break
-                total_bytes += measured_size
-                total_duration += duration
+                if measured_size is None or measured_size <= 0:
+                    continue
+                measured_samples.append((measured_size, duration))
+            if not measured_samples or (len(media_segments) > 1 and len(measured_samples) < 2):
+                continue
+            total_bytes = sum(size for size, _duration in measured_samples)
+            total_duration = sum(duration for _size, duration in measured_samples)
             if total_bytes and total_duration > 0:
-                stream.extra["actual_bitrate"] = round(total_bytes * 8 / total_duration)
-                stream.extra["actual_bitrate_source"] = "media segment response size"
+                measured = round(total_bytes * 8 / total_duration)
+                manifest = int(stream.bandwidth or 0)
+                if manifest and (measured < manifest // 4 or measured > manifest * 4):
+                    self.log(
+                        f"video bitrate probe rejected as unreliable: "
+                        f"{measured}bps vs manifest {manifest}bps"
+                    )
+                    continue
+                stream.extra["actual_bitrate"] = measured
+                stream.extra["actual_bitrate_source"] = "distributed media segment samples"
+                stream.extra["actual_bitrate_sample_count"] = len(measured_samples)
 
     @staticmethod
     def _apply_playback_drm_hint(

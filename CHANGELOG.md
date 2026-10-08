@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.5] - 2026-10-08
+
+### Interface language
+
+- Added Italian (`it`), Japanese (`ja`), Korean (`ko`) and Russian (`ru`) as shipped interface catalogues alongside English, Chinese, Spanish, French and Portuguese.
+- Language names in the interface-language picker now follow the current interface language.
+
+### Local key vault
+
+- Accepted both canonical and little-endian PlayReady KID spellings during local vault lookup while keeping service-scoped matches preferred.
+
+### Bitrate metadata
+
+- Improved actual video bitrate sampling by distributing probes across the presentation and rejecting unreliable measurements.
+
 ## [2.3.4] - 2026-10-08
 
 ### Default audio
