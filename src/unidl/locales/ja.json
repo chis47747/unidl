@@ -140,7 +140,7 @@
   "update.note.media_types": "スクリプト由来のマニフェスト URL と URL 内の空白は、署名済みクエリを作り直さずに扱います。",
   "update.note.documentation": "HLS 初期化区間は元の AES キー範囲を保ちます。従来の TS/AAC SAMPLE-AES ダウンロードにも対応します。",
   "update.note.clipboard": "任意の Dolby Vision + HDR10 ハイブリッド出力はグローバルおよびサービス単位で設定できます。対応するソースと外部ツールが必要です。",
-  "update.note.update_checker": "UniDL v2.3.5 はイタリア語、日本語、韓国語、ロシア語のインターフェースを追加し、ローカル key vault の PlayReady KID 照合を改善しました。",
+  "update.note.update_checker": "UniDL v2.3.6 は BBC 再生を拡張し、自動トラック選択とメタデータ位置を改善し、不足している映像色域情報を検証します。",
   "update.close_hint": "esc / x でこのウィンドウを閉じます",
   "home.chip.config": "設定",
   "home.chip.config_create": "作成",

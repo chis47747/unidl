@@ -182,6 +182,8 @@ class Episode:
     version_kind: str = ""
     tleo_id: str = ""
     parent_id: str = ""
+    image_url: str = ""
+    poster_url: str = ""
 
     @property
     def label(self) -> str:
@@ -221,6 +223,8 @@ class Channel:
     episode_id: str = ""
     master_brand: str = ""
     region: str = ""
+    image_url: str = ""
+    poster_url: str = ""
 
     @property
     def url(self) -> str:
@@ -235,6 +239,8 @@ class Source:
     subtitle: str = ""
     chapters: tuple[dict[str, Any], ...] = ()
     encrypted: bool = False
+    image_url: str = ""
+    poster_url: str = ""
 
     def line(self) -> str:
         return " · ".join(
@@ -261,25 +267,22 @@ class IPlayerApi:
         self,
         session: requests.Session | None = None,
         *,
-        resolution: str = "auto",
+        resolution: Any = "auto",
         region: str = "london",
     ):
-        resolution = str(resolution or "auto").strip().lower()
-        # Keep existing user configuration files working after the setting
-        # vocabulary was renamed from 4k/1080p/720p to UHD/FHD/HD.
-        resolution = {"4k": "uhd", "2160p": "uhd", "1080p": "fhd", "720p": "hd"}.get(
-            resolution, resolution
-        )
-        if resolution not in {"auto", "uhd", "fhd", "hd"}:
-            resolution = "auto"
+        self.profiles = normalize_source_profiles(resolution)
+        if self.profiles == ("auto",):
+            self.resolution = "auto"
+        else:
+            self.resolution = self.profiles[0].split("-", 1)[0]
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", USER_AGENT)
-        self.resolution = resolution
         self.region = region
         self._tv_playback_cache: dict[str, dict[str, Any]] = {}
         self._manifest_height_cache: dict[str, int] = {}
         self._subtitle_url_cache: dict[str, str] = {}
         self._region_variant_cache: dict[str, list[Channel]] = {}
+        self._selector_cache: dict[tuple[str, str, bool], dict[str, Any]] = {}
 
 
     def search(self, query: str) -> list[SearchHit]:
@@ -313,27 +316,37 @@ class IPlayerApi:
         if not data:
             raise IPlayerError(f"BBC returned no programme {pid}")
         title = _text(data.get("title")) or pid
-        seasons = []
-        for raw in data.get("slices") or []:
-            if not isinstance(raw, dict) or not raw.get("id"):
-                continue
-            label = _text(raw.get("title")) or str(raw["id"])
-            if raw["id"] == "more-like-this" or "more like" in label.lower():
-                continue
-            match = _SEASON.search(label)
-            seasons.append(Season(str(raw["id"]), label, pid, int(match.group(1)) if match else None))
+        seasons = _seasons_from(data, pid)
+        if not seasons:
+            data = self._programme(pid, None, 200)
+            title = _text(data.get("title")) or title
+            seasons = _seasons_from(data, pid)
         if not seasons:
             seasons = [Season("", "Episodes", pid)]
         return Show(pid, title, seasons)
 
     def season(self, season: Season) -> Season:
-        data = self._programme(season.programme_id, season.id or None, 200)
-        entities = ((data.get("entities") or {}).get("results") or []) if data else []
-        episodes = []
-        for entity in entities:
-            raw = entity.get("episode") if isinstance(entity, dict) and entity.get("episode") else entity
-            if isinstance(raw, dict) and raw.get("id"):
+        episodes: list[Episode] = []
+        seen: set[str] = set()
+        page = 1
+        while page <= 20:
+            data = self._programme(season.programme_id, season.id or None, 200, page=page)
+            entities = _entity_results(data)
+            added = 0
+            for entity in entities:
+                raw = entity.get("episode") if isinstance(entity, dict) and entity.get("episode") else entity
+                if not isinstance(raw, dict) or not raw.get("id"):
+                    continue
+                episode_id = str(raw["id"])
+                if episode_id in seen:
+                    continue
+                seen.add(episode_id)
                 episodes.append(_episode(raw, season.number))
+                added += 1
+            total = _int(_mapping(data.get("entities")).get("total"))
+            if added == 0 or len(entities) < 200 or (total is not None and len(episodes) >= total):
+                break
+            page += 1
         return Season(season.id, season.title, season.programme_id, season.number, episodes)
 
     def episode(self, pid: str) -> Episode:
@@ -367,41 +380,37 @@ class IPlayerApi:
             version_kind=item.version_kind or enriched.version_kind,
             tleo_id=item.tleo_id or enriched.tleo_id,
             parent_id=item.parent_id or enriched.parent_id,
+            image_url=item.image_url or enriched.image_url,
+            poster_url=item.poster_url or enriched.poster_url,
         )
 
     def _episode_in_programme(self, programme_id: str, episode_id: str, parent_id: str = "") -> dict[str, Any] | None:
         if not programme_id or programme_id == episode_id:
             return None
         root = self._programme(programme_id, None, 0)
-        slices = []
-        for entry in root.get("slices") or []:
-            if not isinstance(entry, dict):
-                continue
-            slice_id = str(entry.get("id") or "")
-            label = _text(entry.get("title")).lower()
-            if not slice_id or slice_id == "more-like-this" or "more like" in label:
-                continue
-            slices.append(slice_id)
+        slices = [entry.id for entry in _seasons_from(root, programme_id) if entry.id]
+        if not slices:
+            slices = [entry.id for entry in _seasons_from(self._programme(programme_id, None, 200), programme_id) if entry.id]
         if parent_id:
             matching = [value for value in slices if value == parent_id or value.endswith(parent_id)]
             if matching:
                 slices = matching
         for slice_id in slices or [None]:
             data = self._programme(programme_id, slice_id, 200)
-            entities = (data.get("entities") or {}).get("results") or []
+            entities = _entity_results(data)
             for entity in entities:
                 raw = entity.get("episode") if isinstance(entity, dict) and entity.get("episode") else entity
                 if isinstance(raw, dict) and raw.get("id") == episode_id:
                     return raw
         return None
 
-    def _programme(self, pid: str, slice_id: str | None, per_page: int) -> dict[str, Any]:
+    def _programme(self, pid: str, slice_id: str | None, per_page: int, page: int = 1) -> dict[str, Any]:
         data = self._json(
             "POST",
             GRAPH,
             json={
                 "id": TLEO_QUERY_ID,
-                "variables": {"id": pid, "perPage": per_page, "page": 1, "sliceId": slice_id},
+                "variables": {"id": pid, "perPage": per_page, "page": max(1, int(page or 1)), "sliceId": slice_id},
             },
         )
         programme = (data.get("data") or {}).get("programme")
@@ -410,7 +419,6 @@ class IPlayerApi:
             message = errors[0].get("message") if errors and isinstance(errors[0], dict) else "not found"
             raise IPlayerError(f"BBC programme metadata failed: {message}")
         return programme
-
 
     def channels(self, region: str | None = None, *, include_schedule: bool = True) -> list[Channel]:
         selected_region = region or self.region
@@ -425,11 +433,14 @@ class IPlayerApi:
             channel_id = str(raw["id"])
             if "radio" in channel_id:
                 continue
+            image_url, poster_url = _images(raw)
             channel = Channel(
                 id=channel_id,
                 name=_text(raw.get("title")) or channel_id,
                 master_brand=str(raw.get("master_brand_id") or raw.get("masterBrand") or ""),
                 region=selected_region,
+                image_url=image_url,
+                poster_url=poster_url,
             )
             channels.append(self._scheduled_channel(channel) if include_schedule else channel)
         return channels
@@ -451,12 +462,14 @@ class IPlayerApi:
             return channel
         current_ep = (current or {}).get("episode") or {}
         next_ep = (following or {}).get("episode") or {}
+        programme_image, programme_poster = _images(current_ep)
         return replace(
             channel,
             now=_text(current_ep.get("title")) or _text((current or {}).get("title")),
             next=_text(next_ep.get("title")) or _text((following or {}).get("title")),
             synopsis=_text(current_ep.get("synopsis"), "small", "default"),
             episode_id=str(current_ep.get("id") or ""),
+            poster_url=programme_poster or programme_image or channel.poster_url,
         )
 
     def regional_variants(self, channel: Channel) -> list[Channel]:
@@ -545,49 +558,61 @@ class IPlayerApi:
     def sources(self, item: Episode | Channel) -> list[Source]:
         live = isinstance(item, Channel) or item.live
         vpids = [item.id] if isinstance(item, Channel) else [item.service_id or item.vpid]
-        quality_plan = _quality_plan(self.resolution)
-        if live and "uhd" in quality_plan:
+        plan = source_profile_plan(self.profiles)
+        if live and any(quality == "uhd" for quality, _protocol in plan):
             episode_pid = item.episode_id if isinstance(item, Channel) else item.id
             vpids = [*self._live_uhd_vpids(episode_pid), *vpids]
         vpids = list(dict.fromkeys(vpid for vpid in vpids if vpid))
         if not vpids:
             raise IPlayerError("BBC metadata contained no playable version id")
-        chapters = () if live or isinstance(item, Channel) else tuple(self._chapters_for_episode(item.id, vpids))
-        if live:
-            for quality in quality_plan:
-                for vpid in vpids:
-                    result = self._source_for(vpid, quality, True)
-                    if result is not None:
-                        return [replace(result, chapters=chapters)]
-            requested = "/".join(quality_plan).upper()
-            raise IPlayerError(f"BBC playback is unavailable at the requested quality ({requested}; often a UK region gate)")
+        image_url = item.image_url
+        poster_url = item.poster_url
+        listing = None if live or isinstance(item, Channel) else self._episode_listing(item.id)
+        if listing is not None:
+            listing_image, listing_poster = _images(listing)
+            image_url = listing_image or image_url
+            poster_url = listing_poster or poster_url
+        chapters = () if listing is None else tuple(self._chapters_from_listing(listing, vpids))
+        stop_at_first = live or self.profiles == ("auto",)
         found: list[Source] = []
         seen: set[str] = set()
-        for quality in quality_plan:
+        for quality, protocol in plan:
             for vpid in vpids:
-                result = self._source_for(vpid, quality, False)
+                result = self._source_for(vpid, quality, live, protocol=protocol)
                 if result is None or result.manifest in seen:
                     continue
                 seen.add(result.manifest)
-                found.append(replace(result, chapters=chapters))
+                found.append(replace(result, chapters=chapters, image_url=image_url, poster_url=poster_url))
                 break
+            if found and stop_at_first:
+                return found
         if not found:
-            requested = "/".join(quality_plan).upper()
-            raise IPlayerError(f"BBC playback is unavailable at the requested quality ({requested}; often a UK region gate)")
+            requested = ", ".join(_profile_label(quality, protocol) for quality, protocol in plan)
+            raise IPlayerError(
+                f"BBC playback is unavailable at the requested quality ({requested}; often a UK region gate)"
+            )
         return found
 
     def source(self, item: Episode | Channel) -> Source:
         return self.sources(item)[0]
 
-    def _chapters_for_episode(self, pid: str, vpids: list[str]) -> list[dict[str, Any]]:
+    def _episode_listing(self, pid: str) -> dict[str, Any] | None:
         try:
             data = self._json("GET", EPISODE.format(pid=pid))
         except IPlayerError:
-            return []
+            return None
         episodes = data.get("episodes") or []
         if not episodes or not isinstance(episodes[0], dict):
+            return None
+        return episodes[0]
+
+    def _chapters_for_episode(self, pid: str, vpids: list[str]) -> list[dict[str, Any]]:
+        return self._chapters_from_listing(self._episode_listing(pid), vpids)
+
+    def _chapters_from_listing(self, raw: dict[str, Any] | None, vpids: list[str]) -> list[dict[str, Any]]:
+        if not raw:
             return []
-        versions = [value for value in episodes[0].get("versions") or [] if isinstance(value, dict)]
+        versions = [value for value in raw.get("versions") or [] if isinstance(value, dict)]
         selected = next(
             (value for value in versions if str(value.get("id") or value.get("pid") or "") in vpids),
             None,
@@ -687,11 +712,22 @@ class IPlayerApi:
         self._tv_playback_cache[episode_pid] = data
         return data
 
-    def _source_for(self, vpid: str, quality: str, live: bool) -> Source | None:
+    def _selector_payload(self, vpid: str, quality: str, live: bool) -> dict[str, Any]:
+        mediaset = (
+            "iptv-uhd"
+            if quality == "uhd"
+            else "iptv-all"
+            if not live
+            else ("iptv-mse" if quality == "fhd" else "mobile-phone-main")
+        )
+        key = (vpid, mediaset, bool(live))
+        cached = self._selector_cache.get(key)
+        if cached is not None:
+            return cached
+        payload: dict[str, Any] = {}
         if quality == "uhd":
             payload = self._secure_selector(vpid, "iptv-uhd")
         else:
-            mediaset = "iptv-all" if not live else ("iptv-mse" if quality == "fhd" else "mobile-phone-main")
             try:
                 payload = self._json(
                     "GET",
@@ -699,7 +735,14 @@ class IPlayerApi:
                     headers={"User-Agent": USER_AGENT_TV if live and mediaset == "iptv-mse" else USER_AGENT},
                 )
             except IPlayerError:
-                return None
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        self._selector_cache[key] = payload
+        return payload
+
+    def _source_for(self, vpid: str, quality: str, live: bool, *, protocol: str | None = None) -> Source | None:
+        payload = self._selector_payload(vpid, quality, live)
         media = [entry for entry in (payload or {}).get("media") or [] if isinstance(entry, dict)]
         if not media:
             return None
@@ -709,8 +752,9 @@ class IPlayerApi:
             "fhd": ("h264", "avc"),
             "hd": ("h264", "avc"),
         }[quality]
-        protocol_order: tuple[str, ...] = ()
-        if not live:
+        wanted = str(protocol or "").strip().lower()
+        protocol_order: tuple[str, ...] = (wanted,) if wanted in {"dash", "hls"} else ()
+        if not protocol_order and not live:
             if quality == "fhd":
                 protocol_order = ("hls",)
             elif quality == "uhd":
@@ -721,7 +765,9 @@ class IPlayerApi:
         for entry, connection, raw_url in candidates:
             transfer = str(connection.get("transferFormat") or "").lower()
             encoding = str(entry.get("encoding") or "").lower()
-            if not live and quality == "fhd" and (transfer != "hls" or encoding not in {"h264", "avc", "avc1"}):
+            if wanted in {"dash", "hls"} and transfer != wanted:
+                continue
+            if not wanted and not live and quality == "fhd" and (transfer != "hls" or encoding not in {"h264", "avc", "avc1"}):
                 continue
             if not live and quality == "uhd" and encoding not in {"h265", "hevc", "hev1", "hvc1"}:
                 continue
@@ -731,10 +777,10 @@ class IPlayerApi:
                 continue
             if height < minimum or maximum is not None and height > maximum:
                 continue
-            protocol = "DASH" if transfer == "dash" or url.split("?", 1)[0].endswith(".mpd") else "HLS"
+            kind = "DASH" if transfer == "dash" or url.split("?", 1)[0].endswith(".mpd") else "HLS"
             codec = _codec_label(entry)
             tier = "UHD " if quality == "uhd" else ""
-            return Source(url, protocol, f"{height}p {tier}{codec}".strip(), subtitle)
+            return Source(url, kind, f"{height}p {tier}{codec}".strip(), subtitle)
         return None
 
     def _manifest_height(self, url: str) -> int:
@@ -917,6 +963,7 @@ def _episode(raw: dict[str, Any], default_season: int | None = None) -> Episode:
         if match:
             year = match.group()
             break
+    image_url, poster_url = _images(raw)
     return Episode(
         id=str(raw.get("id") or ""),
         title=title,
@@ -935,7 +982,48 @@ def _episode(raw: dict[str, Any], default_season: int | None = None) -> Episode:
         version_kind=version_kind,
         tleo_id=str(raw.get("tleo_id") or raw.get("tleoId") or ""),
         parent_id=str(raw.get("parent_id") or raw.get("parentId") or ""),
+        image_url=image_url,
+        poster_url=poster_url,
     )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _entity_results(data: dict[str, Any] | None) -> list[Any]:
+    results = _mapping(data).get("entities")
+    if isinstance(results, dict):
+        rows = results.get("results") or results.get("elements") or []
+        return list(rows) if isinstance(rows, list) else []
+    if isinstance(results, list):
+        return results
+    return []
+
+
+def _slice_rows(data: dict[str, Any] | None) -> list[Any]:
+    rows = _mapping(data).get("slices")
+    if isinstance(rows, dict):
+        rows = rows.get("elements") or rows.get("results") or []
+    return list(rows) if isinstance(rows, list) else []
+
+
+def _seasons_from(data: dict[str, Any] | None, programme_id: str) -> list[Season]:
+    seasons: list[Season] = []
+    seen: set[str] = set()
+    for raw in _slice_rows(data):
+        if not isinstance(raw, dict) or not raw.get("id"):
+            continue
+        slice_id = str(raw["id"])
+        label = _text(raw.get("title")) or slice_id
+        if slice_id == "more-like-this" or "more like" in label.lower():
+            continue
+        if slice_id in seen:
+            continue
+        seen.add(slice_id)
+        match = _SEASON.search(label)
+        seasons.append(Season(slice_id, label, programme_id, int(match.group(1)) if match else None))
+    return seasons
 
 
 def _text(value: Any, *keys: str) -> str:
@@ -948,18 +1036,146 @@ def _text(value: Any, *keys: str) -> str:
     return ""
 
 
-def _quality_plan(resolution: str) -> tuple[str, ...]:
-    """Return source profiles in preference order for the configured setting."""
+def expand_image(url: str, recipe: str = "raw") -> str:
+    """Fill a BBC ichef ``{recipe}`` (or ``{width}x{height}``) template."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    chosen = str(recipe or "raw").strip() or "raw"
+    return text.replace("{recipe}", chosen).replace("{width}x{height}", chosen)
 
-    resolution = {"4k": "uhd", "2160p": "uhd", "1080p": "fhd", "720p": "hd"}.get(
-        str(resolution or "auto").strip().lower(), str(resolution or "auto").strip().lower()
-    )
-    return {
-        "auto": ("uhd", "fhd", "hd"),
-        "uhd": ("uhd",),
-        "fhd": ("fhd",),
-        "hd": ("hd",),
-    }.get(str(resolution or "auto").strip().lower(), ("uhd", "fhd", "hd"))
+
+def _image_entry_url(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(
+            value.get("url")
+            or value.get("templatedUrl")
+            or value.get("templateUrl")
+            or value.get("src")
+            or value.get("href")
+            or value.get("standard")
+            or ""
+        ).strip()
+    return ""
+
+
+def _images(raw: dict[str, Any] | None) -> tuple[str, str]:
+    """Return ``(landscape, portrait)`` ichef URL templates from an IBL or GraphQL object."""
+    if not isinstance(raw, dict):
+        return "", ""
+    standard = ""
+    portrait = ""
+    images = raw.get("images") if raw.get("images") is not None else raw.get("image")
+    if isinstance(images, str):
+        standard = images.strip()
+    elif isinstance(images, dict):
+        standard = str(
+            images.get("standard")
+            or images.get("landscape")
+            or images.get("promotional")
+            or images.get("default")
+            or images.get("url")
+            or images.get("templatedUrl")
+            or images.get("templateUrl")
+            or ""
+        ).strip()
+        portrait = str(images.get("vertical") or images.get("portrait") or "").strip()
+        kind = str(images.get("type") or images.get("kind") or "").strip().lower()
+        if kind in {"portrait", "vertical", "poster"} and standard and not portrait:
+            portrait = standard
+            standard = ""
+    elif isinstance(images, list):
+        for entry in images:
+            url = _image_entry_url(entry)
+            if not url:
+                continue
+            kind = ""
+            if isinstance(entry, dict):
+                kind = str(entry.get("type") or entry.get("kind") or "").strip().lower()
+            if kind in {"portrait", "vertical", "poster"} and not portrait:
+                portrait = url
+            elif not standard:
+                standard = url
+    if not standard and not portrait:
+        fallback = raw.get("image_url") or raw.get("imageUrl") or raw.get("image")
+        standard = _image_entry_url(fallback)
+    return standard, portrait
+
+
+_SOURCE_PROFILE_ALIASES = {
+    "auto": "auto",
+    "best": "auto",
+    "4k": "uhd-dash",
+    "2160p": "uhd-dash",
+    "uhd": "uhd-dash",
+    "1080p": "fhd-hls",
+    "fhd": "fhd-hls",
+    "720p": "hd-dash",
+    "hd": "hd-dash",
+    "uhd-dash": "uhd-dash",
+    "uhd-hls": "uhd-hls",
+    "fhd-dash": "fhd-dash",
+    "fhd-hls": "fhd-hls",
+    "hd-dash": "hd-dash",
+    "hd-hls": "hd-hls",
+}
+_SOURCE_PROFILE_IDS = (
+    "auto",
+    "uhd-dash",
+    "uhd-hls",
+    "fhd-dash",
+    "fhd-hls",
+    "hd-dash",
+    "hd-hls",
+)
+
+
+def normalize_source_profiles(value: Any) -> tuple[str, ...]:
+    """Coerce a stored Playback source value into exclusive auto or explicit rows."""
+
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace("\n", ",").split(",")]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        parts = list(value)
+    else:
+        parts = [] if value in (None, "") else [value]
+    mapped: list[str] = []
+    for part in parts:
+        name = _SOURCE_PROFILE_ALIASES.get(str(part or "").strip().lower())
+        if name in _SOURCE_PROFILE_IDS and name not in mapped:
+            mapped.append(name)
+    if not mapped or mapped[-1] == "auto":
+        return ("auto",)
+    return tuple(item for item in mapped if item != "auto") or ("auto",)
+
+
+def source_profile_plan(profiles: tuple[str, ...] | str) -> list[tuple[str, str | None]]:
+    """Return ``(quality, protocol)`` rows. ``protocol`` is None for auto preference."""
+
+    selected = normalize_source_profiles(profiles)
+    if selected == ("auto",):
+        return [("uhd", None), ("fhd", None), ("hd", None)]
+    rows: list[tuple[str, str | None]] = []
+    for name in selected:
+        quality, separator, protocol = name.partition("-")
+        if quality in {"uhd", "fhd", "hd"} and protocol in {"dash", "hls"}:
+            rows.append((quality, protocol))
+        elif separator == "" and quality in {"uhd", "fhd", "hd"}:
+            rows.append((quality, None))
+    return rows or [("uhd", None), ("fhd", None), ("hd", None)]
+
+
+def _profile_label(quality: str, protocol: str | None) -> str:
+    suffix = f" {protocol.upper()}" if protocol else ""
+    return f"{quality.upper()}{suffix}"
+
+
+def _quality_plan(resolution: str) -> tuple[str, ...]:
+    """Return source qualities in preference order for the configured setting."""
+
+    return tuple(dict.fromkeys(quality for quality, _protocol in source_profile_plan(resolution)))
 
 
 def _connections(
@@ -1074,6 +1290,7 @@ __all__ = [
     "Season",
     "Show",
     "Source",
+    "expand_image",
     "parse_input",
     "parse_selector",
 ]

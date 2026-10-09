@@ -308,6 +308,9 @@ class Playback:
     audio_codec_hint: str = ""
     #: ID3 tags for the output. Defaults to whatever the title knows.
     audio_tags: dict[str, Any] = field(default_factory=dict)
+    #: Title half retained so post-selection metadata probes can rebuild the
+    #: release suffix without duplicating the provisional suffix.
+    release_name_base: str = ""
 
     def __post_init__(self) -> None:
         self.save_name = safe_filename(self.save_name, label="Playback.save_name")

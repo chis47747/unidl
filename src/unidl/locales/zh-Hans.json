@@ -140,7 +140,7 @@
   "update.note.media_types": "支持脚本形式的 manifest 地址和 URL 空格，不重建已签名的查询参数。",
   "update.note.documentation": "HLS 初始化片段保留原有 AES 密钥作用域，支持旧式 TS/AAC SAMPLE-AES 下载。",
   "update.note.clipboard": "可全局或按服务启用 Dolby Vision + HDR10 混合输出；需要匹配的源轨道与外部工具。",
-  "update.note.update_checker": "UniDL v2.3.5 新增意大利语、日语、韩语和俄语界面，并改进本地 key vault 的 PlayReady KID 匹配。",
+  "update.note.update_checker": "UniDL v2.3.6 扩展 BBC 播放支持，改进自动轨道选择和元数据定位，并验证缺失的视频色域信息。",
   "update.close_hint": "按 esc / x 关闭窗口",
   "home.chip.config": "配置",
   "home.chip.config_create": "创建",

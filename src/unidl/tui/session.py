@@ -170,9 +170,12 @@ def tracks_panel(save_name: str, tracks: TrackSet) -> Panel:
     form this is useful in - a track list pasted into a note.
     """
     chosen = {id(stream) for stream in tracks.selected}
+    chosen_keys = {key for stream in tracks.selected for key in _track_match_keys(stream)}
     rows: list[str | tuple[str, str]] = []
     for stream in tracks.selectable_streams:
-        mark = TAKEN if id(stream) in chosen else LEFT
+        mark = TAKEN if id(stream) in chosen or any(
+            key in chosen_keys for key in _track_match_keys(stream)
+        ) else LEFT
         rows.append(f"{mark}  {stream.format_line()}")
     return Panel(
         title=f"tracks  ·  {save_name}",
@@ -182,6 +185,31 @@ def tracks_panel(save_name: str, tracks: TrackSet) -> Panel:
             "and no licence was requested  ·  1 copies the list  ·  enter or ^b to go back"
         ),
     )
+
+
+def _track_identity(stream: object) -> tuple[str, ...]:
+    """Stable picker identity for merged/service-produced stream instances."""
+    return tuple(
+        str(getattr(stream, name, "") or "")
+        for name in ("media_type", "id", "group_id", "language", "resolution", "codecs", "bandwidth")
+    )
+
+
+def _track_match_keys(stream: object) -> tuple[tuple[str, ...], ...]:
+    """Identity variants that survive authorized URL rewriting/merging."""
+    media_type = str(getattr(stream, "media_type", "") or "")
+    stream_id = str(getattr(stream, "id", "") or "")
+    group_id = str(getattr(stream, "group_id", "") or "")
+    language = str(getattr(stream, "language", "") or "")
+    resolution = str(getattr(stream, "resolution", "") or "")
+    codecs = str(getattr(stream, "codecs", "") or "")
+    bandwidth = str(getattr(stream, "bandwidth", "") or "")
+    keys = [_track_identity(stream)]
+    if stream_id:
+        keys.append(("id", media_type, stream_id, language, resolution, codecs))
+    if group_id or language or resolution or codecs:
+        keys.append(("shape", media_type, group_id, language, resolution, codecs, bandwidth))
+    return tuple(dict.fromkeys(keys))
 
 
 _AUDIO_TAG_ROWS = (
@@ -2209,7 +2237,7 @@ class SessionController:
             # so the card can say what would have been taken and what the file
             # would have been called.
             try:
-                self.engine.select_tracks(playback, self.settings, tracks)
+                self._select_tracks(playback, tracks)
             except Exception as exc:
                 self.post_error("Could not select output tracks", str(exc), "Check Track settings.")
                 return FAILED, "track selection failed"
@@ -2282,7 +2310,7 @@ class SessionController:
         # selection is deliberately downstream of DRM and never enters the
         # licence context.
         try:
-            self.engine.select_tracks(playback, self.settings, tracks)
+            self._select_tracks(playback, tracks)
         except Exception as exc:
             self.post_error("Could not select output tracks", str(exc), "Check Track settings.")
             return FAILED, "track selection failed"
@@ -2574,7 +2602,18 @@ class SessionController:
         measure_bitrates = getattr(getattr(self, "engine", None), "measure_video_bitrates", None)
         if callable(measure_bitrates) and bool(self.settings.get("fetch_actual_bitrate", True)):
             self.post_status("measuring selected video bitrate")
+            ranges_before_probe = {
+                id(stream): str(stream.video_range or "")
+                for stream in tracks.selected
+                if stream.media_type == "video"
+            }
             measure_bitrates(playback, tracks)
+            if any(
+                str(stream.video_range or "") != ranges_before_probe.get(id(stream), "")
+                for stream in tracks.selected
+                if stream.media_type == "video"
+            ):
+                self._name_release(playback, tracks, refresh=True)
             self.app.call_from_thread(self._refresh_delivery, playback, tracks)
         self._set_live_frame_mode(playback.is_live)
         self.post_status(tr("delivery.status.downloading_name", name=playback.save_name))
@@ -2864,7 +2903,7 @@ class SessionController:
         self.post_field("live", shape, "warn")
         return mode
 
-    def _name_release(self, playback: Playback, tracks: TrackSet) -> None:
+    def _name_release(self, playback: Playback, tracks: TrackSet, *, refresh: bool = False) -> None:
         """Add the release half to the save name: ``.1080p.DSNP.WEB-DL.DV-TAG``.
 
         The queue row is renamed with it, so the row, the log, the command file and
@@ -2874,16 +2913,20 @@ class SessionController:
         if callable(reconcile):
             reconcile(playback, tracks)
         before = playback.save_name
+        if not playback.release_name_base and ".WEB-DL" not in before:
+            playback.release_name_base = before
+        source_name = playback.release_name_base if refresh and playback.release_name_base else before
         release_tag = getattr(self.service, "release_tag", None)
         platform = release_tag() if callable(release_tag) else self.service.tag()
         playback.save_name = naming.with_release(
-            before,
+            source_name,
             playback.title,
             streams=tracks.selected,
             platform=platform,
             tag=str(self.settings.get("release_tag", "") or ""),
             layout=str(self.settings.inherited("release_template", "") or ""),
             style=str(self.settings.inherited("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
+            refresh=refresh,
         )
         if playback.save_name == before:
             return
@@ -3060,6 +3103,23 @@ class SessionController:
     def _notify(self, message: str, severity: str = "information") -> None:
         self._on_ui(lambda: self.app.notify(message, severity=severity, timeout=5))
 
+    def _select_tracks(self, playback: Playback, tracks: TrackSet) -> list:
+        """Select tracks while keeping matching rows visible for manual repair."""
+        try:
+            return self.engine.select_tracks(
+                playback,
+                self.settings,
+                tracks,
+                preserve_partial=True,
+            )
+        except TypeError as exc:
+            # Small Engine doubles and third-party integrations may still expose
+            # the pre-preview three-argument contract. Do not hide a TypeError
+            # raised inside the selector itself.
+            if "unexpected keyword argument 'preserve_partial'" not in str(exc):
+                raise
+            return self.engine.select_tracks(playback, self.settings, tracks)
+
     def _ask_tracks(
         self,
         tracks: TrackSet,
@@ -3077,7 +3137,12 @@ class SessionController:
             )
             for stream in visible
         ]
-        preselected = [index for index, stream in enumerate(visible) if id(stream) in chosen_ids]
+        chosen_keys = {key for stream in tracks.selected for key in _track_match_keys(stream)}
+        preselected = [
+            index for index, stream in enumerate(visible)
+            if id(stream) in chosen_ids
+            or any(key in chosen_keys for key in _track_match_keys(stream))
+        ]
         ask = ctx.pick(
             f"Tracks · {playback.save_name}",
             choices,

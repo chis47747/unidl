@@ -596,6 +596,7 @@ def with_release(
     tag: str = "",
     layout: str = "",
     style: str = DEFAULT_NAME_STYLE,
+    refresh: bool = False,
 ) -> str:
     """``save_name`` with the release half appended, for the kinds that take one.
 
@@ -604,10 +605,15 @@ def with_release(
     """
     if title.kind not in RELEASE_KINDS or not save_name:
         return save_name
-    if any(marker in save_name for marker in (f".{SOURCE}", f" {SOURCE}", f"-{SOURCE}")):
+    has_release = any(marker in save_name for marker in (f".{SOURCE}", f" {SOURCE}", f"-{SOURCE}"))
+    if has_release and not refresh:
         # already a release name. A title that genuinely contains ".WEB-DL" is one
         # too, so skipping is the right answer either way.
         return save_name
+    if has_release and refresh:
+        marker = re.search(r"[. -]WEB-DL(?:[. -]|$)", save_name, flags=re.IGNORECASE)
+        if marker:
+            save_name = save_name[: marker.start()]
     suffix = release_suffix(
         quality=quality_of(streams),
         platform=platform,

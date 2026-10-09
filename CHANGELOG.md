@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.6] - 2026-10-09
+
+### BBC playback
+
+- Expanded BBC iPlayer playback and search to cover BBC Sounds audio, radio and podcast sources under the unified BBC service.
+
+### Track selection and metadata
+
+- Improved automatic track selection and back-navigation behavior while preserving the final selection constraints.
+- Validated missing video colour metadata with a bounded init-segment probe and kept chapters, attachments and lyrics positioning aligned during delivery.
+
+### File naming
+
+- Updated filename generation to apply corrected media metadata consistently after probing and selection.
+
 ## [2.3.5] - 2026-10-08
 
 ### Interface language

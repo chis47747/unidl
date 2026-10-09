@@ -32,6 +32,7 @@ BRANDS: dict[str, str] = {
     "arte": "ARTE",
     "atresplayer": "Atresplayer",
     "bbc": "BBC iPlayer",
+    "bbcsounds": "BBC iPlayer",
     "bahamut": "巴哈姆特動畫瘋",
     "bilibili": "哔哩哔哩",
     "binge": "Binge",

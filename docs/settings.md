@@ -160,7 +160,7 @@ heartbeat interval is part of the shared settings contract.
 | `justwatch_manager` | manager screen | — | Opens **JustWatch search**, where the one title-catalogue country and the separate availability-country list are edited together. The two underlying values remain independent. |
 | `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns the `theme`, `interface_locale` and `debug` choices. |
 | `after_resolve` | `download` / `command` / `ask` | `download` | Compatibility key controlled by **Download behavior**. `command` reproduces the old scripts' behaviour of only emitting a command; the main screen shortcut `d` still cycles it. |
-| `fetch_actual_bitrate` | on / off | **on** | Compatibility key controlled by **Download behavior**. After the final video tracks are selected and the download details screen is visible, UniDL samples distributed media segments to show an actual bitrate beside the manifest estimate. A probe is accepted only when the complete segment size is known; unreliable CDN responses are omitted. Off skips the probe and keeps the manifest bitrate only. |
+| `fetch_actual_bitrate` | on / off | **on** | Compatibility key controlled by **Download behavior**. After the final video tracks are selected and the download details screen is visible, UniDL samples distributed media segments to show an actual bitrate beside the manifest estimate. During that same probe it may read the selected video's bounded MP4 initialization metadata to correct a missing HLG/HDR label before final naming. A probe is accepted only when the complete segment size is known; unreliable CDN responses are omitted. Off skips all of this and keeps manifest metadata only. |
 | `drm_system` | registered DRM systems | first registered system | Compatibility key controlled by **DRM & vaults → DRM system**. A service that declares exactly one system pins that system; a multi-system service may expose its own override. |
 | `cdm_rules` | resolution-to-device rules | empty | Compatibility key controlled by **DRM & vaults → CDM rules**. Rules choose the app-wide CDM by output resolution and never replace a service's own CDM setting. |
 | `theme` | `dark` / `light` | `dark` | Compatibility key controlled by **Interface & diagnostics**. Also switch with `ctrl+t`; changes repaint the current screen immediately. |
@@ -380,9 +380,11 @@ imported native export restores its saved output scope before automatic
 selection.
 
 When an automatic rule has no match, a single title is offered the normal manual
-picker. In a batch, the title is recorded as skipped and the remaining titles
-continue; the batch never pauses waiting for a picker that cannot share one
-answer across episodes.
+picker. Any matching media types remain checked and the unmatched type is left
+unchecked, so the user can repair only the part that needs attention. In a
+batch, the title is recorded as skipped and the remaining titles continue; the
+batch never pauses waiting for a picker that cannot share one answer across
+episodes.
 
 Automatic selection treats language, codec, profile, channels and subtitle type
 as hard filters combined with AND. `best` or `worst` only ranks tracks remaining

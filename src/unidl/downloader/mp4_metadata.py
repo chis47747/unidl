@@ -87,4 +87,38 @@ def audio_channel_count_from_init(data: bytes | bytearray) -> int | None:
     return None
 
 
-__all__ = ["audio_channel_count_from_init"]
+def video_range_from_init(data: bytes | bytearray) -> str | None:
+    """Read HDR transfer metadata from ISO-BMFF ``colr/nclx`` boxes."""
+    ranges: list[str] = []
+    raw = bytes(data)
+    offset = 0
+    while True:
+        index = raw.find(b"colr", offset)
+        if index < 4:
+            break
+        box_start = index - 4
+        size = int.from_bytes(raw[box_start:index], "big")
+        header_size = 8
+        if size == 1 and index + 12 <= len(raw):
+            size = int.from_bytes(raw[index + 4:index + 12], "big")
+            header_size = 16
+        end = box_start + size if size else len(raw)
+        payload_start = box_start + header_size
+        if size >= header_size and payload_start + 10 <= end <= len(raw):
+            payload = raw[payload_start:end]
+            if payload[:4] in {b"nclx", b"nclc"}:
+                primaries = int.from_bytes(payload[4:6], "big")
+                transfer = int.from_bytes(payload[6:8], "big")
+                if transfer == 18:
+                    ranges.append("HLG")
+                elif transfer in {14, 15, 16} and primaries == 9:
+                    ranges.append("HDR10")
+        offset = index + 4
+    if "HLG" in ranges:
+        return "HLG"
+    if "HDR10" in ranges:
+        return "HDR10"
+    return None
+
+
+__all__ = ["audio_channel_count_from_init", "video_range_from_init"]

@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
@@ -194,12 +193,6 @@ class DownloadScreen(AskHost):
     #: the delivery header and the status row already say what is happening, so
     #: a third note in the middle of the screen would just be repetition
     WAITING_TEXT = ""
-    BINDINGS = [
-        Binding("c", "show_chapters", "Chapters", show=False),
-        Binding("l", "show_lyrics", "Lyrics", show=False),
-        Binding("a", "show_attachments", "Attachments", show=False),
-    ]
-
     def __init__(self, controller) -> None:
         super().__init__(controller)
         #: what the header is currently about, kept so a resize can re-shorten the
@@ -207,8 +200,8 @@ class DownloadScreen(AskHost):
         #: on the header says how it went rather than what is being fetched.
         self._described: Playback | None = None
         self._described_tracks: TrackSet | None = None
-        #: Kept after completion so the Chapters button still opens the result
-        #: while the finished screen is being inspected.
+        #: Kept for the detail chips and result overlays while the finished
+        #: screen is being inspected.
         self._chapter_playback: Playback | None = None
         #: Version sampled from SessionController's latest-frame slot. Idle
         #: timer ticks compare this before parsing ANSI or touching a widget.
@@ -247,9 +240,6 @@ class DownloadScreen(AskHost):
             can_go_back=self.CAN_GO_BACK,
             left_actions=(
                 ("■", "Pause", "screen.stop_resume", "chrome-stop"),
-                ("c", "Chapters", "screen.show_chapters", "chrome-chapters"),
-                ("l", "Lyrics", "screen.show_lyrics", "chrome-lyrics"),
-                ("a", "Attachments", "screen.show_attachments", "chrome-attachments"),
             ),
         )
 
@@ -279,15 +269,12 @@ class DownloadScreen(AskHost):
         that answer nothing.
         """
         back = "stopping..." if self.controller.cancel_requested else "back"
-        chapters = self.chapter_hints()
-        lyrics = self.lyrics_hints()
-        attachments = self.attachments_hints()
         log_action = {
             "normal": "expand the log",
             "tall": "collapse the log",
             "collapsed": "show the log",
         }.get(self._log_state, "toggle the log")
-        return [("^b", back), *self.queue_hints(), *chapters, *lyrics, *attachments, ("^l", log_action),
+        return [("^b", back), *self.queue_hints(), ("^l", log_action),
                 ("drag", "select text to copy it"), ("^s", "settings")]
 
     def refresh_keys(self) -> None:

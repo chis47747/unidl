@@ -949,19 +949,78 @@ class Engine:
                 f"audio channel metadata corrected: DASH={declared or 'unknown'}, MP4 init={count}"
             )
 
+    def _probe_video_range_during_bitrate_measurement(
+        self,
+        playback: Playback,
+        tracks: TrackSet,
+        stream: StreamInfo,
+        proxies: dict[str, str] | None,
+    ) -> None:
+        """Read init colour metadata as part of the enabled bitrate probe."""
+        if str(stream.video_range or "").strip().upper() not in {"", "SDR"}:
+            return
+        initialization = next((segment for segment in stream.segments if segment.index == -1), None)
+        if initialization is None:
+            return
+        from unidl.downloader.mp4_metadata import video_range_from_init
+
+        payload = bytes(initialization.data or b"")
+        origin = tracks.origins.get(id(stream), playback)
+        if not payload and initialization.url.startswith(("http://", "https://")):
+            headers = dict(origin.headers)
+            if initialization.byte_range:
+                headers["Range"] = f"bytes={initialization.byte_range[0]}-{initialization.byte_range[1]}"
+            else:
+                headers["Range"] = "bytes=0-65535"
+            try:
+                with requests.get(
+                    initialization.url,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=30,
+                    stream=True,
+                ) as response:
+                    response.raise_for_status()
+                    if hasattr(response, "iter_content"):
+                        chunks: list[bytes] = []
+                        total = 0
+                        for chunk in response.iter_content(8192):
+                            if not chunk:
+                                continue
+                            remaining = 65_536 - total
+                            chunks.append(chunk[:remaining])
+                            total += min(len(chunk), remaining)
+                            if total >= 65_536:
+                                break
+                        payload = b"".join(chunks)
+                    else:
+                        payload = bytes(getattr(response, "content", b""))[:65_536]
+            except requests.RequestException as exc:
+                self.log(f"video colour metadata probe skipped: {exc}")
+                return
+        detected = video_range_from_init(payload)
+        if detected and detected != str(stream.video_range or "").strip().upper():
+            stream.video_range = detected
+            stream.extra["video_range_source"] = "MP4 init colr/nclx via bitrate probe"
+            self.log(f"video colour metadata corrected during bitrate probe: {detected}")
+
     def measure_video_bitrates(self, playback: Playback, tracks: TrackSet) -> None:
         """Measure selected video bitrate from response sizes without downloading media.
 
         Manifest ``bandwidth`` is a provider estimate. For the final selected
         video tracks, use the response's Content-Range or Content-Length and
-        the segment duration. Range requests are capped to a small prefix, so a
-        one-segment VOD is never downloaded in full just to measure its bitrate.
+        the segment duration. The same bounded probe also reads missing MP4 init
+        colour metadata, so the final track display and release name can correct
+        a provisional SDR label without a separate manifest-stage request.
+        Range requests are capped to a small prefix, so a one-segment VOD is
+        never downloaded in full just to measure its bitrate.
         """
         proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
         for stream in tracks.selected:
             if stream.media_type != "video" or stream.extra.get("_video_bitrate_measured"):
                 continue
             stream.extra["_video_bitrate_measured"] = True
+            self._probe_video_range_during_bitrate_measurement(playback, tracks, stream, proxies)
             media_segments = [
                 segment
                 for segment in stream.segments
@@ -2587,8 +2646,16 @@ class Engine:
         playback: Playback,
         settings: Settings,
         tracks: TrackSet,
+        *,
+        preserve_partial: bool = False,
     ) -> list[StreamInfo]:
-        """Apply shared Track output selection to an already parsed ladder."""
+        """Apply shared Track output selection to an already parsed ladder.
+
+        ``preserve_partial`` is used by the interactive TUI only: hard
+        constraints still set ``selection_error`` and block automatic delivery,
+        but matching media types can be shown prechecked for manual repair.
+        Headless callers retain the empty result on any unmatched constraint.
+        """
         result = self.auto_select_result(
             tracks.selectable_streams,
             settings,
@@ -2600,6 +2667,7 @@ class Engine:
             video_selection=playback.video_selection or None,
             audio_selection=playback.audio_selection or None,
             subtitle_selection=playback.subtitle_selection or None,
+            preserve_partial=preserve_partial,
         )
         tracks.selected = result.selected
         tracks.selection_error = "; ".join(result.unmatched)
@@ -2761,6 +2829,7 @@ class Engine:
         video_selection: str | None = None,
         audio_selection: str | None = None,
         subtitle_selection: str | None = None,
+        preserve_partial: bool = False,
     ) -> SelectionResult:
         """Return automatic tracks and the hard constraints that missed.
 
@@ -2848,10 +2917,10 @@ class Engine:
             for media_type in sorted(selected_types - available_types):
                 result = SelectionResult(result.selected, (*result.unmatched, media_type))
         chosen = result.selected
-        if result.unmatched:
-            # A partial result is still unsafe: selecting the matching video
-            # while the requested audio/subtitle is absent silently widens the
-            # user's rule. Return an empty preselection and let the picker decide.
+        if result.unmatched and not preserve_partial:
+            # The unmatched media type remains unselected. Headless callers
+            # keep the historical empty result; the TUI opts into the partial
+            # result only to show matching rows prechecked in the manual picker.
             return SelectionResult([], result.unmatched)
         if (
             strict
@@ -2859,11 +2928,11 @@ class Engine:
             and not any(stream.media_type == "video" for stream in chosen)
         ):
             return SelectionResult([], ("video",))
-        if not chosen and streams:
+        if not chosen and streams and not result.unmatched:
             best_video = next((s for s in streams if s.media_type == "video"), None)
             best_audio = next((s for s in streams if s.media_type == "audio"), None)
             chosen = [s for s in (best_video, best_audio) if s is not None] or [streams[0]]
-        return SelectionResult(chosen)
+        return SelectionResult(chosen, result.unmatched)
 
     @staticmethod
     def _normalize_audio_only_streams(

@@ -1,4 +1,4 @@
-"""BBC iPlayer - programme catalogue, search, regional live TV and UHD."""
+"""BBC iPlayer - programme catalogue, Sounds audio, search, live TV and radio."""
 
 from __future__ import annotations
 
@@ -7,28 +7,43 @@ import os
 import re
 from collections.abc import Iterator
 
+from ...core.attachments import Attachment
 from ...core.chapters import Chapter
-from ...core.flow import Ask, Choice, FlowContext
+from ...core.flow import Ask, Back, Choice, FlowContext
 from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.settings import Option, Setting
 from ...core.titles import Title, TitleKind
 from ...downloader.models import StreamInfo
-from . import api
+from . import api, sounds
 
-_RESOLUTION = Setting(
+
+class _PlaybackSourceSetting(Setting):
+    def coerce(self, value):
+        return api.normalize_source_profiles(value)
+
+
+_RESOLUTION = _PlaybackSourceSetting(
     "source_resolution",
     "Playback source",
+    kind="multi",
     options=[
         Option("auto", "Best available · UHD → FHD → HD"),
-        Option("uhd", "UHD · 2160p"),
-        Option("fhd", "FHD · 1080p"),
-        Option("hd", "HD · 720p"),
+        Option("uhd-dash", "UHD · 2160p DASH"),
+        Option("uhd-hls", "UHD · 2160p HLS"),
+        Option("fhd-dash", "FHD · 1080p DASH"),
+        Option("fhd-hls", "FHD · 1080p HLS"),
+        Option("hd-dash", "HD · 720p DASH"),
+        Option("hd-hls", "HD · 720p HLS"),
     ],
-    default="auto",
+    default=("auto",),
     help=(
-        "Chooses the BBC media-selector source profile. This is separate from the "
-        "shared video quality setting, which selects tracks inside that source."
+        "BBC media-selector sources to request. Best available is exclusive: it "
+        "asks for UHD, then FHD, then HD, and keeps the first source that works. "
+        "Tick several DASH/HLS rows to authorize those VOD manifests and let UniDL "
+        "merge them before track selection. Live TV and BBC Sounds always use one "
+        "source so the playlist can refresh. Shared video quality still chooses "
+        "tracks inside the ladder."
     ),
 )
 _REGION = Setting(
@@ -59,10 +74,22 @@ class BBCiPlayer(Service):
     ID = "bbc"
     NAME = "BBC iPlayer"
     TAG = "iP"
-    ALIASES = ("iplayer", "bbciplayer", "bbc-tv")
-    TITLE_RE = r"(?:www\.)?bbc\.(?:co\.uk|com)/(?:iplayer/(?:episode|episodes|live)/|programmes/)"
+    LEGACY_IDS = ("bbcsounds",)
+    ALIASES = (
+        "iplayer",
+        "bbciplayer",
+        "bbc-tv",
+        "sounds",
+        "bbc-sounds",
+        "bbc sounds",
+        "bbcsounds",
+        "bbcradio",
+        "snds",
+    )
+    TITLE_RE = r"(?:www\.)?bbc\.(?:co\.uk|com)/(?:iplayer/(?:episode|episodes|live)/|programmes/|sounds/)"
     GEOFENCE = ("GB",)
-    DESCRIPTION = "BBC television on demand and regional live channels, clear up to UHD."
+    MEDIA_TYPES = ("audio", "video")
+    DESCRIPTION = "BBC television, radio and podcasts. On-demand and live, clear up to UHD."
     USES = Capabilities()
     SETTINGS = [_RESOLUTION, _REGION]
     SUPPORTS_URL = True
@@ -75,17 +102,33 @@ class BBCiPlayer(Service):
     def client(self, ctx: FlowContext | None = None) -> api.IPlayerApi:
         return api.IPlayerApi(
             session=self.ctx.session(user_agent=api.USER_AGENT),
-            resolution=str(self.settings.get("source_resolution") or "auto"),
+            resolution=self.settings.get("source_resolution") or "auto",
             region=str(self.settings.get("live_region") or "london"),
         )
 
+    def sounds_client(self) -> sounds.SoundsApi:
+        return sounds.SoundsApi(
+            session=self.ctx.session(
+                user_agent=sounds.USER_AGENT,
+                headers={"Accept": "application/json"},
+                cookies=False,
+            )
+        )
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        if sounds.is_sounds_target(target):
+            parsed = sounds.parse_input(target)
+            if parsed is None:
+                ctx.error(f"That does not look like a BBC Sounds link or PID: {target}")
+                return
+            yield from self._open_sounds(ctx, parsed)
+            return
         parsed = api.parse_input(target)
         if parsed is None:
             ctx.error(
-                f"That does not look like a BBC iPlayer link or PID: {target}\n"
-                "Expected /iplayer/episode|episodes|live/<pid>, /programmes/<pid>, or a BBC PID."
+                f"That does not look like a BBC iPlayer or BBC Sounds link: {target}\n"
+                "Expected /iplayer/episode|episodes|live/<pid>, /sounds/play|brand|series/<pid>, "
+                "/programmes/<pid>, or a BBC PID."
             )
             return
         try:
@@ -95,42 +138,86 @@ class BBCiPlayer(Service):
             elif parsed.kind == "episode":
                 yield from self._emit_episode(ctx, client, client.episode(parsed.pid))
             elif parsed.kind == "live":
-                yield from self._emit_live(ctx, client, client.channel(parsed.pid))
+                if _looks_like_radio(parsed.pid):
+                    yield from self._emit_sounds_live(ctx, self.sounds_client(), parsed.pid)
+                else:
+                    yield from self._emit_live(ctx, client, client.channel(parsed.pid))
             else:
                 try:
                     item = client.episode(parsed.pid)
                 except api.IPlayerError:
-                    yield from self._show(ctx, client, client.show(parsed.pid), parsed.series_id)
+                    try:
+                        yield from self._show(ctx, client, client.show(parsed.pid), parsed.series_id)
+                    except api.IPlayerError:
+                        yield from self._open_sounds(ctx, sounds.ParsedInput("episode", parsed.pid))
                 else:
                     yield from self._emit_episode(ctx, client, item)
         except api.IPlayerError as exc:
+            sounds_parsed = sounds.parse_input(parsed.pid)
+            if sounds_parsed is not None:
+                yield from self._open_sounds(ctx, sounds_parsed)
+                return
             ctx.error(str(exc))
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        tv_hits: list[api.SearchHit] = []
+        sounds_hits: list[sounds.SoundsHit] = []
+        tv_error = ""
+        sounds_error = ""
         try:
             client = self.client(ctx)
             ctx.status(f"Searching BBC iPlayer for {query}")
-            hits = client.search(query)
+            tv_hits = client.search(query)
         except api.IPlayerError as exc:
-            ctx.error(str(exc))
+            tv_error = str(exc)
+        try:
+            ctx.status(f"Searching BBC Sounds for {query}")
+            sounds_hits = self.sounds_client().search(query)
+        except sounds.SoundsError as exc:
+            sounds_error = str(exc)
+        if not tv_hits and not sounds_hits:
+            if tv_error and not sounds_error:
+                ctx.error(tv_error)
+            elif sounds_error and not tv_error:
+                ctx.error(sounds_error)
+            elif tv_error and sounds_error:
+                ctx.error(f"{tv_error}; {sounds_error}")
+            else:
+                ctx.warn(f"BBC iPlayer found nothing for {query}")
             return
-        if not hits:
-            ctx.warn(f"BBC iPlayer found nothing for {query}")
-            return
-        chosen = yield ctx.pick(
-            f"BBC iPlayer  ·  {query}",
-            [
-                Choice(
-                    hit.title,
-                    hit,
-                    detail=hit.synopsis[:90],
-                    tags=tuple(value for value in (hit.kind, hit.category) if value),
-                )
-                for hit in hits
-            ],
+        choices = [
+            Choice(
+                hit.title,
+                hit.url,
+                detail=hit.synopsis[:90],
+                tags=tuple(value for value in ("TV", hit.kind, hit.category) if value),
+            )
+            for hit in tv_hits
+        ]
+        choices.extend(
+            Choice(
+                hit.title,
+                hit.url,
+                detail=(hit.synopsis or hit.network)[:90],
+                tags=tuple(value for value in ("Sounds", hit.category or hit.kind, hit.network) if value),
+            )
+            for hit in sounds_hits
         )
-        if chosen is not None:
-            yield from self.open_url(ctx, chosen.url)
+        while True:
+            try:
+                chosen = yield ctx.pick(f"BBC iPlayer  ·  {query}", choices)
+            except Back:
+                return
+            if chosen is None:
+                return
+            try:
+                yield from self.open_url(ctx, str(chosen))
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
+            if not ctx.interactive:
+                return
 
     def _show(
         self,
@@ -142,20 +229,40 @@ class BBCiPlayer(Service):
         if not show.seasons:
             ctx.warn(f"BBC returned no seasons for {show.title}")
             return
-        season = next((entry for entry in show.seasons if entry.id == selected), None) if selected else None
-        if season is None:
-            season = (
-                show.seasons[0]
-                if len(show.seasons) == 1
-                else (
-                    yield ctx.pick(
+        seasons = show.seasons
+        cursor = _season_cursor(seasons, selected)
+        while True:
+            try:
+                if len(seasons) == 1:
+                    season = seasons[0]
+                else:
+                    season = yield ctx.pick(
                         f"{show.title}  ·  seasons",
-                        [Choice(entry.label, entry) for entry in show.seasons],
+                        [Choice(entry.label, entry) for entry in seasons],
+                        cursor=cursor,
                     )
-                )
-            )
-        if season is None:
-            return
+                if season is None:
+                    return
+            except Back:
+                return
+            if isinstance(season, api.Season):
+                cursor = next((index for index, entry in enumerate(seasons) if entry.id == season.id), cursor)
+            try:
+                yield from self._season_episodes(ctx, client, show, season)
+            except Back:
+                if not ctx.interactive or len(seasons) == 1:
+                    return
+                continue
+            if not ctx.interactive or len(seasons) == 1:
+                return
+
+    def _season_episodes(
+        self,
+        ctx: FlowContext,
+        client: api.IPlayerApi,
+        show: api.Show,
+        season: api.Season,
+    ) -> Iterator[Ask]:
         try:
             ctx.status(f"Loading {show.title}  ·  {season.title}")
             season = client.season(season)
@@ -165,20 +272,64 @@ class BBCiPlayer(Service):
         if not season.episodes:
             ctx.warn(f"BBC returned no episodes for {season.title}")
             return
-        picked = yield ctx.pick(
-            f"{show.title}  ·  {season.label}",
-            [Choice(item.label, item, detail=item.synopsis[:90]) for item in season.episodes],
-            multi=True,
-            hint="space to tick, enter to confirm",
-        )
-        episodes = list(picked or [])
-        if len(episodes) > 1:
-            ctx.batch(len(episodes))
-        for item in episodes:
-            yield from self._emit_episode(ctx, client, item)
+        while True:
+            try:
+                picked = yield ctx.pick(
+                    f"{show.title}  ·  {season.label}",
+                    [Choice(item.label, item, detail=item.synopsis[:90]) for item in season.episodes],
+                    multi=True,
+                    hint="space to tick, enter to confirm",
+                )
+            except Back:
+                return
+            episodes = [item for item in (picked or []) if isinstance(item, api.Episode)]
+            if not episodes:
+                return
+            if len(episodes) > 1:
+                try:
+                    ctx.batch(len(episodes))
+                except Back:
+                    if not ctx.interactive:
+                        return
+                    continue
+            for item in episodes:
+                try:
+                    yield from self._emit_episode(ctx, client, item)
+                except Back:
+                    if not ctx.interactive or len(episodes) == 1:
+                        break
+                    continue
+            if not ctx.interactive:
+                return
 
 
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
+        while True:
+            try:
+                kind = yield ctx.pick(
+                    "BBC iPlayer  ·  live",
+                    [
+                        Choice("TV", "tv", detail="Regional television"),
+                        Choice("Radio", "radio", detail="BBC Sounds stations"),
+                    ],
+                )
+            except Back:
+                return
+            if kind is None:
+                return
+            try:
+                if kind == "radio":
+                    yield from self._live_radio(ctx)
+                else:
+                    yield from self._live_tv(ctx)
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
+            if not ctx.interactive:
+                return
+
+    def _live_tv(self, ctx: FlowContext) -> Iterator[Ask]:
         try:
             client = self.client(ctx)
             ctx.status("Loading BBC live channels")
@@ -186,17 +337,42 @@ class BBCiPlayer(Service):
         except api.IPlayerError as exc:
             ctx.error(str(exc))
             return
-        chosen = yield ctx.table(
-            f"BBC iPlayer  ·  {len(channels)} live channels",
-            ["Channel", "Now", "Next"],
-            [(channel.name, channel.now, channel.next) for channel in channels],
-            channels,
-        )
-        if chosen is not None:
-            variants = client.regional_variants(chosen)
-            if len(variants) > 1:
+        while True:
+            try:
+                chosen = yield ctx.table(
+                    f"BBC iPlayer  ·  {len(channels)} live channels",
+                    ["Channel", "Now", "Next"],
+                    [(channel.name, channel.now, channel.next) for channel in channels],
+                    channels,
+                )
+            except Back:
+                return
+            if chosen is None:
+                return
+            try:
+                yield from self._live_tv_channel(ctx, client, chosen)
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
+            if not ctx.interactive:
+                return
+
+    def _live_tv_channel(
+        self,
+        ctx: FlowContext,
+        client: api.IPlayerApi,
+        channel: api.Channel,
+    ) -> Iterator[Ask]:
+        variants = client.regional_variants(channel)
+        if len(variants) <= 1:
+            chosen = client.channel(channel.id)
+            yield from self._emit_live(ctx, client, chosen)
+            return
+        while True:
+            try:
                 chosen = yield ctx.pick(
-                    f"{chosen.name}  ·  regions",
+                    f"{channel.name}  ·  regions",
                     [
                         Choice(
                             variant.region or variant.name,
@@ -206,12 +382,47 @@ class BBCiPlayer(Service):
                         for variant in variants
                     ],
                 )
-            if chosen is not None:
+            except Back:
+                return
+            if chosen is None:
+                return
+            try:
+                yield from self._emit_live(ctx, client, client.channel(chosen.id))
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
+            if not ctx.interactive:
+                return
 
-
-
-                chosen = client.channel(chosen.id)
-                yield from self._emit_live(ctx, client, chosen)
+    def _live_radio(self, ctx: FlowContext) -> Iterator[Ask]:
+        client = self.sounds_client()
+        ctx.status("Loading stations")
+        stations = client.stations()
+        if not stations:
+            ctx.warn("BBC Sounds returned no live stations")
+            return
+        while True:
+            try:
+                chosen = yield ctx.table(
+                    "Live radio",
+                    ["Station", "Now"],
+                    [(station.programme, station.episode) for station in stations],
+                    stations,
+                )
+            except Back:
+                return
+            target = chosen[0] if isinstance(chosen, list) else chosen
+            if target is None:
+                return
+            try:
+                yield from self._emit_sounds_live(ctx, client, target.id, station=target)
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
+            if not ctx.interactive:
+                return
 
     def _emit_live(
         self,
@@ -226,6 +437,7 @@ class BBCiPlayer(Service):
             channel=channel.name,
             episode_name=channel.now or None,
             synopsis=channel.synopsis or None,
+            cover_url=_cover_url(channel.poster_url, channel.image_url),
             service=self.ID,
         )
         yield from self._emit(ctx, client, title, channel, is_live=True)
@@ -248,6 +460,7 @@ class BBCiPlayer(Service):
             episode_name=item.name if episodic else None,
             genre=item.category or None,
             synopsis=item.synopsis or None,
+            cover_url=_cover_url(item.poster_url, item.image_url),
             service=self.ID,
         )
         yield from self._emit(ctx, client, title, item, is_live=item.live)
@@ -265,10 +478,15 @@ class BBCiPlayer(Service):
             ctx.status(f"Resolving {title.label()}")
             sources = client.sources(item)
         except api.IPlayerError as exc:
+            if isinstance(item, api.Channel) and (_looks_like_radio(item.id) or item.name == item.id):
+                yield from self._emit_sounds_live(ctx, self.sounds_client(), item.id)
+                return
             ctx.error(f"{title.label()}: {exc}")
             return
         source = sources[0]
         save_name = self.save_name(title)
+        if not title.cover_url:
+            title.cover_url = _cover_url(source.poster_url, source.image_url)
         chapters = [
             Chapter(
                 start_ms=max(0, int(value.get("start_ms") or 0)),
@@ -290,6 +508,7 @@ class BBCiPlayer(Service):
             drm=drm,
             subtitle_references=self._subtitle_references(sources, is_live=is_live),
             chapters=chapters,
+            attachments=self._tv_attachments(item, source),
             merge_manifests=not is_live and len(sources) > 1,
             note=" + ".join(value.line() for value in sources),
         )
@@ -313,6 +532,7 @@ class BBCiPlayer(Service):
                     headers=dict(playback.headers),
                     proxy=playback.proxy,
                     drm=DrmInfo(clear=True),
+                    attachments=list(playback.attachments),
                     merge_manifests=False,
                     note=source.line(),
                 )
@@ -415,7 +635,208 @@ class BBCiPlayer(Service):
         playback.mux_imports.extend(imports)
         log(f"BBC iPlayer subtitles: prepared {len(imports)}/{len(selected)} track(s)")
 
+    def _open_sounds(self, ctx: FlowContext, parsed: sounds.ParsedInput) -> Iterator[Ask]:
+        client = self.sounds_client()
+        if parsed.kind == "live":
+            yield from self._emit_sounds_live(ctx, client, parsed.value)
+            return
+        if parsed.kind == "container":
+            yield from self._browse_sounds_container(ctx, client, parsed.value)
+            return
+        ctx.status(f"Looking up {parsed.value}")
+        try:
+            item = client.episode(parsed.value)
+        except sounds.SoundsError as exc:
+            ctx.warn(f"{exc}; trying it as a series")
+            yield from self._browse_sounds_container(ctx, client, parsed.value)
+            return
+        yield from self._emit_sounds_item(ctx, client, item)
+
+    def _browse_sounds_container(
+        self,
+        ctx: FlowContext,
+        client: sounds.SoundsApi,
+        container_id: str,
+    ) -> Iterator[Ask]:
+        offset = 0
+        while True:
+            ctx.status(f"Loading episodes {offset + 1}+")
+            items, total = client.container(container_id, offset=offset)
+            if not items:
+                ctx.warn("No episodes available")
+                return
+            choices = [Choice(item.episode, item, detail=_sounds_detail(item)) for item in items]
+            more = offset + len(items) < total
+            if more:
+                choices.append(Choice(f"Next {sounds.PAGE_SIZE} of {total}...", "__more__", navigates=True))
+            try:
+                picked = yield ctx.pick(
+                    f"{items[0].programme}  ·  {total} episodes",
+                    choices,
+                    multi=True,
+                    hint="space to tick, enter to confirm",
+                )
+            except Back:
+                return
+            wanted = [item for item in (picked or []) if item != "__more__" and isinstance(item, sounds.SoundsItem)]
+            paging = any(item == "__more__" for item in (picked or []))
+            if len(wanted) > 1:
+                try:
+                    ctx.batch(len(wanted))
+                except Back:
+                    if not ctx.interactive:
+                        return
+                    continue
+            for item in wanted:
+                try:
+                    yield from self._emit_sounds_item(ctx, client, item)
+                except Back:
+                    if not ctx.interactive or len(wanted) == 1:
+                        break
+                    continue
+            if paging:
+                offset += sounds.PAGE_SIZE
+                continue
+            if not ctx.interactive:
+                return
+
+    def _emit_sounds_item(
+        self,
+        ctx: FlowContext,
+        client: sounds.SoundsApi,
+        item: sounds.SoundsItem,
+    ) -> Iterator[Ask]:
+        ctx.status(f"Resolving {item.episode}")
+        try:
+            source = client.source_for(item)
+        except sounds.SoundsError as exc:
+            ctx.error(f"{item.episode}: {exc}")
+            return
+        yield ctx.emit(self._sounds_playback(item, source))
+
+    def _emit_sounds_live(
+        self,
+        ctx: FlowContext,
+        client: sounds.SoundsApi,
+        service_id: str,
+        station: sounds.SoundsItem | None = None,
+    ) -> Iterator[Ask]:
+        ctx.status(f"Resolving {service_id}")
+        try:
+            source = client.live_source_for(service_id)
+        except sounds.SoundsError as exc:
+            ctx.error(f"{service_id}: {exc}")
+            return
+        if station is None:
+            station = next((entry for entry in client.stations() if entry.id == service_id), None)
+        item = station or sounds.SoundsItem(id=service_id, programme=service_id, episode="Live", live=True)
+        item.live = True
+        yield ctx.emit(self._sounds_playback(item, source))
+
+    def _sounds_playback(self, item: sounds.SoundsItem, source: sounds.AudioSource) -> Playback:
+        title = Title(
+            id=item.id,
+            kind=TitleKind.STATION if item.live else TitleKind.TRACK,
+            name=item.programme,
+            episode_name=item.episode if item.episode != item.programme else None,
+            year=(item.release_date or "")[:4] or None,
+            duration=item.duration,
+            channel=item.network or None,
+            artist=item.programme,
+            album=item.album,
+            genre="Podcast" if not item.live else "Radio",
+            publisher="BBC",
+            synopsis=item.synopsis,
+            cover_url=api.expand_image(item.image_url, "1024x1024") or None,
+            service=self.ID,
+        )
+        note = f"{source.quality}"
+        if source.direct_file:
+            note += " · progressive download, already MP3"
+        return Playback(
+            title=title,
+            save_name=self.save_name(title),
+            manifest_url=source.url,
+            headers={"User-Agent": sounds.USER_AGENT},
+            proxy=self.ctx.proxy,
+            is_live=item.live,
+            merge_manifests=False,
+            attachments=self._image_attachments(
+                (item.image_url, "Artwork", "artwork"),
+                user_agent=sounds.USER_AGENT,
+            ),
+            note=note,
+        )
+
+    def _tv_attachments(self, item: api.Episode | api.Channel, source: api.Source) -> list[Attachment]:
+        poster = source.poster_url or item.poster_url
+        image = source.image_url or item.image_url
+        if poster:
+            return self._image_attachments(
+                (poster, "Poster", "poster"),
+                (image, "Artwork", "image"),
+                user_agent=api.USER_AGENT,
+            )
+        return self._image_attachments((image, "Poster", "poster"), user_agent=api.USER_AGENT)
+
+    def _image_attachments(
+        self,
+        *rows: tuple[str, str, str],
+        user_agent: str,
+    ) -> list[Attachment]:
+        if not self.fetch_attachments_enabled():
+            return []
+        attachments: list[Attachment] = []
+        seen: set[str] = set()
+        headers = {"User-Agent": user_agent}
+        for url, name, kind in rows:
+            expanded = api.expand_image(url)
+            if not expanded or expanded in seen:
+                continue
+            seen.add(expanded)
+            attachments.append(Attachment(expanded, name=name, kind=kind, headers=headers))
+        return attachments
+
+
+def _season_cursor(seasons: list[api.Season], selected: str) -> int:
+    wanted = str(selected or "").strip().casefold()
+    if not wanted:
+        return 0
+    for index, entry in enumerate(seasons):
+        slice_id = str(entry.id or "").casefold()
+        if not slice_id:
+            continue
+        if slice_id == wanted or slice_id.endswith(wanted) or wanted.endswith(slice_id):
+            return index
+    return 0
+
+
+def _cover_url(*urls: str) -> str | None:
+    for url in urls:
+        expanded = api.expand_image(url)
+        if expanded:
+            return expanded
+    return None
+
+
+def _looks_like_radio(pid: str) -> bool:
+    return "radio" in str(pid or "").lower()
+
+
+def _sounds_detail(item: sounds.SoundsItem) -> str:
+    bits = [item.release_date, _duration(item.duration), item.synopsis]
+    return "  ·  ".join(bit for bit in bits if bit)
+
+
+def _duration(seconds: float | None) -> str:
+    if not seconds:
+        return ""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, _ = divmod(rest, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
+
 
 registry.register(BBCiPlayer)
 
-__all__ = ["BBCiPlayer", "api"]
+__all__ = ["BBCiPlayer", "api", "sounds"]

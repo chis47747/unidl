@@ -224,8 +224,9 @@ positioned subtitles, or keep standalone originals if required.
   licensing or downloading.
 
 Focused output scopes do not turn a missing optional track into a package
-download. If a requested scope or custom type has no matching track, UniDL keeps
-the result empty and reports the condition; it never substitutes an unrelated
+download. If one requested media type has no matching track, UniDL reports the
+condition, leaves that type unselected, and keeps any other tracks that did
+match preselected for manual confirmation; it never substitutes an unrelated
 codec, language, or subtitle kind.
 
 ## DRM and licence boundary

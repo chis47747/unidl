@@ -1,8 +1,8 @@
-"""BBC Sounds: the audio half of bbc.py, as its own client.
+"""BBC Sounds catalogue and clear audio playback.
 
-Kept separate from iPlayer deliberately. Sounds is a different catalogue with
-different endpoints, no DRM and no video, and the only thing the two share is a
-hostname.
+Sounds remains a different catalogue from iPlayer television: RMS endpoints,
+no DRM and no video. The registered service is BBC iPlayer; this module is the
+audio client used for `/sounds/` URLs, live radio, and Sounds search hits.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ SELECTOR = "https://open.live.bbc.co.uk/mediaselector/6/select"
 ENDPOINTS = {
     "episode": f"{BASE}/v2/experience/inline/play/{{pid}}",
     "container": f"{BASE}/v2/programmes/playable",
+    "search": f"{BASE}/v2/experience/inline/search",
     "live_catalog": f"{BASE}/v2/experience/inline/listen/sign-in?continue_listening_control=true",
     "live_token": f"{BASE}/v2/sign/token/{{service_id}}",
     "live_media": (f"{SELECTOR}/version/3.0/mediaset/pc/cvid/urn:bbc:pips:pid:{{service_id}}/format/json/cors/1"),
@@ -65,6 +66,27 @@ class SoundsItem:
     duration: float | None = None
     live: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SoundsHit:
+    """One Sounds search row, already mapped to a URL the service can open."""
+
+    kind: str  # episode | container | live
+    id: str
+    title: str
+    synopsis: str = ""
+    network: str = ""
+    category: str = ""
+
+    @property
+    def url(self) -> str:
+        if self.kind == "live":
+            return f"live:{self.id}"
+        if self.kind == "container":
+            path = "series" if self.category == "series" else "brand"
+            return f"https://www.bbc.co.uk/sounds/{path}/{self.id}"
+        return f"https://www.bbc.co.uk/sounds/play/{self.id}"
 
 
 @dataclass
@@ -114,6 +136,21 @@ def parse_input(text: str) -> ParsedInput | None:
         # fails cleanly, at which point the caller can try it as a container
         return ParsedInput("episode", raw)
     return None
+
+
+def is_sounds_target(text: str) -> bool:
+    """True when the input is explicitly a Sounds URL or a ``live:`` station id."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if raw.lower().startswith("live:"):
+        return True
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.hostname or "").lower()
+    if host not in {"bbc.co.uk", "www.bbc.co.uk", "bbc.com", "www.bbc.com"}:
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    return bool(parts and parts[0].lower() == "sounds")
 
 
 class SoundsApi:
@@ -170,6 +207,27 @@ class SoundsApi:
         )
         items = [self._item(item) for item in payload.get("data") or [] if item.get("type") == "playable_item"]
         return items, int(payload.get("total") or len(items))
+
+    def search(self, query: str) -> list[SoundsHit]:
+        payload = self._json(ENDPOINTS["search"], params={"q": query})
+        hits: list[SoundsHit] = []
+        seen: set[tuple[str, str]] = set()
+        for module in payload.get("data") or []:
+            if not isinstance(module, dict):
+                continue
+            module_id = str(module.get("id") or "")
+            for raw in module.get("data") or []:
+                if not isinstance(raw, dict):
+                    continue
+                hit = self._search_hit(raw, module_id)
+                if hit is None:
+                    continue
+                key = (hit.kind, hit.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(hit)
+        return hits
 
     def stations(self) -> list[SoundsItem]:
         payload = self._json(ENDPOINTS["live_catalog"])
@@ -232,11 +290,70 @@ class SoundsApi:
             network=str(network.get("short_title") or ""),
             synopsis=str(synopses.get("short") or synopses.get("medium") or ""),
             release_date=str((raw.get("release") or {}).get("date") or ""),
-            image_url=str(raw.get("image_url") or ""),
+            image_url=_image_url(raw),
             duration=(raw.get("duration") or {}).get("value"),
             live=live,
             raw=raw,
         )
+
+    def _search_hit(self, raw: dict, module_id: str) -> SoundsHit | None:
+        raw_type = str(raw.get("type") or "")
+        if raw_type == "live_search_result_item" or module_id == "live_search":
+            now = raw.get("now") if isinstance(raw.get("now"), dict) else {}
+            service_id = str(now.get("service_id") or "")
+            if not service_id:
+                urn = str(now.get("urn") or raw.get("urn") or "")
+                service_id = urn.rsplit(":", 1)[-1] if ":" in urn else ""
+            service_id = service_id.removeprefix("search_result_")
+            if not service_id:
+                return None
+            station = str(now.get("station_name") or service_id)
+            return SoundsHit(
+                "live",
+                service_id,
+                station,
+                str(now.get("title") or now.get("short_synopsis") or ""),
+                station,
+                "live",
+            )
+        if raw_type == "container_item" or module_id == "container_search":
+            pid = str(raw.get("id") or "")
+            if not pid:
+                return None
+            urn = str(raw.get("urn") or "")
+            category = "series" if ":series:" in urn else "brand"
+            titles = raw.get("titles") or {}
+            synopses = raw.get("synopses") or {}
+            network = raw.get("network") or {}
+            return SoundsHit(
+                "container",
+                pid,
+                str(titles.get("primary") or pid),
+                str(synopses.get("short") or synopses.get("medium") or ""),
+                str(network.get("short_title") or ""),
+                category,
+            )
+        if raw_type == "playable_item" or module_id == "playable_search":
+            urn = str(raw.get("urn") or "")
+            pid = urn.rsplit(":", 1)[-1] if ":episode:" in urn else str(raw.get("id") or "")
+            pid = pid or str(raw.get("id") or "")
+            if not pid:
+                return None
+            titles = raw.get("titles") or {}
+            programme = str(titles.get("primary") or pid)
+            episode = str(titles.get("entity_title") or titles.get("secondary") or "")
+            label = f"{programme}  ·  {episode}" if episode and episode != programme else programme
+            synopses = raw.get("synopses") or {}
+            network = raw.get("network") or {}
+            return SoundsHit(
+                "episode",
+                pid,
+                label,
+                str(synopses.get("short") or synopses.get("medium") or ""),
+                str(network.get("short_title") or ""),
+                "episode",
+            )
+        return None
 
     @staticmethod
     def _episode_title(titles: dict, programme: str, raw: dict) -> str:
@@ -301,6 +418,21 @@ class SoundsApi:
         return None
 
 
+def _image_url(raw: dict) -> str:
+    url = str(raw.get("image_url") or "").strip()
+    if url:
+        return url
+    image = raw.get("image")
+    if isinstance(image, str) and image.strip():
+        return image.strip()
+    if isinstance(image, dict):
+        return str(image.get("url") or image.get("templatedUrl") or image.get("src") or "").strip()
+    images = raw.get("images")
+    if isinstance(images, dict):
+        return str(images.get("url") or images.get("standard") or "").strip()
+    return ""
+
+
 __all__ = [
     "ENDPOINTS",
     "PAGE_SIZE",
@@ -308,6 +440,8 @@ __all__ = [
     "ParsedInput",
     "SoundsApi",
     "SoundsError",
+    "SoundsHit",
     "SoundsItem",
+    "is_sounds_target",
     "parse_input",
 ]

@@ -140,7 +140,7 @@
   "update.note.media_types": "Les URL de manifestes servies par script et les espaces sont traités sans reconstruire les paramètres signés.",
   "update.note.documentation": "Les sections initiales HLS conservent leur portée AES ; prise en charge du SAMPLE-AES TS/AAC classique.",
   "update.note.clipboard": "Sortie hybride Dolby Vision + HDR10 configurable globalement ou par service ; sources compatibles et outils externes requis.",
-  "update.note.update_checker": "UniDL v2.3.5 ajoute les interfaces italienne, japonaise, coréenne et russe, et améliore la correspondance des KID PlayReady dans le coffre local.",
+  "update.note.update_checker": "UniDL v2.3.6 étend la lecture BBC, améliore la sélection automatique des pistes et valide les métadonnées de couleur vidéo manquantes.",
   "update.close_hint": "esc / x ferme cette fenêtre",
   "home.chip.config": "configuration",
   "home.chip.config_create": "créer",
