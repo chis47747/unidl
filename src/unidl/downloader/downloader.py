@@ -30,7 +30,7 @@ from .embedding import (
 from .http_client import HttpClientError, get_global_http_client, http2_download_to_file, httpx_http2_available
 from .loader import DEFAULT_USER_AGENT
 from .models import SegmentInfo, StreamInfo
-from .postprocess import split_fragmented_mp4_init_media
+from .postprocess import copy_gzip_mp4_init, split_fragmented_mp4_init_media
 from .sabr_ump import (
     SabrUmpError,
     download_sabr_ump_dvr_stream,
@@ -55,6 +55,7 @@ KNOWN_OUTPUT_SUFFIXES = {
     ".ac3",
     ".bbts",
     ".eac3",
+    ".flac",
     ".m4a",
     ".m4s",
     ".m4v",
@@ -184,7 +185,7 @@ _HLS_KEY_LOCK = threading.Lock()
 _ALLOW_INSECURE_LOCALHOST_HLS_KEYS = False
 _DVR_SEQUENCE_WINDOW_CACHE: dict[tuple[str, str], tuple[int, int]] = {}
 _DVR_SEQUENCE_WINDOW_LOCK = threading.Lock()
-_HLS_SEGMENT_CIPHER_METHODS = {"AES_128", "AES_128_ECB", "CHACHA20"}
+_HLS_SEGMENT_CIPHER_METHODS = {"AES_128", "AES_128_ECB", "BF_CBC_STRIPE", "CHACHA20"}
 _HLS_SAMPLE_ENCRYPTION_METHODS = {"CENC", "CBCS", "SAMPLE_AES", "SAMPLE_AES_CENC", "SAMPLE_AES_CTR", "BBTS"}
 # Tencent TV HLS-ENC restarts the original 8-byte-nonce ChaCha20 state at each
 # 1024-byte transport chunk. It is not one continuous stream over the whole
@@ -481,6 +482,7 @@ def download_stream(
         return _download_part(*args, **kwargs)
 
     urls = _segment_urls(stream)
+    _validate_striped_blowfish_input(stream, hls_crypto)
     urls = _apply_json_live_base_fallback(stream, urls, headers=headers, request_timeout=request_timeout)
     urls = _split_single_large_remote_segment(stream, urls, headers=headers, hls_crypto=hls_crypto, request_timeout=request_timeout)
     start = time.monotonic()
@@ -589,7 +591,7 @@ def download_stream(
                 _emit_progress(progress, stream, completed, len(urls), downloaded_bytes, total_bytes, start)
             if assemble_output:
                 with output_path.open("wb") as output:
-                    _copy_stream_part_to_output(part_paths[0], output)
+                    _copy_stream_part_to_output(part_paths[0], output, segment=urls[0])
                 final_size = output_path.stat().st_size
             else:
                 final_size = _downloaded_part_paths_size(part_paths)
@@ -724,8 +726,8 @@ def download_stream(
             urls = _segment_urls(stream)
         if assemble_output:
             with output_path.open("wb") as output:
-                for part_path, _segment in zip(part_paths, urls, strict=False):
-                    _copy_stream_part_to_output(part_path, output)
+                for part_path, segment in zip(part_paths, urls, strict=False):
+                    _copy_stream_part_to_output(part_path, output, segment=segment)
             sections = _write_section_outputs(output_path, part_paths, urls)
             final_size = output_path.stat().st_size
         else:
@@ -745,10 +747,28 @@ def _segment_urls(stream: StreamInfo) -> list[SegmentInfo]:
     return [SegmentInfo(url=stream.url, duration=stream.duration, index=0)]
 
 
+def _validate_striped_blowfish_input(stream: StreamInfo, hls_crypto: HlsCrypto | None) -> None:
+    if hls_crypto and _hls_method(hls_crypto.method) == "NONE":
+        return
+    segments = _segment_urls(stream)
+    methods = {_hls_method(stream.encryption_scheme)}
+    methods.update(_hls_method(segment.encryption_scheme) for segment in segments)
+    if hls_crypto:
+        methods.add(_hls_method(hls_crypto.method))
+    if "BF_CBC_STRIPE" not in methods:
+        return
+    if stream.is_live or len(segments) != 1 or segments[0].byte_range is not None:
+        raise DownloadError("BF_CBC_STRIPE requires one complete file; live, multipart and byte-range inputs are not supported.", url=stream.url)
+
+
 def _copy_stream_part_to_output(
     path: Path,
     output,
+    *,
+    segment: SegmentInfo | None = None,
 ) -> None:
+    if segment is not None and segment.index == -1 and copy_gzip_mp4_init(path, output):
+        return
     _copy_file_to_output(path, output)
 
 
@@ -1725,11 +1745,12 @@ def _is_live_remote_media(stream: StreamInfo) -> bool:
 
 
 def _stream_contains_hls_segment_cipher(stream: StreamInfo) -> bool:
-    if stream.manifest_type != "hls":
-        return False
     candidates = [stream.encryption_scheme]
     candidates.extend(segment.encryption_scheme for segment in _segment_urls(stream))
-    return any(_hls_method(value) in _HLS_SEGMENT_CIPHER_METHODS for value in candidates)
+    methods = {_hls_method(value) for value in candidates}
+    if "BF_CBC_STRIPE" in methods:
+        return True
+    return stream.manifest_type == "hls" and bool(methods & _HLS_SEGMENT_CIPHER_METHODS)
 
 
 def _write_section_outputs(output_path: Path, part_paths: list[Path], segments: list[SegmentInfo]) -> list[Path]:
@@ -1750,8 +1771,8 @@ def _write_section_outputs(output_path: Path, part_paths: list[Path], segments: 
         # paths (and can surface as Errno 2 when the final file is opened).
         section_path = section_dir / f"section_{section_index:03d}{suffix}"
         with section_path.open("wb") as output:
-            for part_path in part_paths[start:end]:
-                _copy_file_to_output(part_path, output)
+            for part_path, segment in zip(part_paths[start:end], segments[start:end], strict=True):
+                _copy_stream_part_to_output(part_path, output, segment=segment)
         paths.append(section_path)
     return paths
 
@@ -3557,6 +3578,8 @@ def _apply_hls_crypto(
         raise DownloadError(f"Unsupported custom HLS method: {hls_crypto.method if hls_crypto else segment.encryption_scheme}", url=segment.url)
     if not segment.encrypted and not forced_custom:
         return data
+    if method == "BF_CBC_STRIPE" and segment.byte_range is not None:
+        raise DownloadError("BF_CBC_STRIPE requires a complete file; byte-range inputs are not supported.", url=segment.url)
     # A non-HTTP KEY URI can be a service ticket rather than key bytes. Preserve
     # the live service decryptor instead of sending such a URI to the generic
     # key loader. Ordinary HTTP/data/file AES-128 remains on the normal path.
@@ -3581,8 +3604,17 @@ def _apply_hls_crypto(
 
     key = hls_crypto.key if hls_crypto and hls_crypto.key else _load_hls_key(segment, headers, retries, request_timeout)
     if not key:
+        if method == "BF_CBC_STRIPE":
+            raise DownloadError("BF_CBC_STRIPE needs --custom-hls-key or a declared key URI.", url=segment.url)
         raise DownloadError("AES-128 HLS key not found in playlist; use --custom-hls-key for this stream.", url=segment.url)
     iv = hls_crypto.iv if hls_crypto and hls_crypto.iv else segment.key_iv
+    if method == "BF_CBC_STRIPE":
+        from .blowfish import decrypt_stripes
+
+        try:
+            return decrypt_stripes(data, key, iv)
+        except ValueError as exc:
+            raise DownloadError(str(exc), url=segment.url) from exc
     if method == "AES_128" and iv is None:
         sequence = segment.index if segment.index is not None and segment.index >= 0 else 0
         iv = int(sequence).to_bytes(16, "big")
@@ -3872,8 +3904,8 @@ def _download_with_aria2c(
     if gate is not None:
         gate()
     with output_path.open("wb") as output:
-        for part in part_paths:
-            _copy_file_to_output(part, output)
+        for part, segment in zip(part_paths, segments, strict=True):
+            _copy_stream_part_to_output(part, output, segment=segment)
 
 
 def _output_path(stream: StreamInfo, output_dir: str | Path, filename: str | None) -> Path:
@@ -3899,7 +3931,7 @@ def _default_extension(stream: StreamInfo) -> str:
     extension = (stream.extension or "").lower()
     if extension == "bbts":
         return "ts"
-    if extension in {"ts", "mp3", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "webm"}:
+    if extension in {"ts", "mp3", "flac", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "webm"}:
         return extension
     if stream.media_type == "subtitle":
         codec = (stream.codecs or "").lower()

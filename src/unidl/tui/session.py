@@ -2021,13 +2021,14 @@ class SessionController:
         self.post_status("")
         self._on_ui(self._after_job)
 
-        if self.session_failed:
-            self.post_log("Session ended with errors. ^b to go back.", "warning")
-        elif self.root_back_requested:
+        if self.root_back_requested:
             # Back on screen 2 is the bottom of the service stack.  Preserve the
-            # traditional one-press exit here; only result/download completion is
-            # kept mounted for one-level navigation.
+            # one-press exit even if an earlier job failed. Failure history is
+            # retained in the queue/log, but must not turn an explicit root Back
+            # into an empty startup screen requiring another Back.
             self._on_ui(self.leave_service)
+        elif self.session_failed:
+            self.post_log("Session ended with errors. ^b to go back.", "warning")
         # Keep the screens that led to a successful result mounted.  Navigation is
         # a one-level stack: the next Back reveals the immediate parent (the flow
         # picker or service menu), not the platform list.  The old eager

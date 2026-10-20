@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.4.6] - 2026-10-20
+
+### Striped audio and filenames
+
+- Added complete-file BF_CBC_STRIPE decoding and routed JSON audio through transport decoding instead of MP4 sample decryption.
+- Preserved FLAC extensions in output filenames and naming templates.
+
+### Compressed MP4 initialization
+
+- Expanded validated gzip-compressed standalone MP4 initialization headers during assembly while preserving media segments and original download parts.
+- Normalized older completed audio checkpoints for mux retries without downloading them again, with bounded expansion and temporary-file cleanup.
+
+### Back navigation
+
+- Restored one-press Back from the service home after earlier job failures while retaining their outcomes and logs.
+
 ## [2.4.5] - 2026-10-19
 
 ### KID extraction

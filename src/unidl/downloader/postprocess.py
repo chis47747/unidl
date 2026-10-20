@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1091,11 +1092,20 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
     # External service subtitles bypass the downloaded-track conversion stage.
     # FFmpeg/mkvmerge cannot read standalone TTML/EBU-TT XML as mux inputs.
     xml_subtitles = {".xml", ".ttml", ".dfxp"}
+    # Older completed-track checkpoints may contain a compressed MP4 init
+    # followed by ordinary media bytes. Repair only a verified init member,
+    # never ask a muxer to skip the bytes and guess the elementary stream.
+    compressed_inits = {
+        index: prefix
+        for index, item in enumerate(inputs, start=1)
+        if item.path.suffix.lower() in MEDIA_SUFFIXES and item.path.is_file()
+        if (prefix := _gzip_mp4_init_prefix(item.path)) is not None
+    }
     if not any(
         (item.trim_start_ms and item.trim_start_ms > 0)
         or item.path.suffix.lower() in xml_subtitles
         for item in inputs
-    ):
+    ) and not compressed_inits:
         return inputs, None
     # Avoid duplicating the release name in Windows temporary paths.
     temp_root = safe_temp_root(output.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
@@ -1104,6 +1114,11 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
     prepared: list[MuxInput] = []
     try:
         for index, item in enumerate(inputs, start=1):
+            if index in compressed_inits:
+                normalized = temp_dir / f"{index:02d}.init.mp4"
+                with normalized.open("wb") as target:
+                    _copy_gzip_mp4_init(item.path, target, compressed_inits[index])
+                item = replace(item, path=normalized)
             if item.path.suffix.lower() in xml_subtitles:
                 subtitle_format = "ass" if output.suffix.lower() in {".mkv", ".mka", ".mks"} else "srt"
                 converted = temp_dir / f"{index:02d}.{subtitle_format}"
@@ -1127,6 +1142,62 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
     return prepared, temp_dir
+
+
+def copy_gzip_mp4_init(input_path: Path, output) -> bool:
+    """Copy a verified gzip MP4 init followed by unchanged media, if present.
+
+    Some origins gzip the init resource independently, even without a matching
+    HTTP Content-Encoding. Keep wire parts intact for byte-count/resume checks;
+    decompress only during assembly. This also handles an old joined checkpoint.
+    """
+    prefix = _gzip_mp4_init_prefix(input_path)
+    if prefix is None:
+        return False
+    _copy_gzip_mp4_init(input_path, output, prefix)
+    return True
+
+
+def _gzip_mp4_init_prefix(path: Path) -> tuple[bytes, int] | None:
+    # Bound both the network-sized prefix and decoded header. Do not read a
+    # multi-gigabyte track into memory or expand an unbounded gzip member.
+    max_wire = 1024 * 1024
+    max_decoded = 16 * 1024 * 1024
+    with path.open("rb") as source:
+        if source.read(3) != b"\x1f\x8b\x08":
+            return None
+        source.seek(0)
+        decoder = zlib.decompressobj(31)
+        decoded = bytearray()
+        read = 0
+        try:
+            while not decoder.eof:
+                chunk = source.read(min(65536, max_wire - read))
+                if not chunk:
+                    raise RuntimeError("Truncated or oversized gzip MP4 initialization data")
+                read += len(chunk)
+                decoded.extend(decoder.decompress(chunk, max_decoded - len(decoded) + 1))
+                if len(decoded) > max_decoded:
+                    raise RuntimeError("Oversized gzip MP4 initialization data")
+        except zlib.error as exc:
+            raise RuntimeError("Invalid gzip MP4 initialization data") from exc
+    boxes = list(_mp4_boxes(decoded))
+    types = {box_type for _position, _size, box_type, _header in boxes}
+    if (
+        not boxes or boxes[0][2] != b"ftyp" or b"moov" not in types
+        or types & {b"mdat", b"moof"}
+        or sum(size for _position, size, _type, _header in boxes) != len(decoded)
+    ):
+        return None
+    return bytes(decoded), read - len(decoder.unused_data)
+
+
+def _copy_gzip_mp4_init(path: Path, output, prefix: tuple[bytes, int]) -> None:
+    decoded, compressed_size = prefix
+    output.write(decoded)
+    with path.open("rb") as source:
+        source.seek(compressed_size)
+        shutil.copyfileobj(source, output, length=1024 * 1024)
 
 
 def _trim_mux_input(input_path: Path, output_path: Path, trim_start_ms: int) -> None:

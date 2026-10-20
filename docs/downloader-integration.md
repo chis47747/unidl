@@ -91,6 +91,39 @@ The compatibility path that associates trailing CMAF MAPs with later
 sample-encryption metadata (SAMPLE-AES/CBCS/CENC) is separate from whole-file
 AES decryption and remains supported.
 
+## Whole-file striped Blowfish audio
+
+`BF_CBC_STRIPE` is a transport cipher, not MP4 sample encryption. JSON audio
+tracks may declare it with `encrypted: true` and
+`encryption_scheme: "BF_CBC_STRIPE"`; the native command accepts
+`--custom-hls-method BF_CBC_STRIPE --custom-hls-key <hex-key>` too. The key must
+contain 16 bytes. An optional `--custom-hls-iv` contains 8 bytes; its default is
+`0001020304050607`. The algorithm and raw key/IV use the existing saved-command
+and portable-export fields; no CDM or licence exchange is added.
+
+Only one complete, non-live media file is supported. Automatic range splitting
+is disabled; explicit byte ranges and multipart inputs are rejected rather than
+resetting the stripe position and producing corrupt audio. Short final blocks
+are retained without padding removal. `--no-decrypt` keeps the original bytes.
+This path buffers the file before decoding; it does not add streaming decryption
+or partial-file resume. Existing FLAC filenames and `<Ext>` naming patterns keep
+their `.flac` suffix, including when no audio conversion was requested.
+
+## Separately compressed MP4 initialization
+
+An origin can gzip its MP4 initialization resource independently of the media
+segments. During assembly, UniDL expands only a validated gzip member containing
+complete `ftyp`/`moov` init boxes; subsequent media bytes are copied unchanged.
+The original wire parts remain intact for resume and size checks. The same
+normalization applies to initialization-section outputs and Python/aria2 assembly.
+
+Previously completed tracks with this compressed prefix are normalized into
+temporary mux inputs, so retrying a failed mux does not require downloading the
+audio again. Their originals, language/default flags and other metadata are
+preserved; temporary files are removed on success or failure. Expansion is
+bounded, truncated/corrupt gzip is rejected, and this does not relax mux errors
+or change the normal embedded-versus-separate audio selection policy.
+
 ## Service-staged XML subtitles
 
 External subtitle files in `Playback.mux_imports` bypass downloaded-track

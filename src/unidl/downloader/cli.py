@@ -48,6 +48,7 @@ from .downloader import (
     _default_tmp_root,
     _resume_url_key,
     _stream_resume_key,
+    _validate_striped_blowfish_input,
     download_stream,
     fetch_segment_probe_bytes,
     prepare_dvr_sequence_windows,
@@ -422,7 +423,7 @@ def _build_parser(
     g_mux.add_argument("--default-subtitle", type=normalize_default_subtitle, default="auto", help="Default muxed subtitle: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
     g_net.add_argument("--custom-range", help="Only download selected media segment range, e.g. 1-100,120-160.")
-    g_crypt.add_argument("--custom-hls-method", choices=["AES_128", "AES_128_ECB", "BBTS", "CENC", "CHACHA20", "NONE", "SAMPLE_AES", "SAMPLE_AES_CTR", "UNKNOWN"])
+    g_crypt.add_argument("--custom-hls-method", choices=["AES_128", "AES_128_ECB", "BBTS", "BF_CBC_STRIPE", "CENC", "CHACHA20", "NONE", "SAMPLE_AES", "SAMPLE_AES_CTR", "UNKNOWN"])
     g_crypt.add_argument("--custom-hls-key", help="Custom HLS key as FILE, HEX, or Base64.")
     g_crypt.add_argument("--custom-hls-iv", help="Custom HLS IV as FILE, HEX, or Base64.")
     g_crypt.add_argument("--allow-hls-multi-ext-map", action="store_true", help="Allow multiple EXT-X-MAP sections. Enabled by default in UniDL.")
@@ -910,6 +911,8 @@ def _download_impl(args: argparse.Namespace) -> int:
     mux_imports = [parse_mux_import(value) for value in (args.mux_import or [])]
     hls_crypto = HlsCrypto(method="NONE") if args.no_decrypt else _custom_hls_crypto(args)
     _apply_custom_hls_crypto_to_streams(hydrated, hls_crypto, explicit_method=bool(getattr(args, "custom_hls_method", None)))
+    for stream in hydrated:
+        _validate_striped_blowfish_input(stream, _hls_crypto_for_stream(stream, hls_crypto))
     _apply_sabr_request_options(hydrated, args)
     if not args.no_probe:
         for stream in hydrated:
@@ -2849,7 +2852,7 @@ def _stream_prefers_matroska_live_pipe(stream) -> bool:
     return "DV" in video_range
 
 
-_HLS_SEGMENT_CRYPTO_SCHEMES = {"AES_128", "AES_128_ECB", "CHACHA20", "SIGMA"}
+_HLS_SEGMENT_CRYPTO_SCHEMES = {"AES_128", "AES_128_ECB", "BF_CBC_STRIPE", "CHACHA20", "SIGMA"}
 _AUDIO_CODEC_LABELS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "Opus"}
 _FRAGMENTED_MP4_EXTS = {"m4s", "mp4", "m4a", "m4v", "cmfv", "cmfa", "mp4a", "mp4v"}
 _JSON_FMP4_PART_DECRYPT_MIN_SEGMENTS = 512
@@ -2861,10 +2864,13 @@ def _normalized_scheme(value: str | None) -> str:
 
 
 def _stream_hls_segment_crypto_scheme(stream) -> str | None:
-    if getattr(stream, "manifest_type", None) != "hls":
-        return None
     candidates = [getattr(stream, "encryption_scheme", None)]
     candidates.extend(getattr(segment, "encryption_scheme", None) for segment in getattr(stream, "segments", []) or [])
+    # Whole-file transport ciphers may also be declared by JSON audio sources.
+    if any(_normalized_scheme(value) == "BF_CBC_STRIPE" for value in candidates):
+        return "BF_CBC_STRIPE"
+    if getattr(stream, "manifest_type", None) != "hls":
+        return None
     for value in candidates:
         scheme = _normalized_scheme(value)
         if scheme in _HLS_SEGMENT_CRYPTO_SCHEMES:
@@ -8727,7 +8733,7 @@ def _default_extension_for_pattern(stream) -> str:
     extension = (stream.extension or "").lower()
     if extension == "bbts":
         return "ts"
-    if extension in {"ts", "mp3", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "aac", "ac3", "eac3", "webm"}:
+    if extension in {"ts", "mp3", "flac", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "aac", "ac3", "eac3", "webm"}:
         return extension
     if stream.media_type in {"subtitle", "subtitles", "text"}:
         codec = (stream.codecs or "").lower()
@@ -8747,7 +8753,7 @@ def _safe_output_name(value: str) -> str:
 
 def _save_name_base(save_name: str) -> str:
     path = Path(save_name)
-    known_suffixes = {".aac", ".ac3", ".ass", ".bbts", ".eac3", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".srt", ".ssa", ".ts", ".ttml", ".vtt", ".webm"}
+    known_suffixes = {".aac", ".ac3", ".ass", ".bbts", ".eac3", ".flac", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".srt", ".ssa", ".ts", ".ttml", ".vtt", ".webm"}
     return path.stem if path.suffix.lower() in known_suffixes else path.name
 
 
@@ -9600,6 +9606,9 @@ def _hydrate_selected_stream_key_ids(
     if _is_sabr_stream(stream):
         if _should_probe_selected_sabr_stream_key_ids(stream):
             _hydrate_selected_sabr_stream_key_ids(stream, headers=headers, request_timeout=request_timeout, keys=keys)
+        return
+    if _stream_hls_segment_crypto_scheme(stream) == "BF_CBC_STRIPE":
+        # Raw file transport keys have no MP4 init box or sample-encryption KID.
         return
     if _stream_key_ids(stream) and not force:
         return

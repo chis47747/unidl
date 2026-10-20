@@ -42,6 +42,13 @@ Keep available cursor positions, selected episodes, search text and loaded
 results when restoring a page. Back must not re-run an API search or download,
 automatically retry a failed title, or discard a valid completed output.
 
+An earlier manifest, license or download failure does not add an error-summary
+page to this return path. After returning to the service home, one Back leaves
+for Home even when the session's queue still contains failed jobs. Retain their
+outcomes and logs; do not clear failure history just to allow navigation. A flow
+that actually stops with an error, without an explicit service-home Back, still
+keeps its error visible until the user navigates away.
+
 ## Flow ownership and exception forwarding
 
 Delegate child flows with `yield from`. It forwards ordinary answers **and**
