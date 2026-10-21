@@ -109,6 +109,24 @@ This path buffers the file before decoding; it does not add streaming decryption
 or partial-file resume. Existing FLAC filenames and `<Ext>` naming patterns keep
 their `.flac` suffix, including when no audio conversion was requested.
 
+## MP4 encryption evidence and clear audio
+
+Encryption metadata is read at actual ISO-BMFF box boundaries, including nested
+sample entries and protection containers. Audio/video bytes inside `mdat`, codec
+configuration records, and unknown leaf boxes are not searched for box names.
+Coincidental `tenc`, `senc`, `schm` or `sinf` bytes in a media payload must never
+invent DRM metadata or be rewritten as if they were real encryption boxes.
+
+After download, an audio track labeled encrypted can be corrected to clear only
+when its complete fragmented MP4 proves this: one audio track with valid clear
+sample entries, no protection scheme/defaults, and no fragment encryption data.
+The correction clears stale track/segment KIDs, is logged, and skips unnecessary
+decryption without copying or changing the audio. It uses the downloaded file;
+no extra network probe is made. Missing KIDs, null placeholder KIDs, incomplete
+initialization data and unsupported layouts are not evidence of clear audio.
+`--no-decrypt`, transport ciphers and genuinely encrypted media retain their
+existing behavior. This does not change service licensing or key-vault policy.
+
 ## Separately compressed MP4 initialization
 
 An origin can gzip its MP4 initialization resource independently of the media

@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.4.7] - 2026-10-22
+
+### MP4 encryption detection
+
+- Read encryption metadata at actual ISO-BMFF box boundaries and container hierarchies instead of matching box names inside media, codec configuration or unknown leaf payloads.
+- Corrected stale encrypted-audio metadata only when a complete fragmented MP4 explicitly proved the audio was clear, removing stale track and segment KIDs and skipping unnecessary decryption without extra network requests or media copies.
+- Preserved genuine encryption checks and treated missing KIDs, null placeholders and incomplete or unsupported metadata as insufficient evidence of clear audio.
+
 ## [2.4.6] - 2026-10-20
 
 ### Striped audio and filenames

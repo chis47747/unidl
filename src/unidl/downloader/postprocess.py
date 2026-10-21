@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .cenc_fragment import CencInitMetadata, CencProgressCallback, decrypt_cenc_fragment, load_cenc_init_metadata
 from .embedding import DownloadRuntime, current_download_runtime, managed_popen, managed_run
+from .mp4_metadata import box_ranges
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, looks_like_h266, safe_temp_root
 
@@ -2224,23 +2225,7 @@ def _tenc_default_kid_positions(data: bytes | bytearray) -> list[int]:
 
 
 def _scan_box_ranges(data: bytes | bytearray, box_type: bytes) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while True:
-        type_at = data.find(box_type, start)
-        if type_at < 4:
-            return ranges
-        box_start = type_at - 4
-        size = int.from_bytes(data[box_start:type_at], "big")
-        header = 8
-        if size == 1 and box_start + 16 <= len(data):
-            size = int.from_bytes(data[box_start + 8 : box_start + 16], "big")
-            header = 16
-        if size >= header and box_start + size <= len(data):
-            ranges.append((box_start, size))
-            start = box_start + size
-        else:
-            start = type_at + 4
+    return box_ranges(data, box_type)
 
 
 def _scan_boxes(data: bytes, box_type: bytes) -> list[bytes]:

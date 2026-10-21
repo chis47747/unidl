@@ -13,6 +13,8 @@ from operator import itemgetter
 from pathlib import Path
 from time import monotonic
 
+from .mp4_metadata import box_ranges, walk_boxes
+
 CTR_SCHEMES = {b"cenc", b"cens"}
 CBC_SCHEMES = {b"cbcs", b"cbc1"}
 PIFF_SAMPLE_ENCRYPTION_UUID = bytes.fromhex("a2394f525a9b4f14a2446c427c648df4")
@@ -334,6 +336,41 @@ def load_cenc_init_metadata(init_path: str | Path, expected_kids: Iterable[str |
     return parse_cenc_init_metadata(Path(init_path).read_bytes(), expected_kids)
 
 
+def mp4_audio_is_explicitly_clear(input_path: str | Path) -> bool:
+    """Confirm a complete, single-audio-track fMP4 before correcting a DRM hint.
+
+    An absent KID alone proves nothing. Require a complete moov, ordinary clear
+    sample entries, audio handler and no sample/track encryption metadata.
+    Mapping the file avoids another resident copy or any network request.
+    """
+    try:
+        with Path(input_path).open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            top = list(_mp4_boxes(data))
+            if not top or top[-1][0] + top[-1][1] != len(data):
+                return False
+            moovs = [box for box in top if box[2] == b"moov"]
+            if len(moovs) != 1:
+                return False
+            position, size, _kind, header = moovs[0]
+            # Unknown UUID extensions inside the init may carry DRM metadata.
+            if any(kind == b"uuid" for _pos, _size, kind, _header in walk_boxes(data, position, position + size)):
+                return False
+            tracks = [box for box in _mp4_boxes(data, position + header, position + size) if box[2] == b"trak"]
+            if len(tracks) != 1:
+                return False
+            position, size, _kind, header = tracks[0]
+            handlers = list(_find_boxes(data, position + header, position + size, b"hdlr", {b"mdia"}))
+            if len(handlers) != 1:
+                return False
+            offset, length, _kind, header = handlers[0]
+            if header + 12 > length or data[offset + header + 8:offset + header + 12] != b"soun":
+                return False
+            metadata = parse_cenc_init_metadata(data)
+            return _is_explicitly_clear_fragmented_mp4(data, metadata) and not _has_fragment_cenc_markers(data)
+    except (OSError, ValueError):
+        return False
+
+
 def _decrypt_fragment_data(
     data: bytearray,
     key_map: dict[str, bytes],
@@ -627,16 +664,20 @@ def _trak_sample_entry_encryption_states(data: bytes | bytearray, start: int, en
         cursor = payload + 4
         entry_count = int.from_bytes(data[cursor : cursor + 4], "big")
         cursor += 4
+        if entry_count == 0:
+            return None
         states: list[bool] = []
         for _ in range(entry_count):
             if cursor + 8 > position + size:
-                return tuple(states)
+                return None
             entry_size = int.from_bytes(data[cursor : cursor + 4], "big")
             if entry_size < 8 or cursor + entry_size > position + size:
-                return tuple(states)
+                return None
             entry = bytes(data[cursor : cursor + entry_size])
             states.append(_sample_entry_is_encrypted(entry))
             cursor += entry_size
+        if cursor != position + size:
+            return None
         return tuple(states)
     return None
 
@@ -984,7 +1025,7 @@ def _is_explicitly_clear_fragmented_mp4(
         return False
     if not _has_box_type(data, b"mdat"):
         return False
-    return all(not encrypted for entries in states.values() for encrypted in entries)
+    return all(entries and not any(entries) for entries in states.values())
 
 
 def _has_encryption_group_boxes(data: bytes | bytearray) -> bool:
@@ -1239,23 +1280,7 @@ def _has_box_type(data: bytes | bytearray, box_type: bytes) -> bool:
 
 
 def _scan_box_ranges(data: bytes | bytearray, box_type: bytes) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while True:
-        type_at = data.find(box_type, start)
-        if type_at < 4:
-            return ranges
-        box_start = type_at - 4
-        size = int.from_bytes(data[box_start:type_at], "big")
-        header = 8
-        if size == 1 and box_start + 16 <= len(data):
-            size = int.from_bytes(data[box_start + 8 : box_start + 16], "big")
-            header = 16
-        if size >= header and box_start + size <= len(data):
-            ranges.append((box_start, size))
-            start = box_start + size
-        else:
-            start = type_at + 4
+    return box_ranges(data, box_type)
 
 
 _SBOX = [

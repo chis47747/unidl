@@ -1,8 +1,22 @@
-"""Small, dependency-free probes for fragmented MP4 initialization metadata."""
+"""Dependency-free ISO-BMFF metadata probes and bounded box traversal."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+
+_CONTAINERS = {
+    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"sinf", b"schi",
+    b"moof", b"traf", b"mvex", b"edts", b"dinf", b"udta", b"wave",
+}
+_AUDIO_ENTRIES = {
+    b"enca", b"mp4a", b"ac-3", b"ec-3", b"ac-4", b"Opus", b"fLaC",
+    b"alac", b".mp3", b"mp3 ", b"sowt", b"twos", b"lpcm", b"ulaw",
+    b"alaw", b"ipcm", b"fpcm", b"mlpa", b"dtsc", b"dtsh", b"dtsl", b"dtse",
+}
+_VIDEO_ENTRIES = {
+    b"encv", b"avc1", b"avc2", b"avc3", b"avc4", b"hvc1", b"hev1",
+    b"dvhe", b"dvh1", b"vvc1", b"vvi1", b"av01", b"vp08", b"vp09", b"mp4v",
+}
 
 
 def _boxes(data: bytes | bytearray, start: int = 0, end: int | None = None) -> Iterator[tuple[int, int, bytes, int]]:
@@ -35,6 +49,49 @@ def _children(
     position, size, _box_type, header_size = parent
     start = position + header_size + (8 if full_box else 0)
     return list(_boxes(data, start, position + size))
+
+
+def walk_boxes(
+    data: bytes | bytearray,
+    start: int = 0,
+    end: int | None = None,
+    *,
+    _depth: int = 0,
+) -> Iterator[tuple[int, int, bytes, int]]:
+    """Visit structural boxes, never arbitrary bytes in media/codec payloads.
+
+    Sample entries and full boxes have fixed fields before their children.
+    Unknown boxes are leaves; malformed children cannot escape their parent.
+    """
+    if _depth >= 32:
+        return
+    for position, size, kind, header in _boxes(data, start, end):
+        yield position, size, kind, header
+        payload, stop = position + header, position + size
+        if kind in _CONTAINERS:
+            child = payload
+        elif kind == b"stsd":
+            child = payload + 8  # full-box flags and entry_count
+        elif kind == b"meta":
+            child = payload + 4
+        elif kind in _VIDEO_ENTRIES:
+            child = payload + 78
+        elif kind in _AUDIO_ENTRIES:
+            if payload + 28 > stop:
+                continue
+            version = int.from_bytes(data[payload + 8:payload + 10], "big")
+            if version not in {0, 1, 2}:
+                continue
+            child = payload + {0: 28, 1: 44, 2: 64}[version]
+        else:
+            continue
+        if child < stop:
+            yield from walk_boxes(data, child, stop, _depth=_depth + 1)
+
+
+def box_ranges(data: bytes | bytearray, box_type: bytes) -> list[tuple[int, int]]:
+    """Find real box boundaries, including standalone initialization boxes."""
+    return [(position, size) for position, size, kind, _header in walk_boxes(data) if kind == box_type]
 
 
 def audio_channel_count_from_init(data: bytes | bytearray) -> int | None:

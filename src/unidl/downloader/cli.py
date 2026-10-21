@@ -37,7 +37,7 @@ from .audio import (
     transcode_audio,
 )
 from .bbts import decrypt_bbts_file
-from .cenc_fragment import CencFragmentKeyError, fragment_cenc_key_ids_from_bytes
+from .cenc_fragment import CencFragmentKeyError, fragment_cenc_key_ids_from_bytes, mp4_audio_is_explicitly_clear
 from .chapters import ChapterFileError, load_chapters_file
 from .console import Palette, color_enabled, paint
 from .downloader import (
@@ -2210,6 +2210,10 @@ def _download_selected_stream(
         status.set_path(current_path)
         status.update("Downloaded ✓")
         _log_line(args, f"Downloaded: {current_path}")
+        if _correct_clear_mp4_audio(stream, current_path, hls_crypto, no_decrypt=args.no_decrypt):
+            note = f"Audio encryption metadata corrected: {stream.language or 'und'} is clear; skipping decryption."
+            emit(note)
+            _log_line(args, note)
         if _should_finalize_clear_hls_sections(stream, result, hls_crypto):
             with status.spinning("Downloaded ✓", "Finalizing {spinner}"):
                 current_path = _finalize_clear_hls_sections(stream, result, current_path)
@@ -3034,6 +3038,31 @@ def _stream_needs_external_decryption(stream, hls_crypto: HlsCrypto | None) -> b
         return False
     if _stream_uses_hls_segment_crypto(stream):
         return False
+    return True
+
+
+def _correct_clear_mp4_audio(stream, path: Path, hls_crypto: HlsCrypto | None, *, no_decrypt: bool) -> bool:
+    if no_decrypt or stream.media_type != "audio" or not _stream_needs_external_decryption(stream, hls_crypto):
+        return False
+    if _normalized_scheme(stream.encryption_scheme) not in {"CENC", "CENS", "CBCS", "CBC1", "ENC"}:
+        return False
+    if not mp4_audio_is_explicitly_clear(path):
+        return False
+    stream.encrypted = False
+    stream.encryption_scheme = None
+    stream.extra.pop("key_id", None)
+    stream.extra.pop("key_ids", None)
+    raw = stream.extra.get("raw")
+    if isinstance(raw, dict):
+        raw = dict(raw)
+        for key in ("kid", "key_id", "keyId", "key_ids", "encryptionScheme", "scheme"):
+            raw.pop(key, None)
+        raw.update(encrypted=False, encryption_scheme=None)
+        stream.extra["raw"] = raw
+    for segment in stream.segments:
+        segment.encrypted = False
+        segment.encryption_scheme = None
+        segment.key_id = None
     return True
 
 
