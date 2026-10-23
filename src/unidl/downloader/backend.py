@@ -940,6 +940,7 @@ class NativeDownloaderBackend:
             audio_vivid_decoder=policy.audio_vivid_decoder,
             audio_vivid_decoder_args=policy.audio_vivid_decoder_args,
             no_decrypt=policy.no_decrypt,
+            verify_keys=policy.verify_keys,
             decrypter=policy.decrypter,
             custom_hls_method=policy.hls_method,
             custom_hls_key=policy.hls_key,

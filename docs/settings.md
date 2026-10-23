@@ -4,6 +4,17 @@ Three tiers, kept apart on purpose. Click Settings or press `ctrl+s` anywhere
 to edit them; plain `s` is the shorter form when no text field has focus.
 Changes persist immediately and apply to the next request without a restart.
 
+## Content-key verification
+
+**Settings → Download behavior → Verify content keys before download** is off
+by default. A service can override it under **License & vaults**. It checks only
+final selected encrypted VOD tracks, after key acquisition and before transfer;
+live, export-only and command-only operations are skipped. A clear lead does not
+count as successful verification. Inconclusive samples warn without rejecting
+keys. Failed vault candidates try other enabled sources, then the configured
+service/CDM once. See [Content-key verification](key-verification.md) for limits,
+fallback rules, standalone commands and vault-write safety.
+
 ## Where values are kept
 
 `<paths.home>/settings.json`, one object per scope — `@global` and one per service id.
@@ -70,6 +81,14 @@ valid. It does not renew CDN authorization: if the media URLs themselves expire,
 the export expires with them. Live manifests are never frozen as a static media
 snapshot; even when a service is configured for media export, live playback keeps
 its refreshable original manifest and reports that fallback in the log.
+
+Import recalculates the release suffix from the final selected tracks. Choosing
+1080p SDR and stereo AAC from a 2160p HDR/DDP export therefore writes
+`1080p.DEMO.WEB-DL.AAC2.0` followed by the selected video codec, with no HDR tag
+(where `DEMO` represents the source's release tag).
+New exports retain the exact title portion separately so custom release
+templates can also be rebuilt. Older conventional dot, space and hyphen names
+remain supported without editing the original export.
 
 Native exports use format version 3. New JSON manifests and exports store source
 documents, not expanded downloader state. Raw MPD/HLS/ISM text naturally contains

@@ -232,6 +232,9 @@ class Entry:
     #: Read-only provenance for legacy segment snapshots. Not serialized.
     legacy_source_path: str = ""
     legacy_entry_index: int = 0
+    #: Exact title half before track-derived release fields were appended.
+    #: Optional for compatibility with exports written before this was retained.
+    release_name_base: str = ""
 
     def key_ids(self) -> list[str]:
         """The key ids this entry can open, lower-case hex, no dashes."""
@@ -279,6 +282,7 @@ class Entry:
         return Playback(
             title=title,
             save_name=self.save_name,
+            release_name_base=self.release_name_base,
             manifest_url=self.manifest_url or None,
             alternate_manifest_urls=tuple(self.alternate_manifest_urls),
             merge_manifests=self.merge_manifests,
@@ -330,6 +334,8 @@ class Entry:
         }
         if self.manifest_url:
             document["manifest_url"] = self.manifest_url
+        if self.release_name_base:
+            document["release_name_base"] = self.release_name_base
         if self.alternate_manifest_urls:
             document["alternate_manifest_urls"] = list(self.alternate_manifest_urls)
         if self.merge_manifests:
@@ -414,6 +420,7 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         raise ExportError(f"invalid attachment metadata ({exc})") from exc
     return Entry(
         save_name=_text(document.get("save_name")),
+        release_name_base=_text(document.get("release_name_base")),
         title=_title_from(document.get("title") or {}),
         manifest_url=manifest,
         alternate_manifest_urls=tuple(
@@ -713,6 +720,7 @@ def entry_for(
         manifest_url, alternate_manifest_urls, merge_manifests = "", (), False
     return Entry(
         save_name=playback.save_name,
+        release_name_base=playback.release_name_base,
         title=playback.title,
         manifest_url=manifest_url,
         alternate_manifest_urls=alternate_manifest_urls,

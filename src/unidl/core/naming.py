@@ -587,6 +587,26 @@ def release_suffix(
     return f"{style_fields['release_prefix']}{body}" if body else ""
 
 
+def release_base_name(save_name: str, *, platform: str = "") -> str:
+    """Recover the title half of an older conventional release name.
+
+    New exports retain the exact base separately. Legacy dot/space/hyphen names
+    need their quality and platform removed together with the source suffix.
+    """
+    markers = list(re.finditer(r"[. -]WEB-DL(?=[. -]|$)", save_name, flags=re.IGNORECASE))
+    if not markers:
+        return save_name
+    prefix = save_name[:markers[-1].start()]
+    quality = re.search(r"[. -]\d{3,5}[pi](?:[. -]\w+)?$", prefix, flags=re.IGNORECASE)
+    if quality:
+        return prefix[:quality.start()]
+    if platform:
+        service = re.search(r"[. -]" + re.escape(platform) + r"$", prefix, flags=re.IGNORECASE)
+        if service:
+            return prefix[:service.start()]
+    return prefix
+
+
 def with_release(
     save_name: str,
     title: Title,
@@ -597,23 +617,25 @@ def with_release(
     layout: str = "",
     style: str = DEFAULT_NAME_STYLE,
     refresh: bool = False,
+    base_name: str | None = None,
 ) -> str:
     """``save_name`` with the release half appended, for the kinds that take one.
 
-    Idempotent: a name that already carries the source marker is returned as it
-    is, so a job that is renamed twice - retried, resumed - does not accumulate.
+    Existing release names stay unchanged unless refreshed. An explicit base
+    permits exact regeneration with custom templates, even when the title
+    itself contains release vocabulary.
     """
     if title.kind not in RELEASE_KINDS or not save_name:
         return save_name
     has_release = any(marker in save_name for marker in (f".{SOURCE}", f" {SOURCE}", f"-{SOURCE}"))
-    if has_release and not refresh:
+    if base_name is not None:
+        save_name = base_name
+    elif has_release and not refresh:
         # already a release name. A title that genuinely contains ".WEB-DL" is one
         # too, so skipping is the right answer either way.
         return save_name
-    if has_release and refresh:
-        marker = re.search(r"[. -]WEB-DL(?:[. -]|$)", save_name, flags=re.IGNORECASE)
-        if marker:
-            save_name = save_name[: marker.start()]
+    elif has_release and refresh:
+        save_name = release_base_name(save_name, platform=platform)
     suffix = release_suffix(
         quality=quality_of(streams),
         platform=platform,

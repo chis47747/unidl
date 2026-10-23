@@ -2580,6 +2580,7 @@ class SessionController:
         # Timing is explicit: Before uses the pre-selection inventory, After
         # waits for final encrypted tracks, and a declared Custom service owns
         # its plan (including whether that plan needs the final picker).
+        playback._key_verification_download = mode == "download"
         action = license_action(self.settings, self.service)
         custom_defer = getattr(self.service, "custom_license_after_tracks", None)
         defer_license = action == "after" or (
@@ -2844,6 +2845,22 @@ class SessionController:
                 )
 
         if mode == "download":
+            verify_keys = getattr(self.engine, "verify_selected_keys", None)
+            if callable(verify_keys) and bool(self.settings.get("verify_content_keys", False)) and not playback.is_live:
+                try:
+                    self.post_status(tr("key_verify.checking"))
+                    previous_keys = list(playback.keys)
+                    verify_keys(playback, tracks, self.settings, service=self.service, cancel=self.cancel_event)
+                    if playback.keys != previous_keys:
+                        report_keys()
+                    self._snapshot_job(playback, tracks)
+                except Exception as exc:
+                    if self.cancel_requested:
+                        return CANCELLED, "cancelled"
+                    self.post_error(tr("key_verify.error"), str(exc), tr("key_verify.error_help"))
+                    return FAILED, "key verification failed"
+                finally:
+                    self.post_status("")
             try:
                 sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)
                 if callable(sync_sidecars):
@@ -3291,13 +3308,18 @@ class SessionController:
         if callable(reconcile):
             reconcile(playback, tracks)
         before = playback.save_name
-        if not playback.release_name_base and ".WEB-DL" not in before:
-            playback.release_name_base = before
-        source_name = playback.release_name_base if refresh and playback.release_name_base else before
         release_tag = getattr(self.service, "release_tag", None)
         platform = release_tag() if callable(release_tag) else self.service.tag()
+        # An export's release suffix describes its original selection. Rebuild
+        # it after this picker, using the saved title base when available.
+        refresh = refresh or bool(getattr(self, "import_session", False))
+        if not playback.release_name_base:
+            if refresh:
+                playback.release_name_base = naming.release_base_name(before, platform=platform)
+            elif not any(marker in before for marker in (".WEB-DL", " WEB-DL", "-WEB-DL")):
+                playback.release_name_base = before
         playback.save_name = naming.with_release(
-            source_name,
+            before,
             playback.title,
             streams=tracks.selected,
             platform=platform,
@@ -3305,6 +3327,7 @@ class SessionController:
             layout=str(self.settings.inherited("release_template", "") or ""),
             style=str(self.settings.inherited("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
             refresh=refresh,
+            base_name=playback.release_name_base if refresh and playback.release_name_base else None,
         )
         if playback.save_name == before:
             return

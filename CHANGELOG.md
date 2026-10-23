@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.8] - 2026-10-23
+
+### Content-key verification
+
+- Added optional, default-off content-key verification before downloading final selected encrypted VOD tracks, with global settings, per-service overrides and a standalone --verify-keys option.
+- Used bounded encrypted samples and actual decoding, skipped live and export/command-only operations, and treated unsupported or inconclusive samples as warnings rather than invalid keys.
+- Tried alternative enabled vault candidates after confirmed failures, then used the configured service/CDM once without repeated licensing or changing the playback profile.
+- Deferred verification-mode vault writes and local backfill until successful checks, preserving write policies without deleting records or synchronizing vaults.
+
+### Portable export filenames
+
+- Rebuilt imported release names from final selected quality, codecs, audio channels and dynamic range instead of retaining the export's original track suffix.
+- Preserved the exact title base in new exports for custom naming templates while keeping older conventional names compatible.
+
 ## [2.4.7] - 2026-10-22
 
 ### MP4 encryption detection

@@ -37,7 +37,7 @@ from unidl.downloader.mux_subtitle import (
 from unidl.downloader.selection import SelectionOptions, SelectionResult, select_streams, select_streams_detailed
 from unidl.downloader.utils import is_url, looks_like_h266, source_path
 
-from . import cdmrules, exports, vaults
+from . import cdmrules, exports, key_verification, vaults
 from . import drm as drm_registry
 from .cdm import WIDEVINE, CdmError
 from .chapters import normalize_chapters
@@ -1044,6 +1044,11 @@ class Engine:
                 duration = float(segment.duration or fallback_duration or 0)
                 if duration <= 0:
                     continue
+                origin = tracks.origins.get(id(stream), playback)
+                cached_size = key_verification.sample_size(playback, origin, segment)
+                if cached_size:
+                    measured_samples.append((cached_size, duration))
+                    continue
                 headers = dict(playback.headers)
                 expected_range = None
                 if segment.byte_range:
@@ -1671,6 +1676,9 @@ class Engine:
                 kids.append(kid)
         if not kids:
             return []
+        checking = key_verification.enabled(playback, settings)
+        sources = {}
+        tracking = {"backfill": False, "sources": sources} if checking else {}
         found = self.vaults.get_keys(
             kids,
             service.ID,
@@ -1679,7 +1687,10 @@ class Engine:
             local_names=read_local,
             remote_names=read_remote,
             backfill_local_names=write_local,
+            **tracking,
         )
+        if checking:
+            key_verification.record_sources(playback, found, sources)
         cached = self._merge_key_pairs(
             [f"{kid}:{found[kid]}" for kid in kids if kid in found]
         )
@@ -1786,12 +1797,30 @@ class Engine:
         """
         if not playback.keys:
             return 0
+        pairs = playback.keys
+        if key_verification.enabled(playback, settings):
+            pairs = key_verification.verified_writes(playback)
+            if not pairs:
+                return 0
         _use_local, _use_remote, _read_local, _read_remote, write_local, write_remote = (
             self.vault_targets(settings)
         )
+        if key_verification.enabled(playback, settings):
+            sources = key_verification.state(playback).sources
+            remote_pairs = {
+                pair[0]: pair[1] for value in pairs
+                if (pair := split_pair(value)) and getattr(sources.get(value), "remote", False)
+            }
+            if remote_pairs:
+                self.vaults._backfill(service.ID, remote_pairs, local_names=write_local)
+            # A lookup may copy inward, never outward. Remote write policy is
+            # still only for freshly licensed keys, not a vault-to-vault sync.
+            pairs = [value for value in pairs if sources.get(value) == "cdm"]
+            if not pairs:
+                return 0
         reports = self.vaults.add_pairs_report(
             service.ID,
-            playback.keys,
+            pairs,
             use_local=True,
             use_remote=bool(write_remote),
             local_names=write_local,
@@ -1830,6 +1859,10 @@ class Engine:
         local = [report.added for report in accepted if not report.remote]
         remote = [report.added for report in accepted if report.remote]
         return max(local or remote or [0])
+
+    def verify_selected_keys(self, playback, tracks, settings, *, service=None, cancel=None) -> None:
+        """Check only finalized VOD output; key acquisition never probes media."""
+        key_verification.verify_selected_keys(self, playback, tracks, settings, service=service, cancel=cancel)
 
     def live_key_provider(
         self,
@@ -3689,6 +3722,7 @@ class Engine:
         if default_subtitle_choice is not None:
             self._annotate_subtitle_imports(playback, tracks, default_subtitle_choice)
         policy = DownloadPolicy(
+            verify_keys=bool(settings.get("verify_content_keys", False)),
             workers=int(settings.get("workers", 16) or 16),
             retries=int(settings.get("retries", 5) or 5),
             concurrent_tracks=bool(settings.get("concurrent_tracks", True)),
@@ -3907,6 +3941,7 @@ class Engine:
         if downloader not in {"python", "aria2c", "auto"}:
             downloader = "python"
         options = api.DownloadOptions(
+            verify_keys=bool(settings.get("verify_content_keys", False)),
             input=self.playback_input(playback),
             headers=dict(playback.headers),
             proxy=download_proxy,
@@ -4323,6 +4358,7 @@ class Engine:
         ``stop_recording`` ends only live capture, allowing its normal mux and
         output commit to finish. It never stops VOD or shuts down the runtime.
         """
+        self.verify_selected_keys(playback, tracks, settings, service=service, cancel=cancel)
         command = self.command_for(playback, settings, tracks, service=service)
         debug_recorder = None
         debug_context = None

@@ -413,6 +413,7 @@ def _build_parser(
         help="Decryption engine. External names are accepted for old scripts but all decryption uses the internal engine.",
     )
     g_crypt.add_argument("--no-decrypt", action="store_true", help="Skip decryption even if stream is marked encrypted.")
+    g_crypt.add_argument("--verify-keys", action="store_true", help="Best-effort small-sample key verification for selected encrypted VOD tracks. Live streams are skipped.")
     g_mux.add_argument("--repack", action="store_true", help="Run ffmpeg -c copy after decryption/download.")
     g_mux.add_argument("--mux", "-M", "--mux-after-done", action="store_true", help="Mux selected tracks into one output file.")
     g_mux.add_argument("--no-mux", "--skip-merge", dest="no_mux", action="store_true", help="Do not mux automatically when multiple tracks are selected.")
@@ -565,6 +566,7 @@ def _looks_like_download(argv: list[str]) -> bool:
         "--downloader",
         "--workers",
         "--no-decrypt",
+        "--verify-keys",
         "--decrypter",
         "--decryption-engine",
         "--repack",
@@ -933,6 +935,7 @@ def _download_impl(args: argparse.Namespace) -> int:
                 force=bool(stream.encrypted),
             )
     print()
+    _verify_selected_content_keys(args, hydrated, keys, headers)
     _print_selected_download_summary(hydrated, original_streams=streams, colors=colors)
     _log_line(args, "Selected: " + ", ".join(stream.format_line() for stream in hydrated))
 
@@ -1264,6 +1267,38 @@ def _print_status_line(label: str, value: object, label_color: str, colors: bool
 
 def _emit_status_line(emit: Callable[[str], None], label: str, value: object, label_color: str, colors: bool | None = None) -> None:
     emit(f"{paint(label, label_color, colors)} {value}")
+
+
+def _verify_selected_content_keys(args, selected, keys, headers) -> None:
+    if not getattr(args, "verify_keys", False) or args.no_decrypt or getattr(args, "is_live", False) or any(s.is_live for s in selected):
+        return
+    from ..core.i18n import tr
+    from ..core.vault import playready_kid_alias
+    from .key_probe import KeyProbe, stream_token
+
+    probe = KeyProbe(cancel=_embedding_cancel_callback(args))
+    seen = set()
+    for stream in selected:
+        marker = stream_token(stream, keys, _stream_key_ids(stream))
+        if not stream.encrypted or stream.media_type not in {"video", "audio"} or stream.extra.get("_key_verification_token") == marker:
+            continue
+        for kid in _stream_key_ids(stream):
+            identity = (kid, stream.media_type, stream.codecs, stream.encryption_scheme)
+            if kid == "0" * 32 or identity in seen:
+                continue
+            seen.add(identity)
+            alias = playready_kid_alias(kid)
+            candidate = next((key for key in keys if key.kid in {kid, alias}), None)
+            if candidate is None:
+                print(tr("key_verify.unknown", kid=kid, reason="no matching KID:key candidate"))
+                continue
+            verdict = probe.verify(stream, kid, candidate.key, aliases=(alias,) if alias else (), headers=headers,
+                                   proxy=getattr(args, "proxy", None))
+            if verdict.status == "failed":
+                raise ValueError(tr("key_verify.failed_terminal", kid=kid))
+            print(tr("key_verify.passed", kid=kid) if verdict.status == "passed" else
+                  tr("key_verify.unknown", kid=kid, reason=verdict.reason))
+        stream.extra["_key_verification_token"] = marker
 
 
 def _new_decrypt_event_recorder(args: argparse.Namespace, context: str | None = None) -> tuple[list[str], Callable[[str], None]]:

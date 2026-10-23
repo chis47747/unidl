@@ -180,6 +180,7 @@ class DownloadOptions(ParseOptions):
 
     #: raw passthrough for anything not modelled above
     extra_args: list[str] = field(default_factory=list)
+    verify_keys: bool = False
 
     def argv(self) -> list[str]:
         argv = ["download", self.input, *_header_args(self.headers), *self._drop_args()]
@@ -251,6 +252,8 @@ class DownloadOptions(ParseOptions):
 
         if self.no_decrypt:
             argv.append("--no-decrypt")
+        if self.verify_keys:
+            argv.append("--verify-keys")
         if self.decrypter:
             argv += ["--decrypter", self.decrypter]
         if self.custom_hls_method:

@@ -205,6 +205,7 @@ class DownloadPolicy:
     keep_failed_intermediates: bool = False
     no_color: bool = True
     live: LivePolicy = field(default_factory=LivePolicy)
+    verify_keys: bool = False
 
 
 @dataclass(frozen=True, slots=True)

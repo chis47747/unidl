@@ -545,6 +545,7 @@ class UnidlApp(App):
                 vault_collection=self.vaults,
             ),
         )
+        controller.import_session = True
         self.register_session(controller)
         self.push_screen(controller.start_screen())
         return True

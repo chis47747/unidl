@@ -815,6 +815,7 @@ class Vaults:
         local_names: Iterable[str] | None = None,
         remote_names: Iterable[str] | None = None,
         backfill_local_names: Iterable[str] | None = None,
+        sources: dict[str, Vault] | None = None,
     ) -> dict[str, str]:
         """First answer wins, per KID, local before remote.
 
@@ -850,6 +851,8 @@ class Vaults:
                 if key and not is_null_key(key) and kid not in found
             }
             found.update(fresh)
+            if sources is not None:
+                sources.update({kid: vault for kid in fresh})
             if fresh and vault.remote:
                 from_remote.update(fresh)
             if fresh and len(vaults) > 1:
@@ -857,6 +860,26 @@ class Vaults:
         if backfill and from_remote:
             self._backfill(service, from_remote, local_names=backfill_local_names)
         return found
+
+    def key_candidates(self, kid: str, service: str, *, use_local: bool, use_remote: bool,
+                       local_names=None, remote_names=None, skip_remote: set[str] | None = None):
+        """Yield alternatives without caching or writing any unverified answer."""
+        for vault in self.enabled(use_local=use_local, use_remote=use_remote,
+                                  local_names=local_names, remote_names=remote_names):
+            if vault.remote and vault.name in (skip_remote or set()):
+                continue
+            try:
+                if isinstance(vault, LocalVault):
+                    values = vault.vault.key_candidates(kid, service)
+                else:
+                    value = vault.get_keys([kid], service).get(kid)
+                    values = [value] if value else []
+                for value in values:
+                    key = normalize_hex(value)
+                    if key and not is_null_key(key):
+                        yield key, vault
+            except Exception:  # unavailable sources are not evidence of a bad key
+                self.log(f"vault {vault.name}: unavailable during key verification")
 
     def search_remote(
         self,

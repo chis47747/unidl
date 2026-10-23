@@ -351,6 +351,8 @@ class Playback:
 
     def __post_init__(self) -> None:
         self.save_name = safe_filename(self.save_name, label="Playback.save_name")
+        if self.release_name_base:
+            self.release_name_base = safe_filename(self.release_name_base, label="Playback.release_name_base")
         if not self.manifest_url and not self.inline_manifest and self.json_manifest is None:
             raise ValueError("Playback needs a manifest URL, inline manifest or json_manifest")
         if self.merge_manifests and self.merge_manifest_segments:

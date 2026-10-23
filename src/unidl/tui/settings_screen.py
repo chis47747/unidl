@@ -526,7 +526,7 @@ class SettingsScreen(Screen):
             scope = self.service.settings
             service_note = tr("settings.note.this_service")
             policy_keys = {
-                        "license_action", "license_after_tracks", "dolby_vision_hybrid", "local_vault", "remote_vault",
+                        "license_action", "license_after_tracks", "verify_content_keys", "dolby_vision_hybrid", "local_vault", "remote_vault",
                 "remote_vault_auto_lookup", "remote_vault_auto_store",
                 "vault_read_targets", "vault_write_targets",
             }
@@ -547,6 +547,7 @@ class SettingsScreen(Screen):
                     spec for spec in scope.specs
                     if spec.key in {
                         "license_action",
+                        "verify_content_keys",
                         "dolby_vision_hybrid",
                         "local_vault",
                         "remote_vault",
@@ -779,6 +780,7 @@ class SettingsScreen(Screen):
                         "segment_downloader",
                         "resume_parts",
                         "check_segments_count",
+                        "verify_content_keys",
                         "keep_temp",
                         "keep_failed_intermediates",
                         "delete_temp_after_done",

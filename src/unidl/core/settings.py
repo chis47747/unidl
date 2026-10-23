@@ -625,6 +625,11 @@ def service_license_settings(config: Any = None, *, custom_license: bool = False
             ),
         ),
         license_action_setting(custom=custom_license),
+        Setting(
+            "verify_content_keys", "Verify content keys before download", "bool", default=False,
+            inherit_global=True,
+            help="Sample only selected encrypted VOD tracks before downloading. Try other enabled vaults, then the configured CDM once. Unsupported samples are inconclusive; live, export and command-only modes are skipped.",
+        ),
         Setting("license_after_tracks", "License after final track selection", "bool", default=False, visible=False,
                 inherit_global=True,
                 help="Wait for this service's final tracks, then query/license only their KIDs and PSSH values."),
@@ -707,6 +712,10 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     license_action_setting(visible=False),
+    Setting(
+        "verify_content_keys", "Verify content keys before download", "bool", default=False, visible=False,
+        help="Sample only selected encrypted VOD tracks before downloading. Try other enabled vaults, then the configured CDM once. Unsupported samples are inconclusive; live, export and command-only modes are skipped.",
+    ),
     Setting(
         "license_after_tracks",
         "License after final track selection",

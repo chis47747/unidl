@@ -557,6 +557,30 @@ class KeyVault:
                 found[kid_hex] = key
         return found
 
+    def key_candidates(self, kid: str, service: str | None = None, *, limit: int = 16) -> list[str]:
+        """Read bounded alternatives in the same preference order as get_key."""
+        normalized = normalize_hex(kid)
+        if normalized is None:
+            return []
+        conn = self._connections.get()
+        result: list[str] = []
+        for tag in (*service_names(service), None):
+            for candidate in (normalized, playready_kid_alias(normalized)):
+                if not candidate:
+                    continue
+                query = "SELECT key FROM keys WHERE kid = ? AND key != ?"
+                params = [candidate, _NULL_KEY]
+                if tag is not None:
+                    query += " AND service = ?"
+                    params.append(tag)
+                query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+                for row in conn.execute(query, (*params, limit)):
+                    if row["key"] not in result:
+                        result.append(row["key"])
+                    if len(result) >= limit:
+                        return result
+        return result
+
     def find(self, needle: str, *, service: str | None = None, limit: int = 50) -> list[KeyRecord]:
         """Look up by KID, by ``kid:key`` pair, or by title text."""
         conn = self._connections.get()
