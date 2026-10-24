@@ -2967,6 +2967,10 @@ class Engine:
             self.log(f"selected-track KID probe skipped: {exc}")
 
     @staticmethod
+    def original_track_output(settings: Settings | dict[str, object]) -> bool:
+        return str(settings.get("muxer", "auto") or "auto").strip().lower() == "none"
+
+    @staticmethod
     def hybrid_enabled(
         settings: Settings | None,
         *,
@@ -2974,6 +2978,8 @@ class Engine:
         tracks: TrackSet | None = None,
     ) -> bool:
         if settings is None:
+            return False
+        if Engine.original_track_output(settings):
             return False
         if playback is not None and playback.is_live:
             return False
@@ -3259,7 +3265,7 @@ class Engine:
         produce is treated as "keep the original" rather than passed through to
         fail at the last moment.
         """
-        if not playback.audio_only:
+        if not playback.audio_only or self.original_track_output(settings):
             return None
         wanted = str(settings.get("audio_format", "mp3") or "").lower()
         if wanted == "auto":
@@ -3426,6 +3432,8 @@ class Engine:
         Older/headless settings objects do not declare it; those keep the safe
         historical default of embedding chapters.
         """
+        if Engine.original_track_output(settings):
+            return False
         value = settings.get("embed_chapters", True)
         if isinstance(value, str):
             return value.strip().casefold() not in {"", "0", "false", "no", "off"}
@@ -3637,6 +3645,61 @@ class Engine:
         )
         if unknown_selected:
             raise ValueError("selected track is not part of the parsed manifest")
+        if self.original_track_output(settings) and sidecar_selected:
+            wanted = {
+                (
+                    stream.extra.get("subtitle_reference_url") or stream.url,
+                    stream.language or "und",
+                    stream.extra.get("subtitle_kind") or stream.group_id or "normal",
+                )
+                for stream in sidecar_selected
+                if stream.extra.get("service_sidecar") == "subtitle"
+            }
+            references = exports._subtitle_sources(playback, tracks)
+            selected_references = {
+                subtitle_source_identity(reference)
+                for reference in references
+                if (reference["url"], reference["language"], reference["kind"]) in wanted
+            }
+            if selected_references:
+                manifest = self.downloader.with_subtitles(manifest, references)
+                selected_native = {id(stream) for stream in native_selected}
+                selected_track_ids = tuple(
+                    track.track_id
+                    for track, stream in zip(manifest.tracks, self.downloader.streams(manifest), strict=True)
+                    if id(stream) in selected_native or (
+                        stream.extra.get("portable_subtitle_reference") is not None
+                        and subtitle_source_identity(stream.extra["portable_subtitle_reference"]) in selected_references
+                    )
+                )
+        original_imports_only = (
+            self.original_track_output(settings)
+            and not selected_track_ids
+            and bool(sidecar_selected)
+            and bool(playback.mux_imports)
+        )
+        if original_imports_only:
+            # Subtitle-only service selections may have no native manifest
+            # track. Deliver the already prepared source files as real tracks,
+            # rather than inventing a selected video or silently dropping them.
+            references = [
+                {
+                    "url": str(Path(track.path).expanduser().resolve()),
+                    "language": track.language,
+                    "name": track.name,
+                    "kind": track.kind,
+                    "original": track.original,
+                    "format": Path(track.path).suffix.lstrip("."),
+                }
+                for track in playback.mux_imports
+            ]
+            request = replace(
+                request,
+                source=DeliverySource.from_json({"subtitles": references}),
+                policy=replace(request.policy, no_probe=True),
+            )
+            manifest = self.downloader.adopt(request, api.subtitle_streams(references))
+            selected_track_ids = tuple(track.track_id for track in manifest.tracks)
 
         selected_output_types = self.output_scope_types(
             settings,
@@ -3666,7 +3729,8 @@ class Engine:
             scope=playback.output_scope or None,
             output_types=playback.output_types or None,
         )
-        separate_output = output_types != {"video", "audio", "subtitle"}
+        original_tracks = self.original_track_output(settings)
+        separate_output = original_tracks or output_types != {"video", "audio", "subtitle"}
         mux_format = (
             None
             if playback.audio_only or separate_output
@@ -3689,6 +3753,8 @@ class Engine:
             live_keep_segments = overrides.live_keep_segments
         if overrides.live_pipe_mux is not None:
             live_pipe_mux = overrides.live_pipe_mux
+        if original_tracks:
+            live_pipe_mux = False
 
         live_perform_as_vod = overrides.live_perform_as_vod
         live_dvr_from_start: bool | None = None
@@ -3712,7 +3778,7 @@ class Engine:
             live_record_limit = value or None
 
         muxer = str(settings.get("muxer", "auto") or "auto")
-        if muxer not in {"auto", "ffmpeg", "mkvmerge"}:
+        if muxer not in {"auto", "ffmpeg", "mkvmerge", "none"}:
             muxer = "auto"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:
@@ -3738,15 +3804,15 @@ class Engine:
             default_subtitle=self.default_subtitle_preference(playback, settings),
             mux_imports=tuple(
                 self._mux_import_value(track)
-                for track in playback.mux_imports
+                for track in (() if original_imports_only else playback.mux_imports)
             ),
             chapters_file=chapters_sidecar,
-            subtitle_format=str(settings.get("sub_format", "srt")),
-            auto_subtitle_fix=bool(settings.get("auto_subtitle_fix", True)),
+            subtitle_format="raw" if original_tracks else str(settings.get("sub_format", "srt")),
+            auto_subtitle_fix=False if original_tracks else bool(settings.get("auto_subtitle_fix", True)),
             subtitle_only=output_types == {"subtitle"},
             audio_format=audio_format,
             audio_metadata_file=audio_sidecar,
-            decode_audio_vivid=overrides.decode_audio_vivid,
+            decode_audio_vivid=overrides.decode_audio_vivid and not original_tracks,
             audio_vivid_decoder=overrides.audio_vivid_decoder,
             audio_vivid_decoder_args=overrides.audio_vivid_decoder_args,
             hls_method=(
@@ -3878,6 +3944,8 @@ class Engine:
 
     def default_subtitle_choice(self, playback: Playback, settings: Settings, tracks: TrackSet):
         """Preview the default subtitle among the final selected tracks."""
+        if self.original_track_output(settings):
+            return None
         if playback.audio_only or self.output_scope_types(
             settings,
             scope=playback.output_scope or None,
@@ -3894,6 +3962,8 @@ class Engine:
 
     def default_audio_choice(self, playback: Playback, settings: Settings, tracks: TrackSet):
         """Preview the same final-selection preference used by native muxing."""
+        if self.original_track_output(settings):
+            return None
         if playback.audio_only or self.output_scope_types(
             settings, scope=playback.output_scope or None, output_types=playback.output_types or None,
         ) != {"video", "audio", "subtitle"}:
@@ -3932,10 +4002,11 @@ class Engine:
             scope=playback.output_scope or None,
             output_types=playback.output_types or None,
         )
-        separate_output = output_types != {"video", "audio", "subtitle"}
+        original_tracks = self.original_track_output(settings)
+        separate_output = original_tracks or output_types != {"video", "audio", "subtitle"}
         mux_format = None if playback.audio_only or separate_output else str(settings.get("mux_format", "mkv"))
         muxer = str(settings.get("muxer", "auto") or "auto")
-        if muxer not in {"auto", "ffmpeg", "mkvmerge"}:
+        if muxer not in {"auto", "ffmpeg", "mkvmerge", "none"}:
             muxer = "auto"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:
@@ -3973,9 +4044,9 @@ class Engine:
             muxer=muxer,
             default_audio=self.default_audio_preference(playback, settings),
             default_subtitle=self.default_subtitle_preference(playback, settings),
-            sub_format=str(settings.get("sub_format", "srt")),
+            sub_format="raw" if original_tracks else str(settings.get("sub_format", "srt")),
             sub_only=output_types == {"subtitle"},
-            auto_subtitle_fix=bool(settings.get("auto_subtitle_fix", True)),
+            auto_subtitle_fix=False if original_tracks else bool(settings.get("auto_subtitle_fix", True)),
             http_request_timeout=max(1, int(settings.get("http_timeout", 30) or 30)),
             check_segments_count=bool(settings.get("check_segments_count", True)),
             no_resume=not bool(settings.get("resume_parts", True)),
@@ -4047,6 +4118,7 @@ class Engine:
             # piping is pointless for a single audio track anyway
             options.live_pipe_mux = (
                 bool(settings.get("live_pipe_mux", True))
+                and not original_tracks
                 and not audio_format
                 and _live_pipe_mux_supported()
             )
@@ -4139,6 +4211,21 @@ class Engine:
             plan = self.delivery_plan(playback, settings, tracks, service=service)
             return self.downloader.command_line(plan)
         return api.command_line(self.download_options(playback, settings, service=service))
+
+    def prepare_download_sidecars(self, playback: Playback, settings: Settings, service, log) -> None:
+        """Leave source subtitle references to native delivery in original mode."""
+        if not self.original_track_output(settings):
+            service.prepare_download(playback, log)
+            return
+        # The service hook may still need to prepare non-subtitle assets. Hide
+        # only the handled references for that call, then restore picker/export
+        # metadata even when the service fails.
+        original_references = playback.subtitle_references
+        playback.subtitle_references = [replace(reference, selected=False) for reference in original_references]
+        try:
+            service.prepare_download(playback, log)
+        finally:
+            playback.subtitle_references = original_references
 
     @staticmethod
     def sync_sidecar_selection(playback: Playback, tracks: TrackSet) -> None:

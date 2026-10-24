@@ -244,7 +244,7 @@ heartbeat interval is part of the shared settings contract.
 | `http_timeout` | seconds | `30` | Compatibility key controlled by **Download behavior**. HTTP timeout for native segment requests. |
 | `max_speed` | e.g. `15M` | empty | Compatibility key controlled by **Download behavior**. Empty means unlimited. |
 | `title_delay` | `off`, `30`, or `20-40` | `off` | Compatibility key controlled by **Download behavior**. Adds a random or fixed delay between automatically queued VOD titles. It does not delay tracks within one title or live recording segments. |
-| `muxer` | `auto` / `ffmpeg` / `mkvmerge` | `auto` | Compatibility key controlled by **Download behavior**. Which mux tool writes the final file. Per-service **Container** still chooses mkv vs mp4. |
+| `muxer` | `auto` / `ffmpeg` / `mkvmerge` / `none` | `auto` | Controlled by **Download behavior → Muxer**. Choose **No mux (original tracks)** to save joined, decrypted tracks separately, without audio/subtitle conversion or Hybrid processing. Otherwise per-service **Container** chooses MKV or MP4. |
 | `segment_downloader` | `python` / `aria2c` | `python` | Compatibility key controlled by **Download behavior**. `aria2c` is used only when chosen and installed. |
 | `resume_parts` | on / off | on | Compatibility key controlled by **Download behavior**. Reuse verified segments and completed track-stage checkpoints after failure or cancellation. Off starts fresh. |
 | `check_segments_count` | on / off | on | Compatibility key controlled by **Download behavior**. Fail a track whose downloaded part count does not match the manifest. |

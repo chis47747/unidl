@@ -197,6 +197,22 @@ class NativeDownloaderBackend:
                 # other selected tracks here.
                 continue
 
+    def with_subtitles(self, manifest: ParsedManifest, references: Sequence[dict]) -> ParsedManifest:
+        """Bind API subtitles to native delivery without fetching or converting."""
+        from . import cli
+        from .parsers.json_manifest import _with_source_subtitles
+
+        document = with_subtitle_sources(
+            source_bundle([self._source_record(manifest.request)], mode="collection"),
+            list(references),
+        )
+        streams = _with_source_subtitles(
+            "", list(self.streams(manifest)), {"subtitle_sources": list(references)},
+            dict(manifest.request.policy.headers),
+        )
+        request = replace(manifest.request, source=DeliverySource.from_json(document))
+        return self.adopt(request, cli._sort_streams(streams))
+
     def merge(self, manifests: Sequence[ParsedManifest]) -> ParsedManifest:
         """Merge authorized ladders into one runnable JSON-backed manifest.
 
@@ -873,7 +889,7 @@ class NativeDownloaderBackend:
             and _contains_vvc_video(selected)
         )
         output = policy.output
-        if vvc_vod:
+        if vvc_vod and muxer != "none":
             # Keep command export and in-process execution on the same known-good
             # VVC path. The native FFmpeg MP4 muxer writes vvc1; mkvmerge may
             # serialize the same track as V_QUICKTIME.

@@ -71,6 +71,44 @@ video_selection: best
 audio_selection: all
 ```
 
+## Separate original tracks (No mux)
+
+Choose **Settings → Download behavior → Muxer → No mux (original tracks)**
+(`muxer: none`). This is an output behavior, not a selection filter: the same
+automatic or manual track selection still applies to every title, including batches.
+
+UniDL downloads, joins segments and decrypts each selected track normally, then
+saves the independent completed files in the usual download folder, with
+track-aware names. It does not create a final combined MKV/MP4. Audio keeps its
+source codec, subtitles keep their source format and styling, and service API
+subtitle references are downloaded directly instead of passed through a service's
+subtitle conversion. Prepared local sidecars are copied without modification.
+
+This mode overrides **Container**, **Audio-only format**, **Subtitle format**,
+subtitle cleanup, optional repacking/Audio Vivid decoding, and Dolby Vision
+Hybrid assembly. Default audio/subtitle flags and chapter/lyrics embedding do not
+apply because there is no final container. Metadata remains available in the
+report and export; attachment downloading still follows its own setting.
+
+This is not **Keep temp files**: completed clear tracks are final outputs, not
+encrypted intermediates or loose segments, and normal cache cleanup does not
+delete them. Existing audio embedded in a source video is preserved; No mux does
+not forcibly split that source into new tracks.
+
+For live streams, cross-track pipe muxing is disabled, but per-track real-time
+segment joining remains available. Back still finalizes the recording and saves
+the independent tracks; Quit retains the existing immediate-exit behavior.
+
+The standalone equivalent is:
+
+```sh
+unidl download 'MANIFEST_URL' --muxer none --select 1,3,8
+```
+
+Saved commands include `--muxer none`. The older `--no-mux` flag only suppresses
+the final mux and still honors configured conversions; its behavior is unchanged.
+The default `muxer: auto` is unchanged.
+
 ## Video selection
 
 Video constraints are applied first:

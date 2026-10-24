@@ -96,7 +96,7 @@ from .live_rules import (
     should_treat_live_stream_as_fragmented_mp4,
 )
 from .loader import LoadError, normalize_headers
-from .models import SegmentInfo
+from .models import SegmentInfo, StreamInfo
 from .mux_audio import normalize_default_audio, resolve_default_audio
 from .mux_subtitle import normalize_default_subtitle, resolve_default_subtitle
 from .parser import parse_source
@@ -419,7 +419,7 @@ def _build_parser(
     g_mux.add_argument("--no-mux", "--skip-merge", dest="no_mux", action="store_true", help="Do not mux automatically when multiple tracks are selected.")
     g_mux.add_argument("--mux-import", action="append", help='Import external media during mux, e.g. --mux-import "path=sub.srt:lang=eng:name=English".')
     g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final audio or video container.")
-    g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge"], default="auto")
+    g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge", "none"], default="auto", help="Mux tool; none saves joined, decrypted original tracks without extra conversions.")
     g_mux.add_argument("--default-audio", type=normalize_default_audio, default="auto", help="Default muxed audio: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--default-subtitle", type=normalize_default_subtitle, default="auto", help="Default muxed subtitle: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
@@ -812,8 +812,30 @@ def _download(args: argparse.Namespace) -> int:
         return result
 
 
+def _apply_original_track_output(args: argparse.Namespace) -> None:
+    """Apply the stronger original-track contract without changing --no-mux."""
+    if getattr(args, "muxer", "auto") != "none":
+        return
+    args.no_mux = True
+    args.mux = False
+    args.mux_format = None
+    args.audio_format = None
+    args.audio_metadata_file = None
+    args.sub_format = "raw"
+    args.auto_subtitle_fix = False
+    args.chapters_file = None
+    args.repack = False
+    args.decode_audio_vivid = False
+    args.live_pipe_mux = False
+    args.service_context = {
+        **(getattr(args, "service_context", None) or {}),
+        "unidl_hybrid_dv_hdr10": False,
+    }
+
+
 def _download_impl(args: argparse.Namespace) -> int:
     _checkpoint_embedding(args)
+    _apply_original_track_output(args)
     colors = _colors(args)
     # Validate a user-supplied sidecar before fetching or downloading media. Core
     # generated sidecars are already valid, but the standalone CLI also accepts
@@ -1000,10 +1022,23 @@ def _download_impl(args: argparse.Namespace) -> int:
         live_tracks_dir = _live_recording_tracks_dir(output_dir, pipe_destination.stem)
         args._unidown_live_tracks_dir = live_tracks_dir
         args._unidown_live_pipe_path = None  # Set only when the pipe actually owns an output.
+        original_sidecars = []
+        if getattr(args, "muxer", "auto") == "none":
+            # API subtitles can be finite even when the selected video is live.
+            # They still belong to the selected original-track output.
+            for offset, stream in enumerate(
+                (stream for stream in hydrated if not stream.is_live),
+                start=len(live_streams) + 1,
+            ):
+                original_sidecars.append(_download_selected_stream(
+                    stream, offset, len(hydrated), streams, args, headers, keys,
+                    hls_crypto, max_speed, staged_output_dir, default_save_base, True,
+                ))
         pipe_session = _start_live_pipe_mux_session(live_streams, pipe_destination, args.save_name, default_save_base, args, keys, colors, hls_crypto=hls_crypto, temp_dir=_task_temp_subdir(args, "pipe"))
         args._unidown_live_pipe_session = pipe_session
         try:
             downloaded_tracks = _record_live_streams(live_streams, streams, args, headers, keys, pipe_destination, live_tracks_dir, pipe_session=pipe_session, hls_crypto=hls_crypto)
+            downloaded_tracks.extend(original_sidecars)
         except BaseException:
             if pipe_session:
                 pipe_session.close(cancelled=True)
@@ -1012,6 +1047,9 @@ def _download_impl(args: argparse.Namespace) -> int:
             if pipe_session:
                 pipe_session.close(cancelled=False)
         downloaded_tracks = _with_audio_vivid_companions(downloaded_tracks)
+        downloaded_tracks = _with_original_imports(
+            downloaded_tracks, mux_imports, staged_output_dir, args, default_save_base,
+        )
         downloaded_paths = [track.path for track in downloaded_tracks]
         temp_dirs = [task_temp_root]
         intermediate_paths = [path for track in downloaded_tracks for path in track.cleanup_paths]
@@ -1185,6 +1223,9 @@ def _download_impl(args: argparse.Namespace) -> int:
             intermediate_paths.extend(item.cleanup_paths)
 
     downloaded_tracks = _with_audio_vivid_companions(downloaded_tracks)
+    downloaded_tracks = _with_original_imports(
+        downloaded_tracks, mux_imports, staged_output_dir, args, default_save_base,
+    )
     hybrid_enabled = bool(getattr(args, "service_context", {}).get("unidl_hybrid_dv_hdr10"))
     if hybrid_enabled:
         try:
@@ -1728,6 +1769,55 @@ class _DownloadedTrack:
     temp_dir: Path | None
     cleanup_paths: list[Path]
     cache_filename: str | None = None
+
+
+def _with_original_imports(
+    tracks: list[_DownloadedTrack],
+    imports: Sequence[MuxInput],
+    output_dir: Path,
+    args: argparse.Namespace,
+    default_save_base: str | None,
+) -> list[_DownloadedTrack]:
+    """Keep service-prepared sidecars too, without modifying their source files."""
+    if getattr(args, "muxer", "auto") != "none" or not imports:
+        return tracks
+    result = list(tracks)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    offset = max((track.offset for track in tracks), default=0)
+    total = offset + len(imports)
+    for imported in imports:
+        _checkpoint_embedding(args)
+        offset += 1
+        source = Path(imported.path).expanduser()
+        suffix = source.suffix
+        media_type = imported.media_type or (
+            "subtitle"
+            if suffix.lower() in {".srt", ".vtt", ".ass", ".ssa", ".ttml", ".dfxp", ".xml", ".sup", ".sub"}
+            else "unknown"
+        )
+        stream = StreamInfo(
+            manifest_type="direct",
+            media_type=media_type,
+            url=str(source),
+            language=imported.language,
+            name=imported.name,
+            extension=suffix.lstrip("."),
+            extra={"subtitle_kind": imported.kind, "original": imported.original},
+        )
+        name = _track_save_name(
+            args.save_name or default_save_base or "download",
+            None,
+            stream,
+            offset,
+            total,
+        )
+        destination = unique_path(bounded_path(
+            output_dir / f"{_safe_output_name(name or source.stem)}{suffix}",
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        ))
+        shutil.copyfile(source, destination)
+        result.append(_DownloadedTrack(offset, stream, destination, None, []))
+    return result
 
 
 def _embedding_cancel_callback(args) -> Callable[[], bool] | None:

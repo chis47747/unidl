@@ -1065,9 +1065,9 @@ GLOBAL_SETTINGS: list[Setting] = [
     _choice(
         "muxer",
         "Muxer",
-        [("auto", "Auto"), ("ffmpeg", "FFmpeg"), ("mkvmerge", "mkvmerge")],
+        [("auto", "Auto"), ("ffmpeg", "FFmpeg"), ("mkvmerge", "mkvmerge"), ("none", "No mux (original tracks)")],
         "auto",
-        "Which tool writes the final container. Auto prefers mkvmerge for MKV when it recognises the inputs. Per-service Container still chooses mkv vs mp4.",
+        "Which tool writes the final container. Auto prefers mkvmerge for MKV. No mux saves joined, decrypted original tracks separately, without audio/subtitle conversion or Hybrid processing. Container is ignored in No mux mode.",
         visible=False,
     ),
     _choice(

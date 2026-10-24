@@ -61,6 +61,7 @@ __all__ = [
     "key_ids",
     "load_streams",
     "stream_key_ids",
+    "subtitle_streams",
 ]
 
 
@@ -452,6 +453,13 @@ def command_line(
     return "unidl " + " ".join(
         shlex.quote(part) for part in build_argv(options, streams, selected)
     )
+
+
+def subtitle_streams(references: Sequence[dict], headers: dict[str, str] | None = None) -> list[StreamInfo]:
+    """Adapt authorized API subtitle URLs without fetching or converting them."""
+    from .parsers.json_manifest import _with_source_subtitles
+
+    return _with_source_subtitles("", [], {"subtitle_sources": list(references)}, headers)
 
 
 def stream_key_ids(stream: StreamInfo) -> list[str]:

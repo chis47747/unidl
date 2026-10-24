@@ -174,7 +174,7 @@ class _DeleteConfirm(ModalScreen[bool]):
     def __init__(self, noun: str, name: str):
         super().__init__()
         self.noun = noun
-        self.name = name
+        self.resource_name = name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-confirm-card"):
@@ -182,7 +182,7 @@ class _DeleteConfirm(ModalScreen[bool]):
                 yield Label(tr("resource.delete_title", noun=self.noun), id="resource-confirm-title")
                 yield CloseMark(id="resource-confirm-close")
             yield Static(
-                tr("resource.delete_help", name=f"[$warn]{visual_markup(self.name)}[/]"),
+                tr("resource.delete_help", name=f"[$warn]{visual_markup(self.resource_name)}[/]"),
                 id="resource-confirm-help",
             )
             with Horizontal(id="resource-confirm-actions"):

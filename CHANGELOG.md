@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.9] - 2026-10-24
+
+### Original-track output
+
+- Added No mux (original tracks) to save selected tracks as separate final files after normal segment joining and decryption, preserving source audio codecs and subtitle formats and styling.
+- Integrated original-track output with batches, live recording and saved commands, including selected API subtitles and prepared local sidecars, while bypassing conversions, repacking, Hybrid assembly and final-container metadata.
+- Preserved raw AAC, AC-3 and E-AC-3 filename extensions and kept default Auto output and the older --no-mux flag unchanged.
+
+### Resource management
+
+- Fixed the confirmation-dialog crash when deleting vault or remote CDM definitions while preserving confirmation and cancellation behavior.
+
 ## [2.4.8] - 2026-10-23
 
 ### Content-key verification

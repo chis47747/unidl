@@ -3931,7 +3931,7 @@ def _default_extension(stream: StreamInfo) -> str:
     extension = (stream.extension or "").lower()
     if extension == "bbts":
         return "ts"
-    if extension in {"ts", "mp3", "flac", "m4a", "mp4", "vtt", "srt", "ass", "ssa", "ttml", "webm"}:
+    if extension in {"ts", "mp3", "flac", "m4a", "mp4", "aac", "ac3", "eac3", "vtt", "srt", "ass", "ssa", "ttml", "webm"}:
         return extension
     if stream.media_type == "subtitle":
         codec = (stream.codecs or "").lower()

@@ -2866,7 +2866,11 @@ class SessionController:
                 if callable(sync_sidecars):
                     sync_sidecars(playback, tracks)
                 self.post_status(tr("delivery.status.preparing_sidecars"))
-                self.service.prepare_download(playback, self.post_log)
+                prepare_sidecars = getattr(self.engine, "prepare_download_sidecars", None)
+                if callable(prepare_sidecars):
+                    prepare_sidecars(playback, self.settings, self.service, self.post_log)
+                else:
+                    self.service.prepare_download(playback, self.post_log)
             except Exception as exc:
                 self.post_error(
                     "Could not prepare download sidecars",
