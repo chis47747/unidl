@@ -38,6 +38,9 @@ and extending the project.
 
 ## Interface and integration
 
+- [Experimental home](home-interface.md) — optional search-first home, modes,
+  local suggestions and explicit search actions.
+
 - [Interface](interface.md) and [UI design](ui-design.md) — navigation,
   selection, logs, themes and accessibility.
 - [Internationalization](i18n.md) — adding interface locales.

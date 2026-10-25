@@ -2925,13 +2925,17 @@ class SessionController:
                     service_id=self.service.ID,
                     service_name=self.service.NAME,
                     path=self.export_path,
+                    batch=(self.batch_total or 0) > 1,
                     export_manifest_type=self.settings.get(
                         exports.EXPORT_MANIFEST_TYPE_KEY,
                         exports.MASTER_MANIFEST,
                     ),
                 )
             except TypeError as exc:
-                if "unexpected keyword argument 'settings'" not in str(exc):
+                if not any(
+                    f"unexpected keyword argument '{key}'" in str(exc)
+                    for key in ("settings", "batch")
+                ):
                     self.post_error(
                         "Could not write the export",
                         str(exc),

@@ -85,6 +85,7 @@ def _is_number(value: str) -> bool:
 
 
 class HomeScreen(Screen):
+    USES_SERVICE_GRID = True
     BINDINGS = [
         Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
@@ -117,7 +118,7 @@ class HomeScreen(Screen):
         self._update_info = None
 
     # -------------------------------------------------------------- composition
-    def compose(self) -> ComposeResult:
+    def compose_header(self) -> ComposeResult:
         yield Chrome(can_go_back=False)
         yield Static("", id="banner")
         with Horizontal(id="caption"):
@@ -138,6 +139,9 @@ class HomeScreen(Screen):
             yield StatusChip("open_readiness", id="chip-ready")
             yield Static("[$gutter]·[/]", id="sep-import", classes="chip-sep")
             yield StatusChip("open_imports", id="chip-import")
+
+    def compose(self) -> ComposeResult:
+        yield from self.compose_header()
         with Vertical(id="body"):
             # what is not set up yet, above the list rather than in it: a new
             # install is not a broken one, and the platforms are still all usable
@@ -170,6 +174,8 @@ class HomeScreen(Screen):
         )
 
     def on_mount(self) -> None:
+        if not self.USES_SERVICE_GRID:
+            return
         self._render_caption()
         self.query_one("#prompt-hint", Static).update(
             f"[$dim]{tr('home.prompt_hint')}[/]"
@@ -182,6 +188,11 @@ class HomeScreen(Screen):
 
     def refresh_after_settings(self) -> None:
         self.refresh_env()
+
+    def on_screen_resume(self) -> None:
+        if self.USES_SERVICE_GRID:
+            self.relocalize()
+        self.call_later(self.app.refresh_home_interface)
 
     def relocalize(self) -> None:
         for chrome in self.query(Chrome):
@@ -666,6 +677,8 @@ class HomeScreen(Screen):
     def on_resize(self) -> None:
         self.refresh_banner()
         self._fit_statusline()
+        if not self.USES_SERVICE_GRID:
+            return
         columns = self._column_count()
         if columns == self._columns:
             return
@@ -1064,7 +1077,7 @@ class HomeScreen(Screen):
         if shown:
             self._open(shown[0][0].service)
 
-    def _import_path(self, value: str) -> bool:
+    def _import_path(self, value: str, *, clear_input: bool = True) -> bool:
         """An export file pasted into the box. Returns whether it was one.
 
         The same box already takes a URL and opens the platform that can deal with
@@ -1081,15 +1094,20 @@ class HomeScreen(Screen):
 
         if not value.lower().endswith(".json"):
             return False
-        path = Path(value).expanduser()
-        if not path.is_file():
+        try:
+            path = Path(value).expanduser()
+            if not path.is_file():
+                return False
+        except (OSError, RuntimeError, ValueError):
+            # Search text may contain a malformed path or an unknown ~user.
             return False
         try:
             document = exports.read(path)
         except exports.ExportError as exc:
             self.notify(f"{path.name}: {exc}", title="Not an export", severity="error", timeout=8)
             return True
-        self.query_one("#filter", Input).value = ""
+        if clear_input:
+            self.query_one("#filter", Input).value = ""
         if len(document.entries) > 1:
             # A path pasted into the home input follows the same explicit batch
             # rule as the export-folder screen: never start the first title merely

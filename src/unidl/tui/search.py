@@ -51,6 +51,33 @@ NAME_WIDTH = 28
 NAME_GAP = 2
 
 
+def local_search_vault_names(app) -> tuple[str, ...] | None:
+    """Selected local-only search targets, shared by both Home interfaces."""
+    selected = vaults.parse_targets(app.globals.get("vault_search_targets", ""))
+    if selected is None:
+        return None
+    local_names = {
+        descriptor.name.casefold()
+        for descriptor in vaults.configured_vaults(app.config)
+        if not descriptor.remote
+    }
+    return tuple(name for name in selected if name.casefold() in local_names)
+
+
+def copy_key_record(app, record: KeyRecord, notify) -> None:
+    """Use the same clipboard boundary and feedback on Home and Vault search."""
+    detail = f"{record.service} · {record.title or tr('search.unknown_title')}"
+    try:
+        app.copy_text(record.pair())
+        notify(f"{tr('search.copied', pair=record.pair())}\n{detail}", timeout=4)
+    except Exception:
+        notify(
+            f"{record.pair()}\n{detail}",
+            title=tr("search.notify.key_title"),
+            timeout=8,
+        )
+
+
 def _column(text: str) -> str:
     """``text`` padded to the name column, with the gap guaranteed."""
     return f"{text}{' ' * max(NAME_GAP, NAME_WIDTH - cell_width(text))}"
@@ -100,9 +127,10 @@ class GlobalSearchScreen(Screen):
     def action_noop(self) -> None:
         """Footer-only hint; Enter is handled by the focused widget."""
 
-    def __init__(self, query: str = "", service: Service | None = None):
+    def __init__(self, query: str = "", service: Service | None = None, *, vault_only: bool = False):
         super().__init__()
         self._query = query
+        self._vault_only = vault_only
         #: when set, this is a key search inside one service rather than a
         #: global search across services
         self._service = service
@@ -136,15 +164,7 @@ class GlobalSearchScreen(Screen):
     @property
     def local_vault_names(self) -> tuple[str, ...] | None:
         """Local backends visible to home-vault search."""
-        selected = vaults.parse_targets(self.app.globals.get("vault_search_targets", ""))
-        if selected is None:
-            return None
-        local_names = {
-            descriptor.name.casefold()
-            for descriptor in vaults.configured_vaults(self.app.config)
-            if not descriptor.remote
-        }
-        return tuple(name for name in selected if name.casefold() in local_names)
+        return local_search_vault_names(self.app)
 
     @property
     def remote_home_search_enabled(self) -> bool:
@@ -224,6 +244,8 @@ class GlobalSearchScreen(Screen):
         self.rebuild(self._needle)
 
     def _placeholder(self) -> str:
+        if self._vault_only:
+            return tr("beta.placeholder.vault")
         return tr("search.placeholder_scoped") if self.scoped else tr("search.placeholder")
 
     def _render_chrome_copy(self) -> None:
@@ -249,10 +271,13 @@ class GlobalSearchScreen(Screen):
         stats = self.app.vaults.stats_local(local_names=self.local_vault_names)
         remote_count = len(self.remote_vault_descriptors)
         remote_note = tr("search.subhead_remote", count=remote_count) if remote_count else ""
-        self.query_one("#masthead", Static).update(tr("search.title"))
+        self.query_one("#masthead", Static).update(tr("search.keys_title" if self._vault_only else "search.title"))
         self.query_one("#subhead", Static).update(
-            f"[$dim]{tr('search.subhead', services=len(self.app.services), keys=stats['keys'])}"
-            f"{remote_note}[/]"
+            "[$dim]" + (
+                tr("search.subhead_scoped", count=stats["keys"]) if self._vault_only
+                else tr("search.subhead", services=len(self.app.services), keys=stats["keys"])
+            )
+            + f"{remote_note}[/]"
         )
 
     def on_screen_resume(self, _event) -> None:
@@ -302,15 +327,19 @@ class GlobalSearchScreen(Screen):
             self._focus_first(option_list)
             return
 
-        if not needle:
+        if not needle and not self._vault_only:
             self._add_section(option_list, "services", [
                 _Row("service", service=service) for service in self.app.services
             ])
             self._focus_first(option_list)
             return
 
+        if not needle and self._vault_only:
+            option_list.add_option(Option(tr("beta.placeholder.vault"), disabled=True))
+            return
+
         # a URL routes straight to the owning service
-        if needle.lower().startswith(("http://", "https://")):
+        if not self._vault_only and needle.lower().startswith(("http://", "https://")):
             matched = self.app.registry.for_url(needle)
             rows = [_Row("service", service=matched)] if matched else []
             self._add_section(
@@ -334,7 +363,7 @@ class GlobalSearchScreen(Screen):
         # A query that names a hex id is unambiguous: it can only mean a key. That
         # includes one with a label still attached - "KID: 39a1…" is what a paste
         # out of a log looks like, and offering service names for it is noise.
-        if key_query:
+        if key_query or self._vault_only:
             self._add_remote_search_row(option_list, needle)
             if self._remote_records and self._remote_query == needle:
                 self._add_section(
@@ -794,19 +823,7 @@ class GlobalSearchScreen(Screen):
         self.app.action_add_keys()
 
     def _copy(self, record: KeyRecord) -> None:
-        detail = f"{record.service} · {record.title or tr('search.unknown_title')}"
-        try:
-            # App.copy_text, not copy_to_clipboard: the latter is OSC 52 only,
-            # which several macOS terminals ignore, so this said "Copied" and
-            # left the clipboard untouched. copy_text also goes through pbcopy.
-            self.app.copy_text(record.pair())
-            self.notify(f"{tr('search.copied', pair=record.pair())}\n{detail}", timeout=4)
-        except Exception:
-            self.notify(
-                f"{record.pair()}\n{detail}",
-                title=tr("search.notify.key_title"),
-                timeout=8,
-            )
+        copy_key_record(self.app, record, self.notify)
 
     def go_back(self) -> bool:
         return False

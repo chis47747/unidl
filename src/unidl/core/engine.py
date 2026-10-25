@@ -1678,7 +1678,9 @@ class Engine:
             return []
         checking = key_verification.enabled(playback, settings)
         sources = {}
-        tracking = {"backfill": False, "sources": sources} if checking else {}
+        tracking = {"sources": sources}
+        if checking:
+            tracking["backfill"] = False
         found = self.vaults.get_keys(
             kids,
             service.ID,
@@ -1705,13 +1707,8 @@ class Engine:
                 f"vault: {len(found)}/{len(kids)} keys cached, requesting a license",
             )
             return []
-        active = self.vaults.enabled(
-            use_local=use_local,
-            use_remote=use_remote,
-            local_names=read_local,
-            remote_names=read_remote,
-        )
-        where = ", ".join(backend.name for backend in active) or "selected"
+        suppliers = dict.fromkeys(sources[kid].name for kid in kids if kid in sources)
+        where = ", ".join(suppliers) or "selected"
         self._log_vault_status(
             playback,
             f"vault: all {len(found)} keys served from {where}, no license request",
@@ -4335,6 +4332,7 @@ class Engine:
         service_name: str = "",
         path: Path | None = None,
         export_manifest_type: str = exports.MASTER_MANIFEST,
+        batch: bool = False,
     ) -> Path:
         """Write, or extend, the portable export for this run. Returns its path.
 
@@ -4346,9 +4344,16 @@ class Engine:
 
         The file is rewritten whole rather than appended to, because it is a JSON
         document and a half-written one is not readable at all.
+
+        Declared batches use a series-level filename from their first entry.
+        An automatically named single export is promoted when a second title
+        arrives. Explicit custom paths and each entry's save name stay intact.
         """
+        from datetime import datetime
+
         service = _folder_name(service_id or playback.title.service or "unknown")
         manifest_type = exports.normalize_manifest_type(export_manifest_type)
+        directory = self.config.paths.exports / service
 
         def export_entry() -> exports.Entry:
             media_manifest = None
@@ -4401,6 +4406,18 @@ class Engine:
                 app=f"unidl {__version__}",
             )
 
+        def write_new(
+            document: exports.Document, *, when: datetime | None = None, as_batch: bool = False,
+        ) -> Path:
+            candidate = directory / exports.file_name(document, when, batch=batch or as_batch)
+            counter = 1
+            while True:
+                target = candidate if counter == 1 else candidate.with_name(f"{candidate.stem}_{counter}.json")
+                with locked_path(target):
+                    if not target.exists():
+                        return exports.write(target, document)
+                counter += 1
+
         if path is not None:
             target = Path(path)
             with locked_path(target):
@@ -4415,14 +4432,41 @@ class Engine:
                             f"the export file for this run cannot be read: {exc}"
                         ) from exc
                 document = document or new_document()
+                # Recognize only names produced by this exporter in its managed
+                # directory. Never rename a caller's custom output path.
+                generated_when = None
+                generated_batch = False
+                stamp = re.search(r"_(\d{8}_\d{6})(?:_\d+)?\.json$", target.name)
+                if stamp is not None and target.parent.resolve() == directory.resolve():
+                    try:
+                        when = datetime.strptime(stamp.group(1), "%Y%m%d_%H%M%S")
+                    except ValueError:
+                        pass
+                    else:
+                        for was_batch in (False, True):
+                            previous = exports.file_name(document, when, batch=was_batch)
+                            pattern = re.escape(Path(previous).stem) + r"(?:_\d+)?\.json"
+                            if re.fullmatch(pattern, target.name):
+                                generated_when = when
+                                generated_batch = was_batch
                 document.add(export_entry())
+                if generated_when is not None:
+                    wanted = exports.file_name(document, generated_when, batch=batch or generated_batch)
+                    if not re.fullmatch(re.escape(Path(wanted).stem) + r"(?:_\d+)?\.json", target.name):
+                        # Commit the complete new document before removing the
+                        # old file. A write/size-limit failure leaves it intact.
+                        written = write_new(document, when=generated_when, as_batch=generated_batch)
+                        try:
+                            target.unlink()
+                        except OSError as exc:
+                            self.log(f"Could not remove the previous export copy: {exc}")
+                        exports.forget(target)
+                        return written
                 return exports.write(target, document)
 
         document = new_document()
         document.add(export_entry())
-        target = self.config.paths.exports / service / exports.file_name(document)
-        with locked_path(target):
-            return exports.write(target, document)
+        return write_new(document)
 
     def run(
         self,

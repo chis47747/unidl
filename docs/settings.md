@@ -98,6 +98,16 @@ Version-1 and version-2 exports remain readable from their existing files;
 their segment snapshots are not copied into new files. Keep the original file
 when replaying such an import. Older readers reject version 3 explicitly.
 
+An episode batch is saved in one JSON file named for the series and export time,
+for example `Survivor_20261021_181310.json`, without the first episode number,
+episode title or per-episode release suffix. Declared batches use this name from
+their first exported entry. If a run becomes a batch only when another title
+arrives, its automatically generated filename is updated while retaining the
+original timestamp. Each entry still retains its full individual release name,
+episode metadata, tracks and keys. Single-title export names and custom output
+paths are unchanged. Mixed-title batches use a service-level `Batch` name;
+same-second exports receive a numbered suffix instead of overwriting a file.
+
 Each export file, including an entire batch, is limited to **32 MiB**.
 Smaller documents remain indented; a large source bundle may
 use compact JSON spacing to fit the limit. If it still exceeds the limit, export
@@ -216,12 +226,14 @@ heartbeat interval is part of the shared settings contract.
 | `storage_manager` | manager screen | — | Opens **Files & naming**, the single place to edit ordinary output folders and file-name templates, preview a sample release name, and inspect sensitive runtime paths without moving them. |
 | `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints and HTTPS proxy providers are managed together. |
 | `justwatch_manager` | manager screen | — | Opens **JustWatch search**, where the one title-catalogue country and the separate availability-country list are edited together. The two underlying values remain independent. |
-| `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns the `theme`, `interface_locale` and `debug` choices. |
+| `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns `theme`, `interface_locale`, `beta_interface`, `beta_auto_results` and `debug`. |
 | `after_resolve` | `download` / `command` / `ask` | `download` | Compatibility key controlled by **Download behavior**. `command` reproduces the old scripts' behaviour of only emitting a command; the main screen shortcut `d` still cycles it. |
 | `fetch_actual_bitrate` | on / off | **on** | Controlled by **Settings → Services → Actual video bitrate by service** or the individual service's settings. Unconfigured services inherit the global default; saved service overrides are independent. Press `r` on a service row to resume inheritance. Existing global preferences are preserved. After the final video tracks are selected and the download details screen is visible, UniDL samples distributed media segments to show an actual bitrate beside the manifest estimate. During that same probe it may read the selected video's bounded MP4 initialization metadata to correct a missing HLG/HDR label before final naming. A probe is accepted only when the complete segment size is known; unreliable CDN responses are omitted. Off skips all of this and keeps manifest metadata only. |
 | `drm_system` | registered DRM systems | first registered system | Compatibility key controlled by **DRM & vaults → DRM system**. A service that declares exactly one system pins that system; a multi-system service may expose its own override. |
 | `cdm_rules` | resolution-to-device rules | empty | Compatibility key controlled by **DRM & vaults → CDM rules**. Rules choose the app-wide CDM by output resolution and never replace a service's own CDM setting. |
 | `theme` | `dark` / `light` | `dark` | Compatibility key controlled by **Interface & diagnostics**. Also switch with `ctrl+t`; changes repaint the current screen immediately. |
+| `beta_interface` | on / off | **off** | **Interface & diagnostics → Beta interface** enables the experimental search-first home. Applies on returning home without interrupting active sessions; off retains the classic service list. See [Experimental home](home-interface.md). |
+| `beta_auto_results` | multiple selection: `services`, `exports`, `vault`, `settings`, `justwatch`, `catalog`, `url` | **all selected** | **Interface & diagnostics → Beta home Auto result types** controls automatic searches, results and action rows in the experimental home's Auto mode. Unchecked types remain available through explicit modes and slash commands. An empty selection disables all Auto results; it does not restore defaults. Hidden Vault and export sources are not automatically queried. Remote vault lookup remains explicit. |
 | `interface_locale` | `system` / `en` / `zh-Hans` / `zh-Hant` / `es` / `fr` / `pt` / `it` / `ja` / `ko` / `ru` / `de` | `system` | Compatibility key controlled by **Interface & diagnostics**. Language of UniDL's own labels and settings. German is shown as Deutsch. Service names, titles, URLs and API locales are not translated. |
 | `local_vault` | on / off | on | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden under **License and vaults**. It governs automatic local lookup; it is not a duplicate backend-enable switch. |
 | `remote_vault` | on / off | off | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden. It remains the master network/write safety gate for remote-vault operations. |

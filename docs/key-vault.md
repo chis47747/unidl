@@ -98,6 +98,15 @@ KID is still sent to that service's licence endpoint. Init-data discovery runs
 before the final all-cached decision when a manifest can hide additional KIDs
 (for example an HLS media playlist or a Widevine v1 PSSH).
 
+Each queried vault writes its own result to the session log, including its name
+and whether it is local or remote. Results distinguish a complete hit, a partial
+hit with a missing-key count, no matching keys, and a failed/unavailable lookup.
+Counts refer to the KIDs still missing when that vault was queried, not to all
+KIDs in the title. Disabled, unselected, or unnecessary vaults are not queried
+and are not reported as misses. The final all-cached summary lists only vaults
+that actually supplied keys. This reporting does not add requests or change
+lookup order, backfill, or licence fallback.
+
 This ordering also applies when a service declares `USES.drm = self`
 and local or remote lookup is enabled.
 Immediately before its service-owned `get_keys()` call, Core performs the same

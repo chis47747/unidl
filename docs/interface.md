@@ -48,6 +48,13 @@ Column count is recomputed from the real terminal width, so a wide window shows
 more platforms at once. Measured: 5 columns at 118 characters, 2 at 64. The
 shortcut bar trims hints the same way rather than being cut off mid-word.
 
+### Experimental home
+
+For the optional search-first replacement of the main screen, see
+[Experimental home](home-interface.md). Enable it under **Interface &
+diagnostics → Beta interface**; the classic home described above remains the
+default.
+
 ## Service screen
 
 Choosing a platform clears the main screen and hands over to that service, which

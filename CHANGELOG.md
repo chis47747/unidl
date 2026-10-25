@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.5.0] - 2026-10-25
+
+### New search-first Home
+
+- Introduced an optional new Home with one search bar, Auto routing and explicit modes for services, export files, local vault keys, settings, JustWatch, service searches and links. Enabled it through Settings → Interface & diagnostics → Beta interface while retaining the classic service-list Home as the default.
+- Added slash commands, independent service scopes for search and direct opening, and configurable Auto result categories without disabling explicit modes.
+- Kept typing local with background export indexing and debounced vault lookup; remote searches, service requests, key writes and downloads still required explicit actions, and ambiguous links or services required a choice.
+- Added localized, theme-aware category labels, responsive search alignment, fitted mouse/keyboard selectors and input clearing, while preserving modes, queries and result selections on Back.
+- Documented the new Home, its result-category controls, export imports, key search and navigation workflows.
+
+### Export filenames
+
+- Named batch exports for the series and timestamp instead of the first episode, promoted automatically named single exports when a batch formed, and preserved each entry's release name and explicit custom paths.
+- Avoided same-second filename collisions and kept the original export intact if batch promotion failed.
+
+### Vault lookup reporting
+
+- Reported complete and partial hits, misses and lookup failures separately for each queried local or remote vault, using counts of the keys still missing at that step.
+- Named only vaults that actually supplied keys in all-cached summaries, without adding requests or changing lookup order, backfill or licence fallback.
+
 ## [2.4.9] - 2026-10-24
 
 ### Original-track output

@@ -32,6 +32,7 @@ from typing import Any, Protocol
 
 import requests
 
+from .i18n import tr
 from .secureio import private_directory
 from .vault import (
     KeyRecord,
@@ -840,10 +841,11 @@ class Vaults:
             missing = [kid for kid in wanted if kid not in found]
             if not missing:
                 break
+            label = tr("vault.lookup.remote" if vault.remote else "vault.lookup.local", name=vault.name)
             try:
                 answers = vault.get_keys(missing, service)
             except Exception as exc:  # noqa: BLE001 - a dead vault is not a failure
-                self.log(f"vault {vault.name}: unavailable ({exc})")
+                self.log(tr("vault.lookup.failed", vault=label, error=str(exc)))
                 continue
             fresh = {
                 kid: key
@@ -855,8 +857,14 @@ class Vaults:
                 sources.update({kid: vault for kid in fresh})
             if fresh and vault.remote:
                 from_remote.update(fresh)
-            if fresh and len(vaults) > 1:
-                self.log(f"vault {vault.name}: {len(fresh)} of {len(missing)} keys")
+            matched = sum(kid in fresh for kid in missing)
+            if not matched:
+                self.log(tr("vault.lookup.miss", vault=label, total=len(missing)))
+            elif matched < len(missing):
+                self.log(tr("vault.lookup.partial", vault=label, found=matched,
+                            total=len(missing), missing=len(missing) - matched))
+            else:
+                self.log(tr("vault.lookup.hit", vault=label, found=matched, total=len(missing)))
         if backfill and from_remote:
             self._backfill(service, from_remote, local_names=backfill_local_names)
         return found

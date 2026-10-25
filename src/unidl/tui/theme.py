@@ -62,6 +62,15 @@ class Palette:
     # source-language badge, deliberately separate from stream-format colours
     original: str
 
+    # Auto search categories: quiet, separate inks, not stream/status colours
+    search_services: str
+    search_exports: str
+    search_vault: str
+    search_settings: str
+    search_justwatch: str
+    search_catalog: str
+    search_url: str
+
     #: Lines rather than letters: the rule under the log, and the scrollbar thumb.
     #: Its own role because it is the one colour that is *not* text, and it used to
     #: borrow ``highlight`` - a selected-row background, which against the page is
@@ -107,6 +116,13 @@ DARK = Palette(
     atmos="#9ece6a",
     audio_vivid="#d386b7",
     original="#8eaaa4",
+    search_services="#9baec2",
+    search_exports="#b9aa92",
+    search_vault="#9ab5a0",
+    search_settings="#b4a0bb",
+    search_justwatch="#b8b38f",
+    search_catalog="#bd9c96",
+    search_url="#96b6ba",
     rule="#525252",
     bg="#141414",
     panel="#1c1c1c",
@@ -155,6 +171,13 @@ LIGHT = Palette(
     atmos="#2f6b21",
     audio_vivid="#8a2b72",
     original="#42665e",
+    search_services="#4a6078",
+    search_exports="#6b593f",
+    search_vault="#4f6651",
+    search_settings="#6b5273",
+    search_justwatch="#635f3d",
+    search_catalog="#78514b",
+    search_url="#42656b",
     rule="#a9a6a0",
     bg="#f7f6f3",
     panel="#edebe6",
@@ -212,6 +235,13 @@ def textual_theme(palette: Palette) -> Theme:
             "atmos": palette.atmos,
             "audio-vivid": palette.audio_vivid,
             "original": palette.original,
+            "search-services": palette.search_services,
+            "search-exports": palette.search_exports,
+            "search-vault": palette.search_vault,
+            "search-settings": palette.search_settings,
+            "search-justwatch": palette.search_justwatch,
+            "search-catalog": palette.search_catalog,
+            "search-url": palette.search_url,
             "rule": palette.rule,
             "base": palette.bg,
             "recessed": palette.panel,
@@ -1114,6 +1144,122 @@ Input > .input--cursor {
     background: $highlight;
     color: $accent;
 }
+
+/* ------------------------------------------------------- experimental home
+   Keep these rules in the app stylesheet, not widget DEFAULT_CSS: app-wide
+   Input/focus and OptionList rules otherwise override the search layout. */
+BetaHomeScreen #beta-body {
+    height: 1fr;
+    padding: 1 2 0 2;
+}
+BetaHomeScreen #setup-notes { width: 100%; max-height: 5; }
+BetaHomeScreen #beta-content { width: 1fr; height: 1fr; align: center top; }
+BetaHomeScreen #beta-column { width: 100%; height: 1fr; }
+BetaHomeScreen #beta-heading {
+    height: 1;
+    margin: 1 0;
+    color: $muted;
+    background: transparent;
+}
+BetaHomeScreen #beta-card {
+    width: 100%;
+    /* A single text row needs an odd-height outline to be truly centred.
+       Keep the extra breathing room outside, not below the text inside. */
+    height: 3;
+    margin-bottom: 1;
+    border: round $rule;
+    background: $recessed;
+    padding: 0 1;
+    align-vertical: middle;
+}
+BetaHomeScreen #beta-mode, BetaHomeScreen #beta-submit {
+    height: 1;
+    min-height: 1;
+    width: auto;
+    min-width: 6;
+    border: none;
+    padding: 0 1;
+    margin: 0;
+    background: transparent;
+    background-tint: transparent;
+    tint: transparent;
+    color: $accent;
+    text-style: bold;
+    content-align: center middle;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+BetaHomeScreen #beta-mode { max-width: 32; border-right: solid $rule; }
+BetaHomeScreen #beta-submit { border-left: solid $rule; }
+BetaHomeScreen #beta-clear {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    background-tint: transparent;
+    tint: transparent;
+    color: $muted;
+    content-align: center middle;
+    visibility: hidden;
+}
+BetaHomeScreen #beta-clear.has-query { visibility: visible; }
+BetaHomeScreen #beta-clear:hover, BetaHomeScreen #beta-clear:focus {
+    background: $highlight;
+    color: $foreground;
+    tint: transparent;
+}
+BetaHomeScreen #beta-mode:hover, BetaHomeScreen #beta-submit:hover,
+BetaHomeScreen #beta-mode:focus, BetaHomeScreen #beta-submit:focus {
+    background: $highlight;
+    tint: transparent;
+}
+BetaHomeScreen #beta-card #filter, BetaHomeScreen #beta-card #filter:focus {
+    width: 1fr;
+    min-width: 6;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 2;
+    margin: 0;
+    background: transparent;
+    background-tint: transparent;
+}
+BetaHomeScreen #filter > .input--placeholder {
+    color: $muted;
+    text-style: none;
+}
+BetaHomeScreen #beta-hint {
+    height: 1;
+    margin-top: 1;
+    color: $dim;
+    background: transparent;
+}
+BetaHomeScreen #beta-summary, BetaHomeScreen #beta-empty {
+    height: auto;
+    margin-top: 1;
+    color: $muted;
+    background: transparent;
+}
+BetaHomeScreen #beta-summary { height: 1; }
+BetaHomeScreen #beta-results, BetaHomeScreen #beta-results:focus {
+    width: 100%;
+    height: 1fr;
+    min-height: 1;
+    background: transparent;
+    background-tint: transparent;
+    border: none;
+    padding: 0;
+}
+BetaHomeScreen.compact #beta-heading, BetaHomeScreen.compact #beta-hint { display: none; }
+BetaHomeScreen.compact #beta-card { margin-bottom: 0; }
+BetaHomeScreen.compact #setup-notes { max-height: 2; }
+BetaHomeScreen.narrow #beta-mode { max-width: 18; }
+BetaHomeScreen.narrow #beta-card #filter,
+BetaHomeScreen.narrow #beta-card #filter:focus { padding-left: 1; padding-right: 1; }
 
 /* -------------------------------------------------------------- selection */
 OptionList, SelectionList, DataTable {

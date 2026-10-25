@@ -56,6 +56,8 @@ from .manifest_sources import (
     validate_bundle,
     with_subtitle_sources,
 )
+from .naming import clean_part
+from .output_paths import safe_folder_component
 from .playback import DrmInfo, Playback, SubtitleReference
 from .secureio import atomic_write_text
 from .titles import Title, TitleKind
@@ -945,11 +947,21 @@ def scan(folder: Path) -> list[tuple[Path, Document | None, str]]:
     return found
 
 
-def file_name(document: Document, when: datetime | None = None) -> str:
-    """What to call the file: the first title, and when the run happened."""
+def file_name(document: Document, when: datetime | None = None, *, batch: bool = False) -> str:
+    """Name a batch for its series, never for the first episode in it."""
     stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
     first = document.entries[0].save_name if document.entries else ""
     stem = first or document.service or "export"
+    if batch or len(document.entries) > 1:
+        names = {
+            entry.title.name.strip().casefold(): entry.title.name
+            for entry in document.entries
+            if entry.title is not None and entry.title.name.strip()
+        }
+        complete = all(entry.title is not None and entry.title.name.strip() for entry in document.entries)
+        series = next(iter(names.values())) if complete and len(names) == 1 else ""
+        stem = clean_part(series) if series else f"{clean_part(document.service) or 'export'}.Batch"
+        stem = safe_folder_component(stem, fallback="export.Batch")
     return f"{stem}_{stamp}.json"
 
 

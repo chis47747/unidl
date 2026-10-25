@@ -232,6 +232,19 @@ class StorageManagerScreen(Screen[None]):
         self.rebuild()
         self.query_one("#storage-list", OptionList).focus()
 
+    def focus_setting(self, key: str) -> None:
+        """Reveal a searched setting using this manager's existing validation."""
+        for tab, rows in (("output", _OUTPUT_ROWS), ("naming", _NAMING_ROWS), ("advanced", _ADVANCED_ROWS)):
+            if any(row.key == key for row in rows):
+                self._tab = tab
+                self.query_one("#storage-tabs", Tabs).active = f"storage-tab-{tab}"
+                self.rebuild()
+                self.query_one("#storage-list", OptionList).highlighted = next(
+                    index for index, row in enumerate(self._rows) if row.key == key
+                )
+                self.query_one("#storage-list", OptionList).scroll_to_highlight()
+                return
+
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
         self.query_one("#masthead", Static).update(tr("storage.title"))

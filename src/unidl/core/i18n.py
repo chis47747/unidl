@@ -900,6 +900,10 @@ def setting_value(spec: Any, scope: Any) -> str:
     }:
         return phrase("open manager")
     value = scope.get(spec.key)
+    if getattr(spec, "kind", "") == "multi":
+        chosen = tuple(value or ())
+        labels = [option_label(spec, option) for option in spec.options if option.value in chosen]
+        return ", ".join(labels) if labels else tr("value.none")
     for option in getattr(spec, "options", ()) or ():
         if option.value == value:
             return option_label(spec, option)

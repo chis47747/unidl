@@ -259,6 +259,7 @@ class UnidlApp(App):
     CSS = CSS
     TITLE = "unidl"
     COMMANDS = {UnidlCommands}
+    DEFAULT_MODE = "home"
 
     BINDINGS = [
         ("ctrl+q", "global_quit", "Quit"),
@@ -282,6 +283,7 @@ class UnidlApp(App):
         self._registry_identity = id(self.registry)
         self.settings_store = SettingsStore(self.config.paths.home / "settings.json")
         self.globals = global_settings(self.settings_store, config=self.config)
+        self._home_interface_modes: dict[bool, str] = {}
         self._registered_service_ids, self._home_service_ids = service_catalog.ensure_state(
             self.settings_store, (service.ID for service in self.registry.all())
         )
@@ -313,6 +315,14 @@ class UnidlApp(App):
     def register_session(self, controller) -> None:
         self._session_controllers[id(controller)] = controller
 
+    def on_mount(self) -> None:
+        # Keep initial composition on Textual's get_default_screen path, which
+        # puts the root on its stack before mounting children. In Textual 8.2,
+        # a pre-registered named mode mounts its children first; run_async's
+        # eager tasks then let Input access an empty stack. Register only after
+        # startup so switch_mode can safely return to this already-mounted root.
+        self.add_mode(self.DEFAULT_MODE, self.get_default_screen)
+
     def exit(self, *args, **kwargs):  # noqa: D102 - Textual lifecycle override
         self.abort_sessions()
         return super().exit(*args, **kwargs)
@@ -331,7 +341,28 @@ class UnidlApp(App):
 
     def get_default_screen(self) -> HomeScreen:
         # HomeScreen is the bottom of the stack, so pop_screen is always safe
+        if self.globals.get("beta_interface", False):
+            from .beta_home import BetaHomeScreen
+
+            return BetaHomeScreen()
         return HomeScreen()
+
+    def refresh_home_interface(self) -> None:
+        """Switch the root only while home is active, never interrupt a session."""
+        from .beta_home import BetaHomeScreen
+
+        if len(self.screen_stack) != 1 or not isinstance(self.screen, HomeScreen):
+            return
+        wanted = bool(self.globals.get("beta_interface", False))
+        current = isinstance(self.screen, BetaHomeScreen)
+        self._home_interface_modes.setdefault(current, self.current_mode)
+        if wanted != current:
+            mode = self._home_interface_modes.get(wanted)
+            if mode is None:
+                mode = "home-beta" if wanted else "home-classic"
+                self.add_mode(mode, BetaHomeScreen if wanted else HomeScreen)
+                self._home_interface_modes[wanted] = mode
+            self.switch_mode(mode)
 
     def on_resize(self, event) -> None:
         """Trade the spacing for the content when the window is short.
@@ -905,7 +936,7 @@ class UnidlApp(App):
         current = self.screen
         service = getattr(current, "service", None)
         service_id = str(getattr(service, "ID", "") or "")
-        initial = current.key_candidate if isinstance(current, GlobalSearchScreen) else ""
+        initial = str(getattr(current, "key_candidate", "") or "")
 
         def _after(result: AddKeysResult | None) -> None:
             if result is None:

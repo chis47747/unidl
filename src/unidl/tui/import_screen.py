@@ -24,6 +24,7 @@ silently ignores what you just put in it is a folder you stop trusting.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -31,11 +32,13 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import OptionList, Static
+from textual.widgets import OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import exports
 from ..core.i18n import tr
+from .askhost import join_fitted
+from .asks import _ConfirmingSelectionList
 from .bidi import visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 
@@ -226,4 +229,153 @@ class ImportScreen(Screen[None]):
         self.app.open_path(folder)
 
 
-__all__ = ["ImportScreen"]
+class ExportEntryScreen(Screen[None]):
+    """Choose which titles in one export file should enter delivery.
+
+    ``SelectionList`` gives the export flow the same keyboard contract as every
+    other multi-pick in UniDL: Space toggles one row, ``a`` selects all, ``n``
+    clears the list, and Enter confirms. With no boxes ticked, Enter means the
+    highlighted row, which keeps the common one-title action a single keypress.
+    """
+
+    DEFAULT_CSS = """
+    #import-entry-head { height: 2; padding: 1 2 0 2; }
+    #import-entry-note { height: 1; padding: 0 2; }
+    #import-entry-list { height: 1fr; padding: 0 1; }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+b", "app.global_back", "Back", show=False),
+        Binding("escape", "app.global_quit", "Quit", show=False),
+        Binding("enter", "confirm", "Open selected", show=True),
+    ]
+
+    def __init__(self, document: exports.Document, *, source_name: str = "") -> None:
+        super().__init__()
+        self.document = document
+        self.source_name = source_name
+
+    def compose(self) -> ComposeResult:
+        yield Chrome(can_go_back=True, show_settings=False)
+        yield Static("", id="import-entry-head")
+        yield Static("", id="import-entry-note")
+        yield _ConfirmingSelectionList(
+            *[
+                (
+                    self._entry_markup(index, entry),
+                    index,
+                    False,
+                )
+                for index, entry in enumerate(self.document.entries)
+            ],
+            id="import-entry-list",
+        )
+        yield KeyBar(
+            ("space", "select / clear"),
+            ("a", "select all"),
+            ("n", "clear all"),
+            ("enter", "open selected"),
+            ("^b", "back to exports"),
+            ("esc", "quit"),
+        )
+
+    @staticmethod
+    def _entry_markup(index: int, entry: exports.Entry) -> str:
+        detail: list[str] = []
+        if entry.summary:
+            detail.append(entry.summary)
+        if entry.keys:
+            detail.append(tr("import.keys_n", count=len(entry.keys)))
+        if entry.chapters:
+            detail.append(tr(
+                "chapters.count.one" if len(entry.chapters) == 1 else "chapters.count.other",
+                count=len(entry.chapters),
+            ))
+        suffix = f"  [$dim]{_esc('  ·  '.join(detail))}[/]" if detail else ""
+        return f"  [$accent]{index + 1}.[/]  {_esc(_fit(entry.label()))}{suffix}"
+
+    def on_mount(self) -> None:
+        option_list = self.query_one("#import-entry-list", SelectionList)
+        if option_list.option_count:
+            option_list.highlighted = 0
+            option_list.focus()
+        self._render_head()
+
+    def relocalize(self) -> None:
+        refresh_locale_widgets(self)
+        self._render_head()
+
+    def on_resize(self) -> None:
+        # ``join_fitted`` depends on the available width. Rebuild both status
+        # lines after a terminal resize just like AskHost re-fits its identity and
+        # parameter rows, rather than leaving a line measured for the old width.
+        if self.is_mounted:
+            self._render_head()
+
+    def _list(self) -> _ConfirmingSelectionList:
+        return self.query_one("#import-entry-list", _ConfirmingSelectionList)
+
+    def _render_head(self) -> None:
+        # Headings in the service/session screens are fitted as whole segments;
+        # doing the same here prevents a translated service name or a narrow
+        # terminal from painting past the right edge. The title and count are the
+        # useful part, so the separator is dropped first if necessary.
+        head = join_fitted(
+            [
+                (
+                    f"[$accent]{_esc(tr('import.head'))}  ·  {_esc(tr('keys.choose'))}[/]",
+                    f"{tr('import.head')}  ·  {tr('keys.choose')}",
+                ),
+                (
+                    f"[$foreground]{_esc(tr('delivery.titles_n', count=len(self.document.entries)))}[/]",
+                    tr("delivery.titles_n", count=len(self.document.entries)),
+                ),
+            ],
+            self.size.width,
+            "  [$dim]·[/]  ",
+        )
+        self.query_one("#import-entry-head", Static).update(head)
+        selected = len(self._list().selected) if self.is_mounted else 0
+        source = self.source_name or self.document.service_name or self.document.service
+        note = join_fitted(
+            [
+                (f"[$muted]{_esc(source)}[/]", source),
+                (
+                    f"[$muted]{_esc(tr('ask.multi.selected', picked=selected, total=len(self.document.entries)))}[/]",
+                    tr("ask.multi.selected", picked=selected, total=len(self.document.entries)),
+                ),
+                (
+                    f"[$muted]{_esc(tr('ask.multi.keys', enter=tr('ask.multi.enter_confirm')))}[/]",
+                    tr("ask.multi.keys", enter=tr("ask.multi.enter_confirm")),
+                ),
+            ],
+            self.size.width,
+            "  [$dim]·[/]  ",
+        )
+        self.query_one("#import-entry-note", Static).update(note)
+
+    def on_selection_list_selected_changed(self, event: SelectionList.SelectedChanged) -> None:
+        event.stop()
+        self._render_head()
+
+    def on__confirming_selection_list_confirmed(
+        self, event: _ConfirmingSelectionList.Confirmed
+    ) -> None:
+        event.stop()
+        self.action_confirm()
+
+    def action_confirm(self) -> None:
+        entries = self._list()
+        selected = [int(value) for value in entries.selected]
+        if not selected:
+            highlighted = entries.highlighted
+            if highlighted is None:
+                self.notify("Select at least one title", severity="warning", timeout=3)
+                return
+            selected = [int(entries.get_option_at_index(highlighted).value)]
+        chosen = [self.document.entries[index] for index in selected]
+        if not self.app.open_import(replace(self.document, entries=chosen)):
+            return
+
+
+__all__ = ["ExportEntryScreen", "ImportScreen"]

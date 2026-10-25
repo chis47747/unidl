@@ -657,6 +657,9 @@ def service_license_settings(config: Any = None, *, custom_license: bool = False
 
 
 #: App-wide settings, editable from the main screen and inside any service.
+BETA_AUTO_RESULT_TYPES = ("services", "exports", "vault", "settings", "justwatch", "catalog", "url")
+
+
 GLOBAL_SETTINGS: list[Setting] = [
     Setting(
         "download_manager",
@@ -827,6 +830,28 @@ GLOBAL_SETTINGS: list[Setting] = [
         "Language of UniDL's own labels, prompts and settings. Service names, "
         "titles, URLs and API locales are not translated. Follow the system reads "
         "LC_ALL, LC_MESSAGES, then LANG.",
+        visible=False,
+    ),
+    Setting(
+        "beta_interface",
+        "Beta interface",
+        "bool",
+        default=False,
+        help="Use the experimental search-first home. The classic home remains the default. Takes effect on returning home; active sessions are not interrupted.",
+        visible=False,
+    ),
+    Setting(
+        "beta_auto_results",
+        "Beta home Auto result types",
+        "multi",
+        options=[Option(value, label) for value, label in (
+            ("services", "Services"), ("exports", "Export files"),
+            ("vault", "Local vault keys"), ("settings", "Settings"),
+            ("justwatch", "JustWatch"), ("catalog", "Search within a service"),
+            ("url", "Link matching"),
+        )],
+        default=BETA_AUTO_RESULT_TYPES,
+        help="Choose which result types appear and are searched automatically on the beta home in Auto mode. All are enabled by default; an empty selection disables all Auto results. Explicit search modes remain available. Remote vault searches still require an explicit action.",
         visible=False,
     ),
     _choice(

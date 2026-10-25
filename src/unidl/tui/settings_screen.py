@@ -181,7 +181,7 @@ class _MultiChoiceEditor(_Editor):
             role = "accent" if checked else "muted"
             options.add_option(
                 Option(
-                    f"  [${role}]{mark}[/]  {visual_markup(item.display())}",
+                    f"  [${role}]{visual_markup(mark)}[/]  {visual_markup(option_label(self.setting, item))}",
                     id=f"value-{index}",
                 )
             )
@@ -388,7 +388,7 @@ class SettingsScreen(Screen):
     def action_noop(self) -> None:
         """Footer-only hint; Enter is handled by the focused list."""
 
-    def __init__(self, service: Service | None, globals_scope: Settings):
+    def __init__(self, service: Service | None, globals_scope: Settings, *, focus_key: str = ""):
         super().__init__()
         self.service = service
         self.globals = globals_scope
@@ -398,6 +398,8 @@ class SettingsScreen(Screen):
         #: whether the list was last built with the blank rows between settings
         self._roomy = True
         self._label_width = 0
+        self._focus_key = focus_key
+        self._search_key = focus_key
 
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
@@ -506,7 +508,7 @@ class SettingsScreen(Screen):
             option_list.add_option(Option("", disabled=True))
 
         def add_section(name: str, specs: list[Setting], scope: Settings, note: str = "") -> None:
-            visible_specs = [spec for spec in specs if spec.visible]
+            visible_specs = [spec for spec in specs if spec.visible or spec.key == self._search_key]
             if not visible_specs:
                 return
             self._rows.append(None)
@@ -579,8 +581,15 @@ class SettingsScreen(Screen):
             ),
             None,
         )
+        if self._focus_key:
+            found = next(
+                (index for index in settings_rows if self._rows[index][0].key == self._focus_key),
+                found,
+            )
+            self._focus_key = ""
         if found is not None:
             option_list.highlighted = found
+            option_list.scroll_to_highlight()
         elif settings_rows:
             option_list.highlighted = settings_rows[0]
 
@@ -793,7 +802,7 @@ class SettingsScreen(Screen):
                 "interface": (
                     "settings.group.interface",
                     "settings.group.interface_help",
-                    ("theme", "interface_locale", "debug"),
+                    ("theme", "interface_locale", "beta_interface", "beta_auto_results", "debug"),
                 ),
             }
             title, description, keys = groups[spec.picker]
