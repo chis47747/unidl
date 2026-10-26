@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,7 +20,7 @@ from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
 from ..core import exports
-from ..core.i18n import cell_width, setting_help, setting_label, tr
+from ..core.i18n import cell_width, load_catalogue, setting_help, setting_label, tr
 from ..core.service import Service
 from ..core.settings import BETA_AUTO_RESULT_TYPES, TRACK_SETTINGS
 from ..core.vault import KeyRecord, hex_ids, normalize_hex, split_pair
@@ -36,10 +37,6 @@ COMMANDS = {
     "vault": "vault", "settings": "settings",
     "addkeys": "add_keys", "add": "add_keys",
     "exports": "exports", "export": "exports",
-}
-STORAGE_KEYS = {
-    "download_dir", "filename_style", "name_template_episode", "episode_folder_template",
-    "name_template_movie", "release_template", "release_tag",
 }
 PAGE_SIZE = 8
 AUTO_EXPORT_LIMIT = 3
@@ -91,6 +88,8 @@ class SettingHit:
     help: str
     scope: str
     service: type[Service] | None = None
+    aliases: tuple[str, ...] = ()
+    target: tuple[str, str] | None = None
 
     @property
     def identity(self) -> tuple[str, str, str]:
@@ -99,13 +98,82 @@ class SettingHit:
 
 def setting_index(app) -> list[SettingHit]:
     """Declaration metadata only: no account, setting value or client access."""
+    from .justwatch_settings import JUSTWATCH_SETTING_ROWS
+    from .proxy_manager import PROXY_ROUTING_ROWS
+    from .resource_manager import VAULT_POLICY_FIELDS
+    from .service_manager import SERVICE_MANAGER_ITEMS
+    from .settings_group import SETTINGS_GROUPS
+    from .storage_manager import STORAGE_TABS
+
+    english = load_catalogue("en")
+
+    def aliases(*texts: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(text for text in texts if text))
+
+    def spec_hit(spec, scope: str, service=None) -> SettingHit:
+        return SettingHit(spec.key, setting_label(spec), setting_help(spec), scope, service,
+                          aliases(spec.label, english.get(f"setting.{spec.key}", "")))
+
     hits = []
     for spec in app.globals.specs:
         if spec.key not in {"download_location_confirmed", "license_after_tracks"}:
-            hits.append(SettingHit(spec.key, setting_label(spec), setting_help(spec), "global"))
+            hits.append(spec_hit(spec, "global"))
+
+    def manager_hit(key: str, label_id: str, help_text: str, target: tuple[str, str], *names: str) -> None:
+        # Replace the same global setting, preserving its old UI/English names.
+        # Page-only actions receive an entry without inventing a persisted setting.
+        previous = next((hit for hit in hits if hit.scope == "global" and hit.key == key), None)
+        label = tr(label_id, default=english.get(label_id, key))
+        hit = SettingHit(
+            key, label, help_text or (previous.help if previous else ""), "global",
+            aliases=aliases(label, english.get(label_id, ""), *names,
+                            previous.label if previous else "", *(previous.aliases if previous else ())),
+            target=target,
+        )
+        if previous is not None:
+            hits[hits.index(previous)] = hit
+        else:
+            hits.append(hit)
+
+    for ident, key in SERVICE_MANAGER_ITEMS:
+        title_id = f"service.{ident}.title"
+        manager_hit(key, f"service.{ident}.action", tr(f"service.{ident}.help"),
+                    ("services", ident), tr(title_id, default=""), english.get(title_id, ""))
+    for rows in STORAGE_TABS.values():
+        for row in rows:
+            manager_hit(row.key, f"storage.row.{row.key}",
+                        tr(f"storage.row.{row.key}.help", default=row.help),
+                        ("storage", row.key), row.label)
+    for key, label_id in JUSTWATCH_SETTING_ROWS:
+        manager_hit(key, label_id, "", ("justwatch", key))
+    for key, _kind, label_id in PROXY_ROUTING_ROWS:
+        manager_hit(key, label_id, tr("proxy.help.routing"), ("proxy", key))
+    for tab in ("endpoints", "providers"):
+        manager_hit(f"proxy_{tab}", f"proxy.tab.{tab}", tr(f"proxy.help.{tab}"), ("proxy", tab))
+    for key, label_id, target in (
+        ("drm_system", "resource.row.drm", "drm-system"),
+        ("cdm_rules", "resource.row.rules", "cdm-rules"),
+        ("cdm_device", "setting.cdm_any", "cdm-choice"),
+        ("local_cdm_files", "resource.row.local_files", "cdm-local"),
+        ("cdm_devices", "resource.tab.cdm", "cdm"),
+        ("key_vaults", "resource.tab.vault", "vault"),
+        ("vault_policy", "resource.policy.title", "policy"),
+    ):
+        help_id = "resource.policy.help" if target == "policy" else f"resource.help.{'vault' if target == 'vault' else 'cdm'}"
+        manager_hit(key, label_id, tr(help_id), ("resources", target))
+
+    for key, label_id, _widget in VAULT_POLICY_FIELDS:
+        manager_hit(key, label_id, tr("resource.policy.help"), ("vault_policy", key))
+
+    for group, (_title, _help, keys) in SETTINGS_GROUPS.items():
+        for key in keys:
+            previous = next((hit for hit in hits if hit.scope == "global" and hit.key == key), None)
+            if previous is not None:
+                manager_hit(key, f"setting.{key}", previous.help, (group, key))
+
     shared = {spec.key for spec in TRACK_SETTINGS}
     for spec in TRACK_SETTINGS:
-        hits.append(SettingHit(spec.key, setting_label(spec), setting_help(spec), "shared"))
+        hits.append(spec_hit(spec, "shared"))
     for service in app.services:
         # Use the framework's declaration builder without a Config or a client.
         # Include generated CDM/cookie/proxy/licence fields without enumerating
@@ -117,26 +185,36 @@ def setting_index(app) -> list[SettingHit]:
             # Provider-specific overrides retain their own labelled result.
             if spec.key in shared and any(spec is item for item in TRACK_SETTINGS):
                 continue
-            hits.append(SettingHit(
-                spec.key, setting_label(spec), setting_help(spec), "service", service,
-            ))
+            hits.append(spec_hit(spec, "service", service))
     return hits
 
 
 def find_settings(index: list[SettingHit], query: str) -> list[SettingHit]:
-    if not query.strip():
+    def normalize(text: str) -> str:
+        return re.sub(r"[\W_]+", " ", text.casefold()).strip()
+
+    needle = normalize(query)
+    if not needle:
         return []
-    result = [
-        hit for hit in index
-        if matches(query, hit.key, hit.label, hit.help,
-                   hit.service.NAME if hit.service else "",
-                   hit.service.ID if hit.service else "")
-    ]
-    needle = query.casefold()
-    return sorted(result, key=lambda hit: (
-        0 if needle in {hit.key.casefold(), hit.label.casefold()} else 1,
-        hit.scope != "global", hit.label.casefold(), hit.key,
-    ))
+    terms = needle.split()
+
+    def rank(hit: SettingHit) -> int:
+        label, key = normalize(hit.label), normalize(hit.key)
+        names = [normalize(name) for name in hit.aliases]
+        if needle in {label, key}:
+            return 0
+        if needle in names:
+            return 1
+        if any(all(term in name for term in terms) for name in (label, key, *names)):
+            return 2
+        haystack = normalize(" ".join((hit.label, hit.key, *hit.aliases, hit.help,
+                                      hit.service.NAME if hit.service else "",
+                                      hit.service.ID if hit.service else "")))
+        return 3 if all(term in haystack for term in terms) else 4
+
+    ranked = [(rank(hit), hit) for hit in index]
+    ranked.sort(key=lambda item: (item[0], item[1].scope != "global", item[1].label.casefold(), item[1].key))
+    return [hit for score, hit in ranked if score < 4]
 
 
 class _ChoicePicker(ModalScreen[object | None]):
@@ -629,7 +707,14 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         return find_settings(self._index, query)
 
     def _setting_row(self, hit: SettingHit) -> _Result:
+        manager_labels = {
+            "services": "settings.services.title", "storage": "storage.title",
+            "justwatch": "justwatch.title", "proxy": "proxy.title", "resources": "resource.title",
+            "download_behavior": "settings.group.download", "interface": "settings.group.interface",
+            "vault_policy": "resource.policy.title",
+        }
         scope = hit.service.NAME if hit.service else tr(
+            manager_labels[hit.target[0]] if hit.target else
             "beta.shared" if hit.scope == "shared" else "settings.global",
         )
         return _Result("setting", hit.label, f"{scope} · {hit.key}", setting=hit)
@@ -1020,12 +1105,40 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
     def _open_setting(self, hit: SettingHit, service_cls: type[Service] | None = None) -> None:
         from .settings_screen import SettingsScreen
 
-        if service_cls is None and hit.key in STORAGE_KEYS:
-            from .storage_manager import StorageManagerScreen
+        if service_cls is None and hit.target is not None:
+            manager, key = hit.target
+            if manager == "services":
+                from .service_manager import ServicesManagerScreen
 
-            screen = StorageManagerScreen(self.app.globals)
+                screen = ServicesManagerScreen(self.app.globals, focus_key=key)
+            elif manager == "storage":
+                from .storage_manager import StorageManagerScreen
+
+                screen = StorageManagerScreen(self.app.globals)
+            elif manager == "justwatch":
+                from .justwatch_settings import JustWatchSettingsScreen
+
+                screen = JustWatchSettingsScreen(self.app.globals)
+            elif manager == "proxy":
+                from .proxy_manager import ProxyManagerScreen
+
+                screen = ProxyManagerScreen(self.app.globals)
+            elif manager in {"download_behavior", "interface"}:
+                from .settings_group import SETTINGS_GROUPS, SettingsGroupScreen
+
+                title, description, keys = SETTINGS_GROUPS[manager]
+                screen = SettingsGroupScreen(self.app.globals, title, description, keys)
+            elif manager == "vault_policy":
+                from .resource_manager import VaultPolicyScreen
+
+                screen = VaultPolicyScreen(self.app.globals)
+            else:
+                from .resource_manager import ResourceManagerScreen
+
+                screen = ResourceManagerScreen()
             self.app.push_screen(screen)
-            screen.call_after_refresh(screen.focus_setting, hit.key)
+            if manager != "services":
+                screen.call_after_refresh(screen.focus_setting, key)
             return
         service = None
         if service_cls is not None:

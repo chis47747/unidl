@@ -160,6 +160,19 @@ Existing SRT/VTT and audio/video inputs keep their normal path.
 
 ## ASS/SSA subtitle inputs
 
+Service-owned API subtitle preparation participates in the shared download
+frame before native media transfer. Core observes selected sidecar rows and
+their prepared files; it does not parse service log text to invent percentages.
+Legacy hooks retain their transport and conversion behavior and display an
+active/unknown progress state until file preparation succeeds. A service may
+implement `prepare_download_with_progress(playback, log, progress)` and call
+`progress(reference, received_bytes, total_bytes)` for measured byte progress;
+use `None` for an unknown total. Core publishes completion only after the file
+exists and has been added to `Playback.mux_imports`. Keep language, name, kind,
+and forced/original flags on each import so identical-language tracks remain
+distinct. Completed subtitle rows survive the handoff to native video/audio
+progress. Command, list, and export modes do not download sidecars.
+
 ASS/SSA tracks retain their input extensions, including codec-only JSON tracks.
 Content-based recognition handles ASS/SSA text mislabeled as TTML or WebVTT
 without treating header-like dialogue as a script. Recognized empty subtitle

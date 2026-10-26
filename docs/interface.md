@@ -136,6 +136,14 @@ typed progress events instead of ANSI frames or one printed line per update, so
 the log is left holding what it is for: messages, selected tracks, output paths
 and errors.
 
+### Jump to the bottom
+
+Scrollable track pickers, selected-track details, batch queues and logs show a
+small `▼` at the bottom of their viewport when more content remains below.
+Click it to jump to the end of that panel; it does not change track selections
+or start a download. The mark disappears at the end. In the log, clicking it
+also clears that log's text selection and resumes following new messages.
+
 ## Chrome
 
 The same bar is in the same place on every screen. Home omits Back because it is

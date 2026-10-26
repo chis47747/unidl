@@ -179,6 +179,24 @@ class SelectableLog(RichLog):
         if not self.has_selection:
             self.auto_scroll = True
 
+    def jump_to_bottom(self) -> None:
+        """Explicitly leave log inspection and follow new output again."""
+        if not self.is_attached:
+            return
+        self._stop_drag_scroll()
+        self._drag_anchor = self._drag_pointer = None
+        self._drag_moved = False
+        if self.app.mouse_captured is self:
+            self.release_mouse()
+        # Clear only this log's selection, not selections in other panels.
+        self.screen.selections = {
+            widget: selection for widget, selection in self.screen.selections.items()
+            if widget is not self
+        }
+        self._follow_paused = False
+        self.auto_scroll = True
+        self.scroll_end(animate=False, immediate=True, x_axis=False)
+
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         # Shift/Ctrl-wheel is horizontal in Textual and does not mean the user is
         # inspecting older log rows.

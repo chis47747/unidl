@@ -34,6 +34,7 @@ from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
 from .logline import LIVE_STATE, LogLine, status_line
 from .logpane import SelectableLog
+from .scroll_tail import ScrollTail
 
 if TYPE_CHECKING:
     from textual.timer import Timer
@@ -225,18 +226,21 @@ class AskHost(Screen):
                     # and beside it, the one thing people do with a whole log:
                     # take it somewhere else to ask about it
                     yield StatusChip("share_log", id="log-share")
-                yield SelectableLog(
-                    highlight=False,
-                    markup=False,
-                    wrap=True,
-                    max_lines=LOG_LIMIT,
-                    # RichLog renders at 78 columns unless told otherwise, so on a
-                    # narrower pane the far end of a long line was cropped and left
-                    # reachable only by scrolling sideways - which is how a save
-                    # name wrapped onto a second row while the manifest URL beside
-                    # it silently lost its tail. Zero means "the width there is",
-                    # and then a long value folds like everything else.
-                    min_width=0,
+                yield ScrollTail(
+                    SelectableLog(
+                        highlight=False,
+                        markup=False,
+                        wrap=True,
+                        max_lines=LOG_LIMIT,
+                        # RichLog renders at 78 columns unless told otherwise, so on a
+                        # narrower pane the far end of a long line was cropped and left
+                        # reachable only by scrolling sideways - which is how a save
+                        # name wrapped onto a second row while the manifest URL beside
+                        # it silently lost its tail. Zero means "the width there is",
+                        # and then a long value folds like everything else.
+                        min_width=0,
+                    ),
+                    classes="log-tail",
                 )
         yield KeyBar(*self.key_hints())
 

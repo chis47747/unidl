@@ -29,6 +29,11 @@ from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
 
+PROXY_ROUTING_ROWS = (
+    ("proxy", "route", "proxy.row.route"),
+    ("proxy_downloads", "download", "proxy.row.downloads"),
+)
+
 
 @dataclass(frozen=True)
 class ProxyRow:
@@ -468,6 +473,18 @@ class ProxyManagerScreen(Screen[None]):
         self.rebuild()
         self.query_one("#proxy-list", OptionList).focus()
 
+    def focus_setting(self, key: str) -> None:
+        route = next((kind for setting, kind, _label in PROXY_ROUTING_ROWS if setting == key), "")
+        tab = "routing" if route else key if key in {"endpoints", "providers"} else self._tab
+        self._tab = tab
+        self.query_one("#proxy-tabs", Tabs).active = f"proxy-tab-{tab}"
+        self.rebuild()
+        options = self.query_one("#proxy-list", OptionList)
+        if route:
+            options.highlighted = next(index for index, row in enumerate(self._rows) if row.kind == route)
+            options.scroll_to_highlight()
+        options.focus()
+
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
         self.query_one("#masthead", Static).update(tr("proxy.title"))
@@ -482,10 +499,7 @@ class ProxyManagerScreen(Screen[None]):
 
     def _tab_rows(self) -> list[ProxyRow]:
         if self._tab == "routing":
-            return [
-                ProxyRow("route", tr("proxy.row.route")),
-                ProxyRow("download", tr("proxy.row.downloads")),
-            ]
+            return [ProxyRow(kind, tr(label)) for _key, kind, label in PROXY_ROUTING_ROWS]
         if self._tab == "endpoints":
             entries = self.app.config.raw.get("proxies") or {}
             return [ProxyRow("endpoint", str(name), value) for name, value in entries.items()] if isinstance(entries, dict) else []

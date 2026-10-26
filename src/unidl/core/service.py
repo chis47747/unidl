@@ -32,7 +32,7 @@ from .flow import SCOPE_ROOT, Ask, Back, Choice, Field, FlowContext
 from .helpers import Helper, HelperReport, HelperResolver, HelperRunner, load_module
 from .naming import save_name_for
 from .partner import PartnerAuthorization, PartnerAuthorizationResult
-from .playback import DrmInfo, Playback
+from .playback import DrmInfo, Playback, SubtitleReference
 from .settings import (
     TRACK_SETTINGS,
     Setting,
@@ -1351,6 +1351,22 @@ class Service:
         only its selected references here when a file will actually be fetched.
         """
         del playback, log
+
+    def prepare_download_with_progress(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+        progress: Callable[[SubtitleReference, int, int | None], None],
+    ) -> None:
+        """Optional byte progress for service-owned subtitle preparation.
+
+        Call progress(reference, received_bytes, total_bytes) while fetching.
+        Omit the total when unknown. Completion is recorded by Core only after
+        the prepared file is added to playback.mux_imports. The default keeps
+        existing service transports and conversions unchanged.
+        """
+        del progress
+        self.prepare_download(playback, log)
 
     def release_playback(self, playback: Playback, log: Callable[[str], None]) -> None:
         """Release service-owned playback resources after one job.

@@ -567,6 +567,19 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
             self.action_cancel()
 
 
+VAULT_POLICY_FIELDS = (
+    ("local_vault", "resource.policy.local", "resource-policy-local"),
+    ("remote_vault", "resource.policy.remote", "resource-policy-remote"),
+    ("remote_vault_home_search", "resource.policy.home_search", "resource-policy-home-search"),
+    ("remote_vault_manual_add", "resource.policy.manual_add", "resource-policy-manual-add"),
+    ("remote_vault_auto_store", "resource.policy.auto_store", "resource-policy-auto-store"),
+    ("remote_vault_auto_lookup", "resource.policy.auto_lookup", "resource-policy-auto-lookup"),
+    ("vault_read_targets", "resource.policy.read", "resource-policy-read-button"),
+    ("vault_write_targets", "resource.policy.write", "resource-policy-write-button"),
+    ("vault_search_targets", "resource.policy.search", "resource-policy-search-button"),
+)
+
+
 class VaultPolicyScreen(ModalScreen[bool]):
     """The old vault switches/target pickers, made one coherent policy panel."""
 
@@ -673,6 +686,11 @@ class VaultPolicyScreen(ModalScreen[bool]):
     def on_mount(self) -> None:
         self._refresh_labels()
         self.query_one("#resource-policy-local", Checkbox).focus()
+
+    def focus_setting(self, key: str) -> None:
+        widget_id = next((widget for setting, _label, widget in VAULT_POLICY_FIELDS if setting == key), "")
+        if widget_id:
+            self.query_one(f"#{widget_id}").focus()
 
     def _descriptors(self, kind: str):
         descriptors = vaults.configured_vaults(self.app.config)
@@ -824,6 +842,22 @@ class ResourceManagerScreen(Screen[None]):
     def on_mount(self) -> None:
         self.rebuild()
         self.query_one("#resource-list", OptionList).focus()
+
+    def focus_setting(self, key: str) -> None:
+        tab = "vault" if key in {"vault", "policy"} else "cdm"
+        self._tab = tab
+        self.query_one("#resource-tabs", Tabs).active = f"resource-tab-{tab}"
+        self.rebuild()
+        if key == "policy":
+            self.query_one("#resource-policy", Button).focus()
+            return
+        options = self.query_one("#resource-list", OptionList)
+        index = next((index for index, row in enumerate(self._rows)
+                      if row is not None and row.kind == key), None)
+        if index is not None:
+            options.highlighted = index
+            options.scroll_to_highlight()
+        options.focus()
 
     def relocalize(self) -> None:
         refresh_locale_widgets(self)

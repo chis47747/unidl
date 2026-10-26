@@ -17,6 +17,11 @@ from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .justwatch_screen import RegionScreen, SearchRegionScreen, regions_from, search_region_from
 from .settings_layout import label_width, setting_row
 
+JUSTWATCH_SETTING_ROWS = (
+    ("justwatch_search_region", "justwatch.catalogue"),
+    ("justwatch_regions", "justwatch.availability"),
+)
+
 
 class JustWatchSettingsScreen(Screen[None]):
     """Edit catalogue search and availability regions without conflating them."""
@@ -45,6 +50,14 @@ class JustWatchSettingsScreen(Screen[None]):
         self.rebuild()
         self.query_one("#justwatch-settings-list", OptionList).focus()
 
+    def focus_setting(self, key: str) -> None:
+        options = self.query_one("#justwatch-settings-list", OptionList)
+        for index, (setting_key, _label) in enumerate(JUSTWATCH_SETTING_ROWS):
+            if setting_key == key:
+                options.highlighted = index
+                options.scroll_to_highlight()
+                return
+
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
         self.query_one("#masthead", Static).update(tr("justwatch.title"))
@@ -64,12 +77,12 @@ class JustWatchSettingsScreen(Screen[None]):
             offer_summary = " + ".join(offer_names)
         rows = [
             (
-                tr("justwatch.catalogue"),
+                tr(JUSTWATCH_SETTING_ROWS[0][1]),
                 jw.region_label(region),
                 tr("justwatch.catalogue_help"),
             ),
             (
-                tr("justwatch.availability"),
+                tr(JUSTWATCH_SETTING_ROWS[1][1]),
                 offer_summary,
                 tr("justwatch.availability_help", count=len(offers)),
             ),

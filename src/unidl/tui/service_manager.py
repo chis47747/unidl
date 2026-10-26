@@ -19,6 +19,18 @@ from .bidi import visual_markup
 from .chrome import Chrome, KeyBar
 from .settings_layout import label_width, setting_row
 
+# Static declarations shared by the manager and Home's metadata-only search.
+SERVICE_MANAGER_ITEMS = (
+    ("chapters", "fetch_chapters"),
+    ("attachments", "fetch_attachments"),
+    ("bitrate", "fetch_actual_bitrate"),
+    ("license", "license_action"),
+    ("hybrid", "dolby_vision_hybrid"),
+    ("register", "register_service"),
+    ("home", "home_services"),
+    ("export", "export_manifest_type"),
+)
+
 
 class _ChapterPolicyScreen(ModalScreen[None]):
     """Toggle chapter metadata independently for each registered service."""
@@ -389,10 +401,11 @@ class _ExportManifestEditor(ModalScreen[None]):
 class ServicesManagerScreen(Screen[None]):
     BINDINGS = [Binding("ctrl+b", "back", "Back", show=False), Binding("escape", "back", "Quit", show=False), Binding("enter", "activate", "Change", show=True)]
 
-    def __init__(self, globals_scope: Settings):
+    def __init__(self, globals_scope: Settings, *, focus_key: str = ""):
         super().__init__()
         self.globals = globals_scope
-        self._rows = ("chapters", "attachments", "bitrate", "license", "hybrid", "register", "home", "export")
+        self._rows = tuple(ident for ident, _key in SERVICE_MANAGER_ITEMS)
+        self._focus_key = focus_key
         self._sources = []
 
     def compose(self) -> ComposeResult:
@@ -407,6 +420,10 @@ class ServicesManagerScreen(Screen[None]):
         self.rebuild()
         self._fit_help()
         self.query_one("#settings-group-list", OptionList).focus()
+        if self._focus_key in self._rows:
+            options = self.query_one("#settings-group-list", OptionList)
+            options.highlighted = self._rows.index(self._focus_key)
+            options.scroll_to_highlight()
 
     def on_resize(self) -> None:
         self._fit_help()
@@ -440,20 +457,18 @@ class ServicesManagerScreen(Screen[None]):
             == exports.MEDIA_MANIFEST
             for service_id in registered
         )
-        rows = [
-            ("chapters", tr('service.chapters.action', default='Chapter metadata by service'), f"[$dim]{tr('service.chapters.summary', default='Independent on/off per registered service')}[/]"),
-            ("attachments", tr('service.attachments.action', default='Title attachments by service'), f"[$dim]{tr('service.attachments.summary', default='Independent on/off per registered service')}[/]"),
-            ("bitrate", tr("service.bitrate.action"), f"[$dim]{tr('service.bitrate.summary')}[/]"),
-            ("license", tr('service.license.action', default='License action (global)'), f"[$dim]{setting_value(self.globals.spec_by_key['license_action'], self.globals)}[/]"),
-            ("hybrid", tr('service.hybrid.action', default='Dolby Vision + HDR10 hybrid output'), f"[$dim]{setting_value(self.globals.spec_by_key['dolby_vision_hybrid'], self.globals)}[/]"),
-            ("register", tr('service.register.action'), f"[$dim]{tr('service.register.summary', registered=count, available=len(self._sources))}[/]"),
-            ("home", tr('service.home.action'), f"[$dim]{tr('service.home.summary', shown=shown, registered=count)}[/]"),
-            (
-                "export",
-                tr('service.export.action'),
-                f"[$dim]{tr('service.export.summary', media=media, master=max(0, count - media))}[/]",
-            ),
-        ]
+        summaries = {
+            "chapters": tr("service.chapters.summary"),
+            "attachments": tr("service.attachments.summary"),
+            "bitrate": tr("service.bitrate.summary"),
+            "license": setting_value(self.globals.spec_by_key["license_action"], self.globals),
+            "hybrid": setting_value(self.globals.spec_by_key["dolby_vision_hybrid"], self.globals),
+            "register": tr("service.register.summary", registered=count, available=len(self._sources)),
+            "home": tr("service.home.summary", shown=shown, registered=count),
+            "export": tr("service.export.summary", media=media, master=max(0, count - media)),
+        }
+        rows = [(ident, tr(f"service.{ident}.action"), f"[$dim]{summaries[ident]}[/]")
+                for ident, _key in SERVICE_MANAGER_ITEMS]
         longest = label_width(label for _, label, _ in rows)
         for ident, label, value in rows:
             options.add_option(Option(setting_row(options, label, value, longest), id=ident))
@@ -461,17 +476,7 @@ class ServicesManagerScreen(Screen[None]):
         self._show_help(self._rows[options.highlighted or 0])
 
     def _show_help(self, ident: str) -> None:
-        keys = {
-            "chapters": "service.chapters.help",
-            "attachments": "service.attachments.help",
-            "bitrate": "service.bitrate.help",
-            "license": "service.license.help",
-            "hybrid": "service.hybrid.help",
-            "register": "service.register.help",
-            "home": "service.home.help",
-            "export": "service.export.help",
-        }
-        self.query_one("#settings-group-help", Static).update(tr(keys[ident]))
+        self.query_one("#settings-group-help", Static).update(tr(f"service.{ident}.help"))
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         event.stop()

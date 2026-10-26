@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.5.1] - 2026-10-26
+
+### Scrollable panels
+
+- Added a small, clickable ▼ to track selection, selected-track details, batch queues and logs when more content remained below, without reserving another content row or changing selections.
+- Hid the control at the end of each panel; clicking it in a log cleared only that log's text selection and resumed following new messages.
+
+### API subtitle progress
+
+- Opened the download frame before selected API subtitle preparation and retained completed subtitle rows alongside native video/audio progress.
+- Displayed active, unknown progress for legacy subtitle hooks and measured byte progress for services using the optional prepare_download_with_progress hook, without adding requests or replacing existing transport and conversion behavior.
+- Marked subtitles complete only after a nonempty prepared file was registered for muxing, kept failed or cancelled preparation from appearing successful, and left command, list and export modes free of sidecar downloads.
+
+### Home settings search
+
+- Included manager-owned actions and settings in the search-first Home, using page labels, aliases, descriptions and stable keys with localized and English-name matching and no duplicate results.
+- Ranked exact names and keys ahead of description-only matches, and opened the owning manager with the matching row highlighted without executing its action; Back preserved the Home query, mode and selection.
+
+### Windows process cleanup
+
+- Fixed the missing signal.SIGKILL error on Windows by using native subprocess termination and kill operations while preserving POSIX process-group signals.
+- Kept timeout, cancellation and interrupted probe/mux errors intact during bounded child cleanup, and retained ownership of children that still needed a shutdown retry.
+
 ## [2.5.0] - 2026-10-25
 
 ### New search-first Home

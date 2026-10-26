@@ -17,6 +17,23 @@ from .bidi import visual_markup
 from .chrome import Chrome, KeyBar
 from .settings_layout import SettingRow, label_width, setting_row
 
+SETTINGS_GROUPS = {
+    "download_behavior": (
+        "settings.group.download", "settings.group.download_help",
+        (
+            "after_resolve", "live_record", "confirm_batch", "retries", "http_timeout",
+            "max_speed", "title_delay", "muxer", "segment_downloader", "resume_parts",
+            "check_segments_count", "verify_content_keys", "keep_temp",
+            "keep_failed_intermediates", "delete_temp_after_done", "auto_subtitle_fix",
+            "live_real_time_merge", "live_keep_segments", "live_pipe_mux",
+        ),
+    ),
+    "interface": (
+        "settings.group.interface", "settings.group.interface_help",
+        ("theme", "interface_locale", "beta_interface", "beta_auto_results", "debug"),
+    ),
+}
+
 
 class SettingsGroupScreen(Screen[None]):
     """Edit a small, named group while keeping each stored setting independent."""
@@ -54,6 +71,14 @@ class SettingsGroupScreen(Screen[None]):
         self.rebuild()
         self._fit_help()
         self.query_one("#settings-group-list", OptionList).focus()
+
+    def focus_setting(self, key: str) -> None:
+        options = self.query_one("#settings-group-list", OptionList)
+        index = next((index for index, spec in enumerate(self.specs) if spec.key == key), None)
+        if index is not None:
+            options.highlighted = index
+            options.scroll_to_highlight()
+        options.focus()
 
     def on_resize(self) -> None:
         self._fit_help()

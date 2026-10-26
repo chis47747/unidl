@@ -2844,6 +2844,7 @@ class SessionController:
                     "warning",
                 )
 
+        sidecar_delivery_opened = False
         if mode == "download":
             verify_keys = getattr(self.engine, "verify_selected_keys", None)
             if callable(verify_keys) and bool(self.settings.get("verify_content_keys", False)) and not playback.is_live:
@@ -2865,13 +2866,21 @@ class SessionController:
                 sync_sidecars = getattr(self.engine, "sync_sidecar_selection", None)
                 if callable(sync_sidecars):
                     sync_sidecars(playback, tracks)
+                if any(stream.extra.get("service_sidecar") == "subtitle" for stream in tracks.selected):
+                    self.app.call_from_thread(self._open_delivery, playback, tracks)
+                    sidecar_delivery_opened = True
                 self.post_status(tr("delivery.status.preparing_sidecars"))
                 prepare_sidecars = getattr(self.engine, "prepare_download_sidecars", None)
                 if callable(prepare_sidecars):
-                    prepare_sidecars(playback, self.settings, self.service, self.post_log)
+                    prepare_sidecars(
+                        playback, self.settings, self.service, self.post_log,
+                        tracks, cancel=self.cancel_event, pause=self.pause_event,
+                    )
                 else:
                     self.service.prepare_download(playback, self.post_log)
             except Exception as exc:
+                if self.cancel_requested:
+                    return CANCELLED, "cancelled"
                 self.post_error(
                     "Could not prepare download sidecars",
                     str(exc),
@@ -2982,7 +2991,10 @@ class SessionController:
             and (playback.live_window is None or playback.live_window.mode != "vod")
             and "--live-perform-as-vod" not in playback.extra_args
         )
-        self.app.call_from_thread(self._open_delivery, playback, tracks)
+        if sidecar_delivery_opened:
+            self.app.call_from_thread(self._refresh_delivery, playback, tracks)
+        else:
+            self.app.call_from_thread(self._open_delivery, playback, tracks)
         measure_bitrates = getattr(getattr(self, "engine", None), "measure_video_bitrates", None)
         if callable(measure_bitrates) and bool(self.settings.get("fetch_actual_bitrate", True)):
             self.post_status(tr("delivery.status.measuring_bitrate"))

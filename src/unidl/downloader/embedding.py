@@ -176,8 +176,8 @@ class DownloadRuntime:
         """Stop this delivery and all of its external resources.
 
         The grace period is deliberately measured in milliseconds.  It gives a
-        well-behaved child a chance to close its descriptors, then SIGKILLs the
-        complete process group so a descendant cannot remain behind.
+        well-behaved child a chance to close its descriptors, then force-kills
+        it (including its process group on POSIX).
         """
         self._stop.set()
         self.close(grace=grace)
@@ -201,7 +201,7 @@ class DownloadRuntime:
             processes = list(self._processes.values())
         # Do not let a slow transport closer delay signalling child processes.
         for process, process_group in processes:
-            self._signal_process(process, process_group, signal.SIGTERM)
+            self._signal_process(process, process_group)
         for closer in closers:
             try:
                 closer()
@@ -214,7 +214,7 @@ class DownloadRuntime:
             time.sleep(0.01)
         for process, process_group in processes:
             if process.poll() is None:
-                self._signal_process(process, process_group, signal.SIGKILL)
+                self._signal_process(process, process_group, force=True)
         for process, _group in processes:
             try:
                 process.wait(timeout=0.15)
@@ -224,17 +224,18 @@ class DownloadRuntime:
             self._processes.clear()
 
     @staticmethod
-    def _signal_process(process: subprocess.Popen, process_group: bool, signum: int) -> None:
+    def _signal_process(process: subprocess.Popen, process_group: bool, *, force: bool = False) -> None:
+        """Stop a child without evaluating POSIX-only signals on Windows."""
         if process.poll() is not None:
             return
         if process_group and os.name == "posix":
             try:
-                os.killpg(process.pid, signum)
+                os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
                 return
             except (OSError, ProcessLookupError):
                 pass
         try:
-            if signum == signal.SIGKILL:
+            if force:
                 process.kill()
             else:
                 process.terminate()
@@ -243,11 +244,11 @@ class DownloadRuntime:
 
     @classmethod
     def _terminate_process(cls, process: subprocess.Popen, process_group: bool) -> None:
-        cls._signal_process(process, process_group, signal.SIGTERM)
+        cls._signal_process(process, process_group)
         try:
             process.wait(timeout=0.05)
         except (OSError, subprocess.TimeoutExpired):
-            cls._signal_process(process, process_group, signal.SIGKILL)
+            cls._signal_process(process, process_group, force=True)
 
 
 def current_download_runtime() -> DownloadRuntime | None:
@@ -286,12 +287,19 @@ def managed_run(*popenargs, **kwargs) -> subprocess.CompletedProcess:
     process = managed_popen(*popenargs, **kwargs)
     try:
         stdout, stderr = process.communicate(input=input_data, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        runtime._signal_process(process, bool(process_group), signal.SIGKILL)
-        process.wait()
+    except BaseException:
+        # A timeout, cancellation or interrupted pipe read must not orphan the
+        # child. Cleanup must also preserve the original exception instead of
+        # replacing a useful probe/mux diagnostic with a secondary wait error.
+        runtime._signal_process(process, bool(process_group), force=True)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=0.15)
         raise
     finally:
-        runtime.unregister_process(process)
+        # If termination failed or has not completed, keep runtime ownership so
+        # shutdown can retry rather than silently forgetting a running child.
+        if process.poll() is not None:
+            runtime.unregister_process(process)
     result = subprocess.CompletedProcess(popenargs[0] if popenargs else kwargs.get("args"), process.returncode, stdout, stderr)
     if check and result.returncode:
         raise subprocess.CalledProcessError(result.returncode, result.args, output=stdout, stderr=stderr)

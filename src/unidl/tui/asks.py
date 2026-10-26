@@ -28,6 +28,7 @@ from .chrome import StatusChip
 from .filterbox import FILTER_MIN, FilterBox, as_number, matches, wanted
 from .input import ClipboardInput as Input
 from .qr import QrWidget
+from .scroll_tail import ScrollTail
 
 BACK = object()
 """Sentinel answer meaning "the user went back"."""
@@ -302,10 +303,10 @@ class PickWidget(_Filterable, _NumberJump):
             with Horizontal(classes="audio-track-picker"):
                 yield AudioPreviewWidget(preview, classes="audio-track-preview")
                 with Vertical(classes="audio-track-controls"):
-                    yield OptionList(*self._options(self._visible))
+                    yield ScrollTail(OptionList(*self._options(self._visible)))
                     yield from self.compose_filter()
             return
-        yield OptionList(*self._options(self._visible))
+        yield ScrollTail(OptionList(*self._options(self._visible)))
         yield from self.compose_filter()
 
     def _options(self, indexes: list[int]) -> list[Option]:
@@ -405,11 +406,13 @@ class MultiPickWidget(_Filterable):
                 yield AudioPreviewWidget(preview, classes="audio-track-preview")
                 with Vertical(classes="audio-track-controls"):
                     yield Label("", id="multi-hint", classes="ask-hint")
-                    yield _ConfirmingSelectionList(*self._selections(self._visible))
+                    yield ScrollTail(
+                        _ConfirmingSelectionList(*self._selections(self._visible))
+                    )
                     yield from self.compose_filter()
             return
         yield Label("", id="multi-hint", classes="ask-hint")
-        yield _ConfirmingSelectionList(*self._selections(self._visible))
+        yield ScrollTail(_ConfirmingSelectionList(*self._selections(self._visible)))
         yield from self.compose_filter()
 
     def _selections(self, indexes: list[int]) -> list[tuple[str, int, bool]]:

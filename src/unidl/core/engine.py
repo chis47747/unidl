@@ -282,6 +282,7 @@ class _StructuredProgressScreen:
         frame: FrameSink,
         width: Callable[[], int | None],
         tracks: Sequence[TrackDescriptor] = (),
+        initial_updates: Sequence[TrackProgressEvent] = (),
     ) -> None:
         self._frame = frame
         self._width = width
@@ -305,6 +306,7 @@ class _StructuredProgressScreen:
             )
             for track in tracks
         }
+        self._updates.update({update.track_id: update for update in initial_updates})
         self._status_rows: list[str] = []
         for track in tracks:
             if track.track_id not in self._order:
@@ -341,6 +343,8 @@ class _StructuredProgressScreen:
             track = self._tracks.get(update.track_id)
             total, estimated = self._estimated_total(update, track)
             percent = self._percent(update, total)
+            if track is not None and track.manifest_type == "service" and not update.done:
+                percent = min(99.0, percent)
             if update.live:
                 total_clock = (
                     _progress_clock(update.duration_seconds)
@@ -368,7 +372,10 @@ class _StructuredProgressScreen:
                     segments,
                     speed,
                     eta,
-                    ("Recorded ✓" if update.live else "Downloaded ✓") if update.done else "",
+                    ("Recorded ✓" if update.live else "Downloaded ✓") if update.done else (
+                        ("Downloading ⣾" if update.status == "Downloading" else update.status)
+                        if track is not None and track.manifest_type == "service" else ""
+                    ),
                 )
             )
 
@@ -397,10 +404,13 @@ class _StructuredProgressScreen:
                 label = label[: max(1, label_width - 1)] + "…"
             filled = max(0, min(bar_width, round(bar_width * percent / 100)))
             bar = "━" * filled + "─" * (bar_width - filled)
-            row = f"{label:<{label_width}}  {bar} {percent:3.0f}% {size:<{size_width}}"
+            state = done.split(" ", 1)[0]
+            percent_text = f"{percent:3.0f}%" if percent or state not in {"Downloading", "Failed", "Stopped", "Paused"} else " --%"
+            row = f"{label:<{label_width}}  {bar} {percent_text} {size:<{size_width}}"
             # Keep speed ahead of optional metadata so a narrow delivery card
             # still reports throughput instead of looking stalled.
-            for extra in (speed, segments, eta, done):
+            extras = (done, speed, segments, eta) if state in {"Downloading", "Failed", "Stopped", "Paused"} else (speed, segments, eta, done)
+            for extra in extras:
                 if extra and len(row) + 1 + len(extra) <= width:
                     row += f" {extra}"
             rows.append(row[:width])
@@ -4209,8 +4219,19 @@ class Engine:
             return self.downloader.command_line(plan)
         return api.command_line(self.download_options(playback, settings, service=service))
 
-    def prepare_download_sidecars(self, playback: Playback, settings: Settings, service, log) -> None:
-        """Leave source subtitle references to native delivery in original mode."""
+    def prepare_download_sidecars(
+        self, playback: Playback, settings: Settings, service, log,
+        tracks: TrackSet | None = None, *, cancel=None, pause=None,
+    ) -> None:
+        """Observe service preparation; original mode keeps native source delivery."""
+        playback._download_sidecar_progress = ((), ())
+        selected = [
+            stream for stream in tracks.selected
+            if stream.extra.get("service_sidecar") == "subtitle"
+        ] if tracks is not None else []
+        if not self.original_track_output(settings) and selected:
+            self._prepare_sidecars_with_progress(playback, settings, tracks, service, log, selected, cancel, pause)
+            return
         if not self.original_track_output(settings):
             service.prepare_download(playback, log)
             return
@@ -4223,6 +4244,123 @@ class Engine:
             service.prepare_download(playback, log)
         finally:
             playback.subtitle_references = original_references
+
+    def _prepare_sidecars_with_progress(self, playback, settings, tracks, service, log, selected, cancel, pause):
+        """Observe prepared files, without replacing a service's subtitle transport."""
+        parsed = self.downloader.adopt(self.parse_request(playback, settings), tracks.selected)
+        selected_ids = {id(stream) for stream in selected}
+        descriptors = [
+            replace(track, track_id=f"sidecar-{track.track_id}", manifest_type="service", is_live=False)
+            if id(stream) in selected_ids else track
+            for track, stream in zip(parsed.tracks, tracks.selected, strict=True)
+        ]
+        rows = [(stream, track) for stream, track in zip(tracks.selected, descriptors, strict=True) if id(stream) in selected_ids]
+        updates = {
+            track.track_id: TrackProgressEvent(track_id=track.track_id, total_segments=1, status="Downloading")
+            for _stream, track in rows
+        }
+        screen = _StructuredProgressScreen(
+            self.frame, lambda: self.frame_columns, descriptors,
+        ) if self.frame is not None else None
+        started = time.monotonic()
+        lock = threading.RLock()
+        cancellation = CancellationToken(cancel.is_set if cancel is not None else None)
+        pausing = PauseToken(pause.is_set if pause is not None else None)
+
+        def checkpoint():
+            cancellation.raise_if_cancelled()
+            pausing.wait(lambda: cancellation.cancelled)
+
+        def publish(track, update):
+            updates[track.track_id] = update
+            playback._download_sidecar_progress = (
+                tuple(track for _stream, track in rows), tuple(updates.values()),
+            )
+            if screen is not None:
+                screen.update(update)
+
+        def reconcile():
+            remaining = list(rows)
+            for imported in playback.mux_imports:
+                path = Path(imported.path).expanduser()
+                if path.suffix.casefold() not in {".srt", ".vtt", ".webvtt", ".ttml", ".dfxp", ".xml", ".ass", ".ssa", ".sup", ".sub", ".idx"}:
+                    continue
+                language = str(imported.language or "und").casefold()
+                candidates = [(stream, track) for stream, track in remaining
+                              if str(stream.language or "und").casefold() == language]
+                if not candidates:
+                    continue
+                def rank(candidate, imported=imported):
+                    stream, _track = candidate
+                    kind = str(stream.extra.get("subtitle_kind") or stream.group_id or "normal").casefold()
+                    same_name = bool(imported.name) and str(imported.name).casefold() == str(stream.name or "").casefold()
+                    imported_kind = "forced" if imported.forced else str(imported.kind or "normal").casefold()
+                    same_kind = imported_kind == kind
+                    return (same_name, same_kind)
+                stream, track = max(candidates, key=rank)
+                remaining.remove((stream, track))
+                try:
+                    size = path.stat().st_size if path.is_file() else None
+                except OSError:
+                    size = None
+                if size is None or size <= 0:
+                    continue
+                if updates[track.track_id].done:
+                    continue
+                publish(track, TrackProgressEvent(
+                    track_id=track.track_id, completed_segments=1, total_segments=1,
+                    downloaded_bytes=size, total_bytes=size,
+                    elapsed_seconds=time.monotonic() - started, status="Downloaded", done=True,
+                ))
+
+        def progress(reference, received, total=None):
+            checkpoint()
+            with lock:
+                matched = next((
+                    track for stream, track in rows
+                    if (stream.extra.get("subtitle_reference_url") or stream.url) == reference.url
+                    and (stream.language or "und") == (reference.language or "und")
+                    and (stream.extra.get("subtitle_kind") or stream.group_id or "normal") == (reference.kind or "normal")
+                ), None)
+                if matched is None:
+                    return
+                if updates[matched.track_id].done:
+                    return
+                elapsed = max(0.0, time.monotonic() - started)
+                received = max(0, int(received))
+                total = int(total) if total is not None and int(total) > 0 else None
+                publish(matched, TrackProgressEvent(
+                    track_id=matched.track_id, total_segments=1, downloaded_bytes=received,
+                    total_bytes=total, elapsed_seconds=elapsed,
+                    speed_bytes_per_second=received / elapsed if elapsed else None,
+                    status="Downloading",
+                ))
+
+        def observed_log(*args, **kwargs):
+            checkpoint()
+            with lock:
+                reconcile()
+            log(*args, **kwargs)
+
+        for _stream, track in rows:
+            publish(track, updates[track.track_id])
+        try:
+            checkpoint()
+            prepare = getattr(service, "prepare_download_with_progress", None)
+            if callable(prepare):
+                prepare(playback, observed_log, progress)
+            else:
+                service.prepare_download(playback, observed_log)
+            checkpoint()
+        finally:
+            with lock:
+                reconcile()
+                for _stream, track in rows:
+                    if not updates[track.track_id].done:
+                        publish(track, replace(
+                            updates[track.track_id],
+                            status="Stopped" if cancellation.cancelled else "Failed",
+                        ))
 
     @staticmethod
     def sync_sidecar_selection(playback: Playback, tracks: TrackSet) -> None:
@@ -4551,11 +4689,13 @@ class Engine:
                 tracks = self.load_tracks(playback, settings, service=service)
             plan = self.delivery_plan(playback, settings, tracks, service=service)
             command = self.downloader.command_line(plan)
+            sidecar_tracks, sidecar_updates = getattr(playback, "_download_sidecar_progress", ((), ()))
             progress_screen = (
                 _StructuredProgressScreen(
                     self.frame,
                     lambda: self.frame_columns,
-                    plan.manifest.select(plan.selected_track_ids),
+                    (*plan.manifest.select(plan.selected_track_ids), *sidecar_tracks),
+                    initial_updates=sidecar_updates,
                 )
                 if self.frame is not None
                 else None

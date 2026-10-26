@@ -85,7 +85,7 @@ card to the available space.
 | Search export files | Searches the configured exports folder and its service subfolders by filename, title, episode or service. Choose a file to use the existing export import flow. |
 | Search vault | Shows matching local keys as you type a KID, key, pair, title or service. The Search vault action opens the existing full search page for more results and explicit remote lookup. |
 | Add keys | Opens the existing manual-key editor. Enter KID:KEY pairs to prefill it, or leave the input blank. Choose the service and review local/remote destinations there before submitting a write. |
-| Find settings | Searches setting names, descriptions and stable keys, then opens the selected setting. Shared track preferences first ask which service to edit. |
+| Find settings | Searches settings and manager actions by their page labels, aliases, descriptions and stable keys. Opens the owning page and highlights the item; shared track preferences first ask which service to edit. |
 
 The mode stays visible beside the input, so an explicit choice is not silently
 reinterpreted. For example, a URL entered in **Find settings** is searched as
@@ -129,6 +129,24 @@ refreshed. Typing does not log
 into services, fetch manifests, contact
 JustWatch or query remote vaults. Settings search indexes labels, descriptions
 and keys, never saved values, passwords or tokens.
+
+Settings search includes page-owned actions such as **Register a service**,
+**Services shown on home** and **Export manifest type**, plus the rows under
+Files & naming, JustWatch, Proxy & VPN, DRM & vaults, Download behavior and
+Interface & diagnostics. Page labels and older setting names refer to the
+same result rather than duplicate entries. English labels also work when a
+different interface language is selected.
+
+Exact labels and stable keys rank first, followed by aliases and name matches;
+matches found only in descriptions rank last. Case, whitespace, underscores
+and punctuation do not change a match. For example, `Register service` finds
+**Register a service**, and `Release suffix` finds that Files & naming row.
+Clicking a result reveals and highlights its item using the existing manager.
+It does not register a package, toggle a preference, open a folder, run a
+network request or start an editor. Confirm with Enter or the page's existing
+controls to perform the action. Back returns to the original Home query,
+mode and result selection; backing out of an editor first returns to its
+manager.
 
 For a fuzzy or ambiguous service query, Enter first moves to the result list.
 Choose the intended result with the mouse or arrows and Enter. UniDL does not

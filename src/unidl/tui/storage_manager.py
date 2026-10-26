@@ -131,6 +131,8 @@ _TEMPLATE_FIELDS = {
     "release_template": naming.RELEASE_FIELDS,
 }
 
+STORAGE_TABS = {"output": _OUTPUT_ROWS, "naming": _NAMING_ROWS, "advanced": _ADVANCED_ROWS}
+
 
 class _StorageEditor(ModalScreen[str | None]):
     """Single-line editor with a live resolved-path or file-name preview."""
@@ -234,7 +236,7 @@ class StorageManagerScreen(Screen[None]):
 
     def focus_setting(self, key: str) -> None:
         """Reveal a searched setting using this manager's existing validation."""
-        for tab, rows in (("output", _OUTPUT_ROWS), ("naming", _NAMING_ROWS), ("advanced", _ADVANCED_ROWS)):
+        for tab, rows in STORAGE_TABS.items():
             if any(row.key == key for row in rows):
                 self._tab = tab
                 self.query_one("#storage-tabs", Tabs).active = f"storage-tab-{tab}"
@@ -254,11 +256,7 @@ class StorageManagerScreen(Screen[None]):
         self.rebuild()
 
     def _tab_rows(self) -> tuple[StorageRow, ...]:
-        if self._tab == "naming":
-            return _NAMING_ROWS
-        if self._tab == "advanced":
-            return _ADVANCED_ROWS
-        return _OUTPUT_ROWS
+        return STORAGE_TABS.get(self._tab, _OUTPUT_ROWS)
 
     def rebuild(self) -> None:
         option_list = self.query_one("#storage-list", OptionList)

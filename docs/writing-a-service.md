@@ -917,6 +917,17 @@ selected files and adds them to `Playback.mux_imports`. The service should not
 use a setting to decide which subtitle rows exist or use shared subtitle output
 settings to change its provider API request.
 
+Core opens the download frame before this hook and retains each selected API
+subtitle's result alongside native media progress. Existing hooks need no change:
+they show an active/unknown state until their local file is registered. For
+measured byte progress, optionally implement
+`prepare_download_with_progress(playback, log, progress)` instead and call
+`progress(reference, received_bytes, total_bytes)` while reading the response
+(`None` when the total is unknown). This hook replaces, not supplements, the
+legacy hook for that run: do not fetch the same subtitle twice. Still add completed
+local files to `Playback.mux_imports`, keeping their language, name, kind and
+flags. Only successful file preparation receives a completed progress row.
+
 A local `.json` manifest path may be supplied as `manifest_url`, because native
 delivery core can parse that input. The `Playback.json_manifest` dictionary
 field exists in the model but the current delivery controller skips it; do not

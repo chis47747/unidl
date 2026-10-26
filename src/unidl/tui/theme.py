@@ -1557,7 +1557,7 @@ TextWidget {
 #log-pane.collapsed {
     height: 3;
 }
-#log-pane.collapsed RichLog {
+#log-pane.collapsed .log-tail {
     display: none;
 }
 /* nothing logged yet: take no space rather than showing an empty box */
@@ -1575,9 +1575,14 @@ TextWidget {
     height: auto;
     max-height: 10;
 }
+#log-pane.delivery .log-tail {
+    height: auto;
+    /* Ten rows minus the border, padding and header leaves seven for text. */
+    max-height: 7;
+}
 #log-pane.delivery RichLog {
     height: auto;
-    max-height: 8;
+    max-height: 7;
 }
 /* The delivery selector has the same specificity as the state selectors above;
    keep these explicit overrides after it so a live job can resize the pane too. */
@@ -1585,14 +1590,14 @@ TextWidget {
     height: 1fr;
     max-height: 100h;
 }
-#log-pane.delivery.tall RichLog {
+#log-pane.delivery.tall .log-tail, #log-pane.delivery.tall RichLog {
     height: 1fr;
     max-height: 100h;
 }
 #log-pane.delivery.collapsed {
     height: 3;
 }
-#log-pane.delivery.collapsed RichLog {
+#log-pane.delivery.collapsed .log-tail {
     display: none;
 }
 #log-header {

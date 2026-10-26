@@ -4,6 +4,15 @@ Three tiers, kept apart on purpose. Click Settings or press `ctrl+s` anywhere
 to edit them; plain `s` is the shorter form when no text field has focus.
 Changes persist immediately and apply to the next request without a restart.
 
+The experimental Home's **Find settings** mode and enabled Auto setting results
+include both ordinary preferences and actions inside settings managers. Search
+the name shown on the page (for example **Register a service** or **Release
+suffix**), an older name, the stable key or its description. English names work
+in other interface languages too. Selecting a result only opens its owning page
+and highlights the row; use that page's normal controls to change a value or
+perform an action. Back returns to the same Home search. See
+[Experimental home](home-interface.md) for ranking and navigation details.
+
 ## Content-key verification
 
 **Settings → Download behavior → Verify content keys before download** is off
@@ -200,6 +209,14 @@ API, the service exposes the complete inventory as Core sidecar track rows via
 and shared `sub_langs` selects them. `prepare_download` fetches the selected
 sidecars and passes local files to native delivery through `Playback.mux_imports`.
 The shared setting never decides which subtitle API request is made.
+
+Selected API subtitles also appear in the actual download progress frame.
+The frame opens before service sidecar preparation and retains completed
+subtitle rows while native video/audio transfer continues. Byte-progress-aware
+services report measured bytes and percentages; legacy one-shot APIs display
+an active state with an unknown percentage until the prepared subtitle file is
+available. Failed or skipped preparation is not marked as downloaded. This does
+not add subtitle requests or change a service's existing conversion/mux path.
 
 This is also why neither a service API option nor a command-line default can
 truthfully choose a final bitrate before the returned ladder has been parsed.

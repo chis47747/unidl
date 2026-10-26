@@ -771,41 +771,9 @@ class SettingsScreen(Screen):
             return
 
         if spec.picker in {"download_behavior", "interface"}:
-            from .settings_group import SettingsGroupScreen
+            from .settings_group import SETTINGS_GROUPS, SettingsGroupScreen
 
-            groups = {
-                "download_behavior": (
-                    "settings.group.download",
-                    "settings.group.download_help",
-                    (
-                        "after_resolve",
-                        "live_record",
-                        "confirm_batch",
-                        "retries",
-                        "http_timeout",
-                        "max_speed",
-                        "title_delay",
-                        "muxer",
-                        "segment_downloader",
-                        "resume_parts",
-                        "check_segments_count",
-                        "verify_content_keys",
-                        "keep_temp",
-                        "keep_failed_intermediates",
-                        "delete_temp_after_done",
-                        "auto_subtitle_fix",
-                        "live_real_time_merge",
-                        "live_keep_segments",
-                        "live_pipe_mux",
-                    ),
-                ),
-                "interface": (
-                    "settings.group.interface",
-                    "settings.group.interface_help",
-                    ("theme", "interface_locale", "beta_interface", "beta_auto_results", "debug"),
-                ),
-            }
-            title, description, keys = groups[spec.picker]
+            title, description, keys = SETTINGS_GROUPS[spec.picker]
             self.app.push_screen(
                 SettingsGroupScreen(self.globals, title, description, keys),
                 lambda _result: self.rebuild(),

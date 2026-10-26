@@ -35,6 +35,7 @@ from .bidi import visual_text
 from .chrome import Chrome, ChromeButton, StatusChip
 from .job_details import JobDetailsScreen
 from .logline import safe_terminal_text
+from .scroll_tail import TailVerticalScroll
 from .session import (
     CANCELLED,
     DONE,
@@ -253,10 +254,10 @@ class DownloadScreen(AskHost):
                 # The resolved download contract is the main body of this screen.
                 # It owns the flexible space above the live progress card, and
                 # gives that space back when the log is explicitly expanded.
-                with VerticalScroll(id="delivery-details"):
+                with TailVerticalScroll(id="delivery-details"):
                     yield Static("", id="delivery-details-body")
                 yield Static("", id="delivery-frame")
-                yield VerticalScroll(id="queue-list")
+                yield TailVerticalScroll(id="queue-list")
                 yield from self.compose_ask_area()
 
     def key_hints(self) -> list[tuple[str, str]]:
@@ -581,7 +582,8 @@ class DownloadScreen(AskHost):
             row.job is job for row, job in zip(existing, jobs, strict=True)
         )
         if not reuse:
-            target.remove_children()
+            for row in existing:
+                row.remove()
         rows = []
         for index, job in enumerate(jobs, start=1):
             mark, role = STATE_MARK[job.state]
