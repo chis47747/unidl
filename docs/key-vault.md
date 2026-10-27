@@ -244,6 +244,13 @@ Three target pickers in the same panel narrow those switches and control search:
 - **Search vaults** — local backends by default; remote
   search is always an explicit click
 
+**All available** writes to every enabled, writable target permitted by the
+remote safety switches, just like explicitly selecting those same vaults. It
+does not mean "no targets". Disabled and read-only vaults are still excluded;
+an explicit empty selection disables storage. The same policy applies to live
+key-rotation writes. Changing this selection does not upload historical keys
+or start a vault-to-vault synchronization.
+
 The first target picker controls automatic playback lookup. The second controls
 licence writes, live-key rotation writes and which local databases receive a
 remote lookup backfill. The third controls which local databases appear in home

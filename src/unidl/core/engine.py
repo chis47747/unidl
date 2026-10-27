@@ -1551,7 +1551,9 @@ class Engine:
         use_local = bool(getter("local_vault", True)) if getter is not None else True
         use_remote = Engine.remote_vault_operation_enabled(settings, "lookup")
         if settings is None:
-            return use_local, use_remote, None, None, None, None
+            # No policy grants remote writes. Keep the same explicit disabled
+            # marker used by the master/auto-store gates below.
+            return use_local, use_remote, None, None, None, ()
         read = vaults.parse_targets(getter("vault_read_targets", ""))
         write = vaults.parse_targets(getter("vault_write_targets", ""))
         write_remote = Engine.remote_vault_operation_enabled(settings, "store")
@@ -1829,7 +1831,8 @@ class Engine:
             service.ID,
             pairs,
             use_local=True,
-            use_remote=bool(write_remote),
+            # None selects all targets; only () disables remote writes.
+            use_remote=write_remote != (),
             local_names=write_local,
             remote_names=write_remote,
             title=playback.save_name,
@@ -1912,7 +1915,7 @@ class Engine:
                 use_local=True,
                 # Live rotation keys are acquired data, so writes follow the
                 # remote auto-store switch rather than the lookup switch.
-                use_remote=bool(write_remote),
+                use_remote=write_remote != (),
                 local_names=write_local,
                 remote_names=write_remote,
                 title=playback.save_name,
@@ -2825,7 +2828,7 @@ class Engine:
     def _apply_track_filter(self, playback: Playback, tracks: TrackSet, service) -> TrackSet:
         """Add service-owned tracks, then apply an output-only track filter."""
         if service is None:
-            return tracks
+            return self._split_muxed_audio(playback, tracks)
         augment = getattr(service, "augment_tracks", None)
         if callable(augment):
             extra = augment(playback, tracks, self.log)
@@ -2861,10 +2864,10 @@ class Engine:
                 tracks.manifest = self.downloader.adopt(replace(request, source=source), tracks.streams)
         filter_tracks = getattr(service, "filter_tracks", None)
         if not callable(filter_tracks):
-            return tracks
+            return self._split_muxed_audio(playback, tracks)
         visible = filter_tracks(playback, tracks, self.log)
         if visible is None:
-            return tracks
+            return self._split_muxed_audio(playback, tracks)
         visible = list(visible)
         visible_ids = {id(stream) for stream in visible}
         visible.extend(stream for stream in tracks.sidecars if id(stream) not in visible_ids)
@@ -2880,6 +2883,25 @@ class Engine:
             f"service track filter: {len(visible)} of {len(tracks.streams)} "
             "streams available for output"
         )
+        return self._split_muxed_audio(playback, tracks)
+
+    def _split_muxed_audio(self, playback: Playback, tracks: TrackSet) -> TrackSet:
+        if not playback.split_muxed_audio or playback.is_live or tracks.manifest is None:
+            return tracks
+        manifest, projections = self.downloader.split_muxed_audio(tracks.manifest)
+        if manifest is tracks.manifest:
+            return tracks
+        origins = tracks.origins
+        tracks.manifest = manifest
+        tracks.streams = self.downloader.streams(manifest)
+        tracks.origins = {
+            id(child): origins[parent] for parent, children in projections.items()
+            if parent in origins for child in children
+        }
+        if tracks.output_streams is not None:
+            tracks.output_streams = [child for stream in tracks.output_streams
+                                    for child in projections.get(id(stream), [stream])]
+        tracks.selected = [child for stream in tracks.selected for child in projections.get(id(stream), [stream])]
         return tracks
 
     @staticmethod

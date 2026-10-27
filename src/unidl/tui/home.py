@@ -32,6 +32,7 @@ from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Static
+from textual.worker import get_current_worker
 
 from .. import __version__
 from ..core import drm as drm_registry
@@ -114,6 +115,11 @@ class HomeScreen(Screen):
         self._numbered: dict[int, type[Service]] = {}
         self._no_match: Static | None = None
         self._chip_widths: dict[str, int] = {}
+        self._ready_result: tuple[str, int, int] | None = None
+        self._ready_generation = 0
+        self._import_result: tuple[int, int] | None = None
+        self._import_folder: Path | None = None
+        self._import_generation = 0
         self._columns = 1
         self._update_info = None
 
@@ -318,69 +324,97 @@ class HomeScreen(Screen):
         readiness survey's reasoning: it reads and parses every file in the folder,
         which is not something the first paint should wait for.
         """
-        word = tr("home.chip.import")
-        self._set_chip("chip-import", f"[$muted]{word}[/]", word)
-        self.count_imports()
+        folder = Path(self.app.config.paths.exports)
+        if folder != self._import_folder:
+            self._import_folder, self._import_result = folder, None
+        # Refresh in the background without dropping a known count. The Beta
+        # search column follows this row's width, including on screen resume.
+        self._render_import_result()
+        self._import_generation += 1
+        self.count_imports(folder, self._import_generation)
 
     @work(thread=True, exclusive=True, group="imports")
-    def count_imports(self) -> None:
+    def count_imports(self, folder: Path, generation: int) -> None:
         from ..core import exports
 
         try:
-            found = exports.scan(self.app.config.paths.exports)
+            found = exports.scan(folder)
         except Exception:  # noqa: BLE001 - an unreadable folder is not fatal
             found = []
         readable = [row for row in found if row[1] is not None]
+        if not get_current_worker().is_cancelled:
+            self.app.call_from_thread(self._accept_import_result, generation, (len(found), len(readable)))
+
+    def _accept_import_result(self, generation: int, result: tuple[int, int]) -> None:
+        if generation != self._import_generation:
+            return
+        self._import_result = result
+        if self._render_import_result():
+            self._fit_statusline()
+
+    def _render_import_result(self) -> bool:
         word = tr("home.chip.import")
-        if not found:
+        total, readable = self._import_result or (0, 0)
+        if not total:
             markup, plain = f"[$muted]{word}[/]", word
         else:
             colour = "$foreground" if readable else "$warn"
-            markup = f"[$muted]{word}[/] [{colour}]{len(readable)}[/]"
-            plain = f"{word} {len(readable)}"
-        self.app.call_from_thread(self._set_chip, "chip-import", markup, plain)
-        self.app.call_from_thread(self._fit_statusline)
+            markup = f"[$muted]{word}[/] [{colour}]{readable}[/]"
+            plain = f"{word} {readable}"
+        return self._set_chip("chip-import", markup, plain)
 
     def _refresh_ready_chip(self) -> None:
         """Say whether anything external is missing, without stopping to find out.
 
         The survey runs version probes - a subprocess per tool - so it happens on a
-        worker and the chip says "checking" until it answers. Doing it inline held
-        the first paint of the main screen for the best part of a second.
+        worker. Only the first survey shows "checking"; later refreshes retain the
+        last complete result until the replacement arrives.
         """
-        checking = tr("home.chip.checking")
-        self._set_chip("chip-ready", f"[$muted]{checking}[/]", checking)
-        self.survey_environment()
+        self._render_ready_result()
+        self._ready_generation += 1
+        self.survey_environment(self._ready_generation)
 
     @work(thread=True, exclusive=True, group="readiness")
-    def survey_environment(self) -> None:
+    def survey_environment(self, generation: int) -> None:
         from ..core import readiness
 
         try:
             report = readiness.survey(self.app.config, self.app.registry)
         except Exception:  # noqa: BLE001 - a report that cannot be built is not fatal
-            unknown = tr("home.chip.ready_unknown")
-            self.app.call_from_thread(
-                self._set_chip, "chip-ready", f"[$muted]{unknown}[/]", unknown
-            )
+            result = ("unknown", 0, 0)
+        else:
+            result = (report.status, len(report.blocking), len(report.global_missing))
+        if not get_current_worker().is_cancelled:
+            self.app.call_from_thread(self._accept_ready_result, generation, result)
+
+    def _accept_ready_result(self, generation: int, result: tuple[str, int, int]) -> None:
+        if generation != self._ready_generation:
             return
-        status = report.status
+        self._ready_result = result
+        if self._render_ready_result():
+            self._fit_statusline()
+
+    def _render_ready_result(self) -> bool:
+        if self._ready_result is None:
+            checking = tr("home.chip.checking")
+            return self._set_chip("chip-ready", f"[$muted]{checking}[/]", checking)
+        status, blocking, global_missing = self._ready_result
         if status == "missing":
             colour = "$bad"
-            summary = tr("home.chip.ready_missing", count=len(report.blocking))
+            summary = tr("home.chip.ready_missing", count=blocking)
         elif status == "global":
             colour = "$warn"
-            summary = tr("home.chip.ready_global", count=len(report.global_missing))
+            summary = tr("home.chip.ready_global", count=global_missing)
         elif status == "partial":
             colour = "$manifest"
             summary = tr("home.chip.ready_partial")
+        elif status == "unknown":
+            colour = "$muted"
+            summary = tr("home.chip.ready_unknown")
         else:
             colour = "$ok"
             summary = tr("home.chip.ready")
-        self.app.call_from_thread(
-            self._set_chip, "chip-ready", f"[{colour}]{summary}[/]", summary
-        )
-        self.app.call_from_thread(self._fit_statusline)
+        return self._set_chip("chip-ready", f"[{colour}]{summary}[/]", summary)
 
     def _render_setup_note(self) -> None:
         """Say what a new install still needs, where a new install starts.
@@ -427,7 +461,7 @@ class HomeScreen(Screen):
             )
             note.display = True
 
-    def _set_chip(self, chip_id: str, markup: str, plain: str) -> None:
+    def _set_chip(self, chip_id: str, markup: str, plain: str) -> bool:
         """Update a chip, remembering how wide its text really is.
 
         The plain length is tracked by hand because the markup is full of colour
@@ -436,9 +470,13 @@ class HomeScreen(Screen):
         """
         found = self.query(f"#{chip_id}")
         if not found:
-            return
-        found.first(StatusChip).update(markup)
+            return False
+        chip = found.first(StatusChip)
+        changed = chip.content != markup
+        if changed:
+            chip.update(markup)
         self._chip_widths[chip_id] = len(plain)
+        return changed
 
     @staticmethod
     def _fit_order() -> list[str]:

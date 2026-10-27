@@ -92,8 +92,16 @@ report and export; attachment downloading still follows its own setting.
 
 This is not **Keep temp files**: completed clear tracks are final outputs, not
 encrypted intermediates or loose segments, and normal cache cleanup does not
-delete them. Existing audio embedded in a source video is preserved; No mux does
-not forcibly split that source into new tracks.
+delete them. Existing audio embedded in a source video is normally preserved;
+No mux does not itself force a split. A service may explicitly enable Core's
+muxed A/V separation: the picker then exposes independent video/audio entries
+and No mux saves only selected tracks, without transcoding.
+
+Audio rows identify their original video rendition. Both projections of one
+source share a download; audio-only selection still needs the original muxed
+segments, so it does not necessarily reduce transfer bandwidth. Different
+renditions are not assumed to contain identical audio. The policy is
+service-controlled, off by default, and retained in commands and exports.
 
 For live streams, cross-track pipe muxing is disabled, but per-track real-time
 segment joining remains available. Back still finalizes the recording and saves

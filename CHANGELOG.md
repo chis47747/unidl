@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.5.2] - 2026-10-27
+
+### Muxed audio/video separation
+
+- Added service-opted-in separation of finite muxed sources into independently selectable video and audio tracks, using lossless extraction after a shared source download and preserving source identities and per-output resume checkpoints.
+- Kept the policy off by default and retained it in commands and exports without expanded segment lists; supported clear and HLS AES-128 VOD while leaving live recording unchanged and explicitly rejecting unsupported sample-encrypted separation.
+
+### Vault write targets
+
+- Fixed All available write targets being treated as disabled, including live key rotation, while preserving remote safety switches, explicit empty selections and disabled/read-only exclusions.
+- Preserved verification policy and avoided uploading cached or historical keys merely because write targets changed.
+
+### Home search and return navigation
+
+- Added explicit service-search candidates when title keywords were prefixed or suffixed with a registered searchable service's complete name, ID, alias or tag, preserving keyword case and requiring candidate confirmation.
+- Preferred the longest matching service name and kept ambiguous candidates separate, without changing explicit-mode routing, automatic URL/export/key precedence or remembered service scopes.
+- Preserved known readiness/import status and same-query local search results during background refreshes, avoided rebuilding unchanged lists, and discarded stale results after query or source changes.
+
 ## [2.5.1] - 2026-10-26
 
 ### Scrollable panels

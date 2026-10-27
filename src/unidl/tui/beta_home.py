@@ -20,7 +20,7 @@ from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
 from ..core import exports
-from ..core.i18n import cell_width, load_catalogue, setting_help, setting_label, tr
+from ..core.i18n import cell_width, get_translator, load_catalogue, setting_help, setting_label, tr
 from ..core.service import Service
 from ..core.settings import BETA_AUTO_RESULT_TYPES, TRACK_SETTINGS
 from ..core.vault import KeyRecord, hex_ids, normalize_hex, split_pair
@@ -55,6 +55,46 @@ def service_rank(service: type[Service], query: str) -> int:
     if any(name.startswith(query) for name in names):
         return 1
     return 2 if matches(query, *names) else 3
+
+
+def catalog_intents(services: list[type[Service]], query: str) -> list[tuple[type[Service], str]]:
+    """Exact service words at either edge suggest a search, never execute it.
+
+    Keep the original keyword slice (including its case and punctuation).
+    Longest complete names win at each edge; collisions stay explicit choices.
+    """
+    query = query.strip()
+    if not query or len(query) > MAX_AUTO_URL_CHARS:
+        return []
+    path = query[1:-1] if len(query) > 1 and query[0] == query[-1] and query[0] in "\"'" else query
+    if path.startswith(("/", "~", "\\")) or re.match(r"^[a-zA-Z]:[\\/]", path) or "://" in query:
+        return []
+    spans = list(re.finditer(r"\S+", query))
+    words = tuple(span.group().casefold() for span in spans)
+    # Suffix first: "Survivor PMTP"; prefix also accepts "PMTP Survivor".
+    edges: tuple[list[tuple[int, type[Service], str]], ...] = ([], [])
+    for service in services:
+        names = (service.ID, service.NAME, service.tag(), *service.ALIASES)
+        for name in dict.fromkeys(names):
+            parts = tuple(name.casefold().split())
+            count = len(parts)
+            if parts == words:
+                # A service name by itself still opens that service, not a
+                # shorter, overlapping brand's search with the rest as a title.
+                return []
+            if not service.SUPPORTS_SEARCH or not count or count > len(words):
+                continue
+            if words[-count:] == parts:
+                edges[0].append((count, service, query[:spans[-count].start()].strip()))
+            if words[:count] == parts:
+                edges[1].append((count, service, query[spans[count - 1].end():].strip()))
+    hits: dict[tuple[str, str], tuple[type[Service], str]] = {}
+    for edge in edges:
+        longest = max((count for count, _service, _query in edge), default=0)
+        for count, service, keywords in sorted(edge, key=lambda hit: (hit[1].NAME.casefold(), hit[1].ID, hit[2])):
+            if count == longest:
+                hits.setdefault((service.ID, keywords), (service, keywords))
+    return list(hits.values())
 
 
 def link_matches(services: list[type[Service]], query: str) -> list[type[Service]]:
@@ -386,6 +426,7 @@ class _Result:
     setting: SettingHit | None = None
     export_path: Path | None = None
     record: KeyRecord | None = None
+    search_query: str | None = None
 
     @property
     def category(self) -> str | None:
@@ -402,7 +443,8 @@ class _Result:
         if self.record is not None:
             record = self.record
             return self.kind, record.service, record.kid, record.key, record.title, record.created_at
-        identity = self.setting.identity if self.setting else str(self.export_path) if self.export_path else self.label
+        identity = (self.search_query if self.search_query is not None else
+                    self.setting.identity if self.setting else str(self.export_path) if self.export_path else self.label)
         return self.kind, self.service.ID if self.service else "", identity
 
 
@@ -435,6 +477,8 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self.catalog_service: type[Service] | None = None
         self.target_service: type[Service] | None = None
         self._results: list[_Result] = []
+        self._result_prompts: list[Text] = []
+        self._rendered_locale = ""
         self._index: list[SettingHit] = []
         self._index_signature = None
         self._page_size = PAGE_SIZE
@@ -444,11 +488,13 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self._export_generation = 0
         self._exports_loading = False
         self._exports_failed = False
+        self._exports_settled = False
         self._local_key_signature = None
         self._local_key_generation = 0
         self._local_key_records: list[KeyRecord] = []
         self._local_keys_loading = False
         self._local_keys_failed = False
+        self._local_keys_settled = False
 
     def compose(self) -> ComposeResult:
         yield from self.compose_header()
@@ -483,6 +529,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         # Rich prompts carry literal inks, so repaint them on a live theme
         # change as well as on query/locale updates.
         self.app.theme_changed_signal.subscribe(self, lambda _theme: self.rebuild())
+        self._rendered_locale = get_translator().locale
         self._render_caption()
         self.refresh_banner()
         self.refresh_env()
@@ -520,16 +567,23 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         columns.first().styles.width = width
 
     def on_screen_resume(self, event) -> None:
-        self.relocalize()
+        if self._rendered_locale != get_translator().locale:
+            self.relocalize()
+        else:
+            self.refresh_after_settings()
 
     def refresh_after_settings(self) -> None:
         self.refresh_env()
+        self._render_mode()
+        if self.search_mode == "exports" or self.search_mode == "auto" and self._auto_shows("exports") and self._export_folder is not None:
+            self._refresh_exports(force=True)
         self._refresh_local_keys(force=True)
         self.rebuild()
 
     def relocalize(self) -> None:
         from .chrome import refresh_locale_widgets
 
+        self._rendered_locale = get_translator().locale
         refresh_locale_widgets(self)
         self._render_caption()
         self.refresh_env()
@@ -571,11 +625,12 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             # Keep the explicitly chosen service visible in the narrower button.
             caption = f"{tr('keys.open')} · {service.NAME}" if self.search_mode == "open" else label
         button = self.query_one("#beta-mode", Button)
-        button.label = Text(caption + " ▾")
+        rendered = Text(caption + " ▾")
+        # Auto-width controls only need a layout when the caption changes.
+        if button.label != rendered:
+            button.label = rendered
+            button.refresh(layout=True)
         button.tooltip = label
-        # Button.label repaints but does not request new auto-width layout.
-        # A chosen scope must not stay clipped to the old, shorter "Auto" width.
-        button.refresh(layout=True)
         self.query_one("#filter", _SearchInput).placeholder = tr(f"beta.placeholder.{self.search_mode}")
 
     def action_focus_search(self) -> None:
@@ -736,10 +791,15 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         signature = (query, names, id(self.app.vaults)) if eligible else None
         if not force and signature == self._local_key_signature:
             return
+        if signature != self._local_key_signature:
+            # A different query/source must never inherit another query's keys.
+            # A same-query refresh keeps its snapshot until the replacement is ready.
+            self._local_key_records = []
+            self._local_keys_settled = False
+            self._local_keys_failed = False
         self._local_key_signature = signature
         self._local_key_generation += 1
-        self._local_key_records = []
-        self._local_keys_loading, self._local_keys_failed = bool(eligible and names != ()), False
+        self._local_keys_loading = bool(eligible and names != ())
         if self._local_keys_loading:
             self._search_local_keys(query, names, self._local_key_generation)
         else:
@@ -763,10 +823,13 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         event.stop()
         if event.generation != self._local_key_generation:
             return
+        changed = (not self._local_keys_settled or self._local_key_records != event.records
+                   or self._local_keys_failed != event.failed)
         self._local_key_records = event.records
         self._local_keys_loading, self._local_keys_failed = False, event.failed
+        self._local_keys_settled = True
         results = self.query("#beta-results")
-        if self.search_mode in {"auto", "vault"} and results:
+        if changed and self.search_mode in {"auto", "vault"} and results:
             self.rebuild(preserve_selection=self._navigated or results.first().has_focus)
 
     def _local_key_rows(self) -> list[_Result]:
@@ -782,9 +845,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             return
         if folder != self._export_folder:
             self._export_hits = []
+            self._exports_settled = False
+            self._exports_failed = False
         self._export_folder = folder
         self._export_generation += 1
-        self._exports_loading, self._exports_failed = True, False
+        self._exports_loading = True
         self._index_exports(folder, self._export_generation)
 
     @work(thread=True, exclusive=True, group="beta-export-index")
@@ -816,10 +881,13 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         event.stop()
         if event.generation != self._export_generation:
             return
+        changed = (not self._exports_settled or self._export_hits != event.hits
+                   or self._exports_failed != event.failed)
         self._export_hits = event.hits
         self._exports_loading, self._exports_failed = False, event.failed
+        self._exports_settled = True
         results = self.query("#beta-results")
-        if self.search_mode in {"auto", "exports"} and results:
+        if changed and self.search_mode in {"auto", "exports"} and results:
             # A cold Auto scan initially shows fallback search actions. Prefer
             # the new first match unless the user has already chosen a result.
             preserve = self.search_mode == "exports" or self._navigated or results.first().has_focus
@@ -893,8 +961,14 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 services.sort(key=lambda service: (service_rank(service, query), service.NAME.casefold()))
                 rows = [_Result("service", service.NAME, service.ID, service=service) for service in services]
                 if mode == "auto" and not query.startswith(("/", "~", "\\")):
+                    scoped_searches = [
+                        _Result("catalog", tr("beta.action.catalog_scoped", query=keywords, service=service.NAME),
+                                service.ID, service=service, search_query=keywords)
+                        for service, keywords in catalog_intents(self.app.services, query)
+                    ] if self._auto_shows("catalog") else []
                     key_rows = self._local_key_rows()[:AUTO_KEY_LIMIT] if self._auto_shows("vault") else []
                     rows = rows[:3 if key_rows else 5]
+                    rows = scoped_searches + rows
                     rows.extend(key_rows)
                     if key_rows:
                         rows.append(_Result("vault", tr("beta.action.vault")))
@@ -913,17 +987,18 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         visible = rows[:self._page_size]
         if len(rows) > len(visible):
             visible.append(_Result("more", tr("search.load_more"), str(len(rows) - len(visible))))
-        self._results = visible
-        options.clear_options()
-        for row in visible:
-            options.add_option(Option(self._result_prompt(row)))
+        prompts = [self._result_prompt(row) for row in visible]
+        if visible != self._results or prompts != self._result_prompts:
+            options.clear_options()
+            options.add_options(Option(prompt) for prompt in prompts)
+        self._results, self._result_prompts = visible, prompts
         options.display = bool(visible)
         empty = self.query_one("#beta-empty", Static)
         empty.display = bool(not visible and (mode == "exports" or query and query != "/"))
         if empty.display:
             message = "beta.none"
             if mode == "exports":
-                if self._exports_loading:
+                if self._exports_loading and not self._exports_settled:
                     message = "beta.exports_loading"
                 elif self._exports_failed:
                     message = "beta.exports_failed"
@@ -931,7 +1006,8 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                     message = "import.empty"
             elif mode == "url" and query:
                 message = "beta.no_url_match"
-            empty.update(tr(message))
+            if empty.content != tr(message):
+                empty.update(tr(message))
         if visible:
             options.highlighted = next((i for i, row in enumerate(visible) if row.identity == wanted), 0)
             options.scroll_to(y=scroll_y, animate=False)
@@ -939,7 +1015,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         summary.display = bool(visible or mode == "vault" and query)
         status = tr("beta.results", count=len(rows)) if visible else ""
         if mode == "vault" and query:
-            if self._local_keys_loading:
+            if self._local_keys_loading and not self._local_keys_settled:
                 status = tr("beta.local_keys_loading")
             elif self._local_keys_failed:
                 status = tr("beta.local_keys_failed")
@@ -947,10 +1023,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 status = tr("search.vault_off")
             elif not self._local_key_records:
                 status = tr("search.no_key_matches")
-        summary.update(status)
+        if summary.content != status:
+            summary.update(status)
 
     def _result_prompt(self, row: _Result) -> Text:
-        text = Text(no_wrap=True, overflow="ellipsis") if row.kind in {"export", "key"} else Text()
+        text = Text(no_wrap=True, overflow="ellipsis") if row.kind in {"export", "key"} or row.search_query is not None else Text()
         if self.search_mode == "auto" and row.category is not None:
             text.append(
                 f"[{tr(f'beta.category.{row.category}')}] ",
@@ -1087,6 +1164,16 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             copy_key_record(self.app, row.record, self.notify)
         elif row.kind == "add_keys":
             self.app.action_add_keys()
+        elif row.kind == "catalog" and row.search_query is not None:
+            # Recheck current input and registration in case this row outlived
+            # an edit, a settings change or a service-code reload.
+            service = next((service for service, keywords in catalog_intents(self.app.services, query)
+                            if row.service is not None and service.ID == row.service.ID
+                            and keywords == row.search_query), None)
+            if self.search_mode != "auto" or service is None:
+                self.rebuild()
+                return
+            self.app.open_service(service, search=row.search_query)
         elif row.kind in {"catalog", "open"}:
             service = self._service_scope()
             if service is not None:

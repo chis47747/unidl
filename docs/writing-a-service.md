@@ -878,6 +878,53 @@ for diagnostics and for the platform list; they do not select alternate
 hooks. Use `login()`/`auth_status()`, the flow entry points, `Playback`, and
 `save_name()` directly regardless of those fields.
 
+### Opt-in separation of muxed audio/video
+
+Set `Playback(split_muxed_audio=True, ...)` only when the service wants finite
+muxed sources exposed as independently selectable video/audio tracks:
+
+```python
+return Playback(
+    title=title,
+    save_name=self.save_name(title),
+    manifest_url=authorized_master,
+    split_muxed_audio=True,
+)
+```
+
+The default is **False**. No global option is added and ordinary muxed sources
+keep their audio. Core projects only sources marked `extra["muxed_audio"]`;
+separate audio and subtitles are unchanged. Each source exposes its first video
+and first audio. Core does not probe media or initialization bytes before the
+picker, assume audio from different renditions is identical, or invent audio
+bitrate/channel metadata. Audio rows retain the source resolution in their group
+label so users can distinguish renditions.
+
+Projection runs after `filter_tracks()`. Annotate the original sources there
+with real `language`, `name`, role and original/default flags. Optional verified
+embedded-audio hints are `extra["audio_language"]`, `muxed_audio_codec`,
+`muxed_audio_bitrate` (bits/second) and `muxed_audio_channels`. Do not synthesize
+new audio streams in a service filter; Core retains provenance and filtering
+for both projected rows.
+
+The downloader joins/decrypts one physical source and uses FFmpeg stream copy
+to extract only selected projections. Selecting both projections of that source
+shares its transfer, even concurrently. Selecting audio alone still transfers
+the muxed source; selecting audio from a different rendition requires that
+source too. Completed source/output checkpoints survive peer failures. Missing
+FFmpeg or a missing actual selected stream is an explicit error, not a silent
+fallback to muxed output.
+
+The initial contract supports clear and HLS AES-128 VOD. Live recording is left
+unchanged; CENC/CBCS/SAMPLE-AES source separation is explicitly rejected until
+multi-track sample decryption is supported and verified. Encrypted separation
+also cannot use `--no-decrypt`. Master/media exports and commands retain the
+policy without expanded segment arrays or a dependency on the service plugin.
+Normal output can mux selected files together again; **No mux (original tracks)**
+keeps the independent source-codec files.
+
+### Post-parse track filtering
+
 There is no `get_tracks()` hook that lets a service replace Core's parser. A
 service may, however, implement `filter_tracks(playback, tracks, log)` after
 the manifest has been parsed. Return an iterable containing only the existing

@@ -604,6 +604,8 @@ def _master_references(playback: Playback, tracks: Any) -> tuple[str, ...]:
         origin_count = len({id(origin) for origin in getattr(tracks, "origins", {}).values()})
         if any(record.get("metadata") for record in records) or len(records) > origin_count:
             return ()
+    if playback.split_muxed_audio or any(stream.extra.get("_unidl_demux_media") for stream in tracks.streams):
+        return ()  # The source bundle retains the service-opted-in separation policy.
     origins = getattr(tracks, "origins", {})
     urls: list[str] = []
     labels: dict[str, dict[str, str]] = {}

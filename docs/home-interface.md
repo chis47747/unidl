@@ -76,7 +76,7 @@ card to the available space.
 
 | Mode | What it does |
 |------|--------------|
-| Auto | Recognizes a supported URL, an existing export JSON path or a KID/key query. Other text offers matching home-visible services, local export files, settings and explicit title-search actions. |
+| Auto | Recognizes a supported URL, an existing export JSON path or a KID/key query. Other text offers matching home-visible services, local export files, settings and explicit title-search actions, including service searches inferred from a name or tag beside the keywords. |
 | Find services | Searches home-visible service names, IDs and aliases. An exact, unambiguous name can open directly on Enter. |
 | JustWatch | Submitting a title opens the existing JustWatch search using its configured country and availability regions. |
 | Search within a service | First choose a registered service that supports search, then submit a title. This uses that service's own search flow, not JustWatch. |
@@ -94,6 +94,40 @@ the chosen service; choose that mode again to select a different one.
 **Open with service** remembers its own chosen service independently. Once
 selected, the left control shows **open · Service name**; the full mode and
 service name remain available in its tooltip.
+
+### Auto service-search suggestions
+
+In Auto, put a service name, ID, declared alias or short tag before or after
+the title keywords. For example, `The Tourist bbc`, `The Tourist iP` and
+`BBC iPlayer The Tourist` offer **Search “The Tourist” in BBC iPlayer** (with the query's
+original capitalization). Choosing this candidate uses the same service search
+as **Search within a service**, without opening the service selector.
+
+Matching uses complete whitespace-separated words, ignores case and accepts
+multi-word service names. At each end, the longest matching name wins:
+`The Tourist BBC iPlayer` removes the full `BBC iPlayer`, not just a shorter
+overlapping word. Partial names, words in the middle of a title and unregistered
+or non-searchable services do not produce these suggestions. Only a service
+name with no remaining keywords retains the ordinary service-opening behavior.
+If names or tags are ambiguous, each interpretation is a separate candidate;
+UniDL does not silently choose a service.
+
+The candidate shows the service and the exact remaining keywords. Typing only
+builds suggestions locally. Click one to search, or press Enter to focus the
+results and Enter again to confirm the selected candidate. URL, export-path
+and KID/key routing keep precedence. Inference is bounded to 4,096 characters;
+longer input remains available through the explicit search mode.
+
+Only registered services declaring search support are considered, including
+services hidden from the classic home grid. The **Search within a service**
+Auto-result checkbox controls these suggestions; its explicit mode remains
+available when unchecked. Other Auto results, JustWatch and the generic service
+selector remain available with the original full input. Explicit search modes
+never strip service words automatically.
+
+This shortcut leaves Auto, its full input and the remembered explicit service
+scope unchanged. Back follows the service's existing page navigation and
+eventually returns to the same Auto query and selection.
 
 In **Open with service**, the service's existing URL/content-ID handler owns
 validation. A numeric ID, a case-sensitive ID, a link without an automatic match,
@@ -217,7 +251,13 @@ Single-title exports use normal delivery; multi-title exports open the existing
 entry selector rather than starting an arbitrary episode.
 
 Back from a service, search, setting or import screen returns to this same home
-with its mode, input and result selection retained. On the home itself,
+with its mode, input and result selection retained. Known readiness/import
+status and same-query search results stay visible while local background
+refreshes run, rather than reverting to loading placeholders. Unchanged
+results keep their existing list and layout; changed data replaces the snapshot
+when it is ready. Changing the query, Vault targets or source folder clears
+results from the old source immediately. Real theme, language, device and
+window-size changes still update the interface normally. On the home itself,
 `ctrl+b` moves focus from results to the input, then clears the query, then
 returns a non-Auto mode to Auto. The top-right **Search** button and `ctrl+f`
 open the existing global search page, just as on the classic home; they do not

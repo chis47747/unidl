@@ -46,6 +46,7 @@ from .downloader import (
     HlsCrypto,
     ProgressUpdate,
     _default_tmp_root,
+    _output_path,
     _resume_url_key,
     _stream_resume_key,
     _validate_striped_blowfish_input,
@@ -99,6 +100,7 @@ from .loader import LoadError, normalize_headers
 from .models import SegmentInfo, StreamInfo
 from .mux_audio import normalize_default_audio, resolve_default_audio
 from .mux_subtitle import normalize_default_subtitle, resolve_default_subtitle
+from .muxed import MuxedSourceCache, check_source, demux_file, is_demux_stream, projection_source
 from .parser import parse_source
 from .postprocess import (
     FFmpegProgress,
@@ -835,6 +837,7 @@ def _apply_original_track_output(args: argparse.Namespace) -> None:
 
 def _download_impl(args: argparse.Namespace) -> int:
     _checkpoint_embedding(args)
+    args._unidown_muxed_cache = MuxedSourceCache()
     _apply_original_track_output(args)
     colors = _colors(args)
     # Validate a user-supplied sidecar before fetching or downloading media. Core
@@ -2073,6 +2076,8 @@ _COMPLETED_TRACK_CACHE_VERSION = 1
 
 def _completed_track_cache_identity(stream, filename: str | None, args: argparse.Namespace) -> dict:
     return {
+        **({"muxed_source": stream.extra["_unidl_muxed_source"],
+            "demux_media": stream.extra["_unidl_demux_media"]} if is_demux_stream(stream) else {}),
         "stream_key": _stream_resume_key(stream),
         "track_shape": {
             key: getattr(stream, key, None)
@@ -2194,6 +2199,53 @@ class _ProgressTailWidths:
     speed: int
 
 
+def _prepare_muxed_projection(stream, name, args, headers, keys, hls_crypto, max_speed,
+                              output_dir, status, progress, emit, workers):
+    """Download/decrypt one physical source once, then extract this selection."""
+    source = projection_source(stream)
+    check_source(source)
+    if source.encrypted and args.no_decrypt:
+        raise ValueError("Muxed A/V separation cannot be combined with --no-decrypt on encrypted sources.")
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg is required to separate muxed audio and video.")
+    cache = getattr(args, "_unidown_muxed_cache", None)
+    if cache is None:
+        cache = args._unidown_muxed_cache = MuxedSourceCache()
+    key = cache.key(source)
+    started = time.monotonic()
+
+    def fetch_source():
+        source_args = copy.copy(args)
+        source_args.save_name = f"muxed-{key}"
+        source_args.save_pattern = None
+        source_args.audio_format = None
+        source_args.repack = False
+        # Report physical transfer work against the projection that initiated
+        # it; the temporary source object is not a row in Core's track picker.
+        hooks = getattr(args, "embedding_hooks", None)
+        if hooks is not None:
+            source_args.embedding_hooks = replace(hooks, progress=None)
+        forward = (lambda update: progress(replace(update, stream=stream))) if progress else None
+        return _download_selected_stream(
+            source, 1, 1, [source], source_args, headers, keys, hls_crypto,
+            max_speed, output_dir / ".muxed", None, False,
+            progress_callback=forward, status_printer=emit, workers=workers,
+        )
+
+    physical = cache.get(key, fetch_source, lambda: _checkpoint_embedding(args))
+    _checkpoint_embedding(args)
+    path = _output_path(stream, output_dir, name)
+    with status.spinning("Downloaded ✓", "Finalizing {spinner}"):
+        demux_file(physical.path, path, stream)
+    stream.size_bytes = path.stat().st_size
+    if progress:
+        count = stream.segments_count
+        transferred = physical.path.stat().st_size
+        progress(ProgressUpdate(stream, count, count, transferred, transferred,
+                                max(0.001, time.monotonic() - started), done=True))
+    return DownloadResult(stream, path), physical.cleanup_paths
+
+
 def _download_selected_stream(
     stream,
     offset: int,
@@ -2283,14 +2335,22 @@ def _download_selected_stream(
         _ensure_hls_segment_crypto_ready([stream], hls_crypto)
         if _stream_uses_bbts(stream):
             _bbts_key_hex(keys, hls_crypto, stream)
+    projection_result = None
+    projection_cleanup = []
     if progress_display is None or isinstance(progress_display, _DownloadProgress) and not progress_display.enabled:
         label = "Downloading:" if show_progress else "Queued:"
         emit(f"\n{paint(label, Palette.blue, colors)} {_format_numbered_line(original_index - 1, stream, checked=True, colors=colors)}")
     try:
+        if is_demux_stream(stream) and not checkpoint.reached("decrypted"):
+            projection_result, projection_cleanup = _prepare_muxed_projection(
+                stream, name, args, headers, keys, hls_crypto, max_speed,
+                output_dir, status, progress, emit, workers,
+            )
+            checkpoint.save("decrypted", projection_result.path, projection_result)
         effective_workers = workers or args.workers
         if getattr(args, "vgc", False) and _is_subtitle_stream(stream):
             effective_workers = 1
-        result = checkpoint.result
+        result = projection_result or checkpoint.result
         if result is None:
             result = download_stream(
                 stream,
@@ -2327,9 +2387,9 @@ def _download_selected_stream(
         if isinstance(progress_display, _DownloadProgress):
             progress_display.finish()
     current_path = checkpoint.path or result.path
-    cleanup_paths = [current_path]
+    cleanup_paths = [current_path, *projection_cleanup]
     result_temp_dir = result.temp_dir
-    if not checkpoint.reached("decrypted"):
+    if not checkpoint.reached("decrypted") and projection_result is None:
         if _is_sabr_stream(stream):
             _apply_sniffed_sabr_container_from_path(stream, current_path)
         status.set_path(current_path)
@@ -9739,6 +9799,12 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
                     if getattr(segment, "encrypted", False) and not getattr(segment, "key_id", None):
                         segment.key_id = inherited
     _filter_hls_segments_for_requested_asset(stream)
+    if is_demux_stream(stream):
+        stream.extra["muxed_audio"] = False
+        stream.extension = "mp4" if stream.media_type == "video" else (
+            "m4a" if pretty_codec(stream.codecs, "audio") in {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4"}
+            else "mka"
+        )
     return stream
 
 

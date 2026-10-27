@@ -197,6 +197,24 @@ class NativeDownloaderBackend:
                 # other selected tracks here.
                 continue
 
+    def split_muxed_audio(self, manifest: ParsedManifest) -> tuple[ParsedManifest, dict[int, list[StreamInfo]]]:
+        """Return independent output tracks plus original-to-projection identities."""
+        from .cli import _sort_streams
+        from .muxed import split_muxed_stream
+
+        originals = self.streams(manifest)
+        projections = {id(stream): split_muxed_stream(stream) for stream in originals}
+        if all(projections[id(stream)] == [stream] for stream in originals):
+            return manifest, projections
+        document = source_bundle(
+            [self._source_record(manifest.request)], mode="collection",
+            tracks=[self._json_track(stream) for stream in originals],
+        )
+        document["split_muxed_audio"] = True
+        request = replace(manifest.request, source=DeliverySource.from_json(document))
+        streams = _sort_streams([child for stream in originals for child in projections[id(stream)]])
+        return self.adopt(request, streams), projections
+
     def with_subtitles(self, manifest: ParsedManifest, references: Sequence[dict]) -> ParsedManifest:
         """Bind API subtitles to native delivery without fetching or converting."""
         from . import cli
@@ -416,6 +434,8 @@ class NativeDownloaderBackend:
                 duration=document.get("duration", 0), tracks=document.get("tracks"),
             )
             converted = with_subtitle_sources(converted, document.get("subtitle_sources", []))
+            if document.get("split_muxed_audio"):
+                converted["split_muxed_audio"] = True
             return [{**record, "document": converted}]
         if kind == "reference":
             if "export_entry" in record:
@@ -611,6 +631,12 @@ class NativeDownloaderBackend:
             "subtitle_original",
             "audio_atmos",
             "muxed_audio",
+            "muxed_audio_codec",
+            "muxed_audio_channels",
+            "muxed_audio_bitrate",
+            "audio_language",
+            "is_original",
+            "is_default",
             "audio_id",
             "video_id",
             "subtitle_id",

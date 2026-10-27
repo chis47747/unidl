@@ -49,7 +49,13 @@ def _parse_document(uri, data, headers, probe_direct, fetch_child_playlists):
     token = _SOURCE_DEPTH.set(depth + 1)
     try:
         if isinstance(data, dict) and BUNDLE_MARKER in data:
-            return _parse_source_bundle(uri, data, headers, probe_direct, fetch_child_playlists)
+            streams = _parse_source_bundle(uri, data, headers, probe_direct, fetch_child_playlists)
+            if data.get("split_muxed_audio"):
+                from ..cli import _sort_streams
+                from ..muxed import split_muxed_stream
+
+                streams = _sort_streams([child for stream in streams for child in split_muxed_stream(stream)])
+            return streams
         return _parse_track_document(uri, data, headers)
     finally:
         _SOURCE_DEPTH.reset(token)
@@ -291,6 +297,7 @@ def _apply_track_metadata(stream, record):
     for field in (
         "source_metadata", "subtitle_kind", "subtitle_original",
         "audio_atmos", "muxed_audio", "is_original", "is_default",
+        "muxed_audio_codec", "muxed_audio_channels", "muxed_audio_bitrate", "audio_language",
         "audio_id", "video_id", "subtitle_id", "group_ids", "audio_ids",
         "default", "autoselect", "channels_raw", "forced", "sdh", "cc",
         "closed_captions", "characteristics", "actual_bitrate", "dash_full_base_url_mode",

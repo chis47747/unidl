@@ -212,6 +212,8 @@ def validate_bundle(document: Mapping[str, Any]) -> None:
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
         raise ManifestSourceError("Invalid source timeline duration.")
     tracks = document.get("tracks", [])
+    if "split_muxed_audio" in document and type(document["split_muxed_audio"]) is not bool:
+        raise ManifestSourceError("Invalid muxed A/V separation policy.")
     if not isinstance(tracks, list) or not all(isinstance(track, dict) for track in tracks):
         raise ManifestSourceError("Invalid source track metadata.")
     subtitles = document.get("subtitle_sources", [])

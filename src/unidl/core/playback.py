@@ -349,6 +349,10 @@ class Playback:
     #: variants. Shared headers/proxy/base URL still apply to every source.
     imported_manifest_urls: tuple[str, ...] = ()
 
+    #: Service opt-in only. Expose finite muxed A/V sources as independently
+    #: selectable, losslessly separated video/audio. No probing before the picker.
+    split_muxed_audio: bool = False
+
     def __post_init__(self) -> None:
         self.save_name = safe_filename(self.save_name, label="Playback.save_name")
         if self.release_name_base:

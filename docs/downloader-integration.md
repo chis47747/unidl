@@ -180,6 +180,25 @@ documents do not cause an FFmpeg conversion warning. See
 [ASS/SSA subtitle inputs](downloader/ass-subtitles.md) for conversion,
 plain-text timing repair and style-preservation behavior.
 
+## Service-opted-in muxed A/V projections
+
+`Playback.split_muxed_audio` defaults to false. Services may opt in for clear or
+AES-128 VOD to expose independent video/audio entries without fetching media or
+init bytes before selection. The native backend retains the original source
+recipe plus `split_muxed_audio: true` in the manifest-source JSON, preserving
+master/media export and command replay without expanded segment arrays.
+Service filters annotate originals before projection; origin and output-filter
+identities are carried to both derived tracks.
+
+The downloader shares each physical source within one task, then joins,
+decrypts and losslessly extracts only selected first-video/first-audio streams.
+Each output has an independent durable checkpoint. Failed extraction retains a
+completed source checkpoint for retries; waiting for a shared source remains
+cancellable. FFmpeg is owned by the existing download runtime. Default services,
+unrelated tracks, legacy resume identities and live recording remain unchanged.
+Sample-encrypted CENC/CBCS/SAMPLE-AES sources are not supported by this initial
+separation contract; enabling it for them fails explicitly.
+
 ## Migration gates
 
 1. One UniDL distribution contains the service layer and download engine; no
