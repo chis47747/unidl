@@ -199,6 +199,28 @@ unrelated tracks, legacy resume identities and live recording remain unchanged.
 Sample-encrypted CENC/CBCS/SAMPLE-AES sources are not supported by this initial
 separation contract; enabling it for them fails explicitly.
 
+## VOD temporary disk usage
+
+After a complete track has been assembled, normal cleanup removes redundant
+download parts before whole-file decryption, but only when no later processing
+needs them. With resume enabled, the assembled track is validated and its
+checkpoint is atomically made independent of those parts before removal. A
+decryption failure can therefore retry the assembly without downloading it
+again. Older downloaded checkpoints are reduced in the same way on retry.
+Fragment-only decryption, section/timestamp processing and live recording keep
+their required inputs. `keep_temp` and disabled automatic cleanup retain files
+as requested.
+
+For an ordinary encrypted DASH VOD with a single KID per track, on one local
+filesystem with hard-link support and normal cleanup, the main peak is roughly
+two copies of the selected media plus safety headroom: parts plus their
+assembly, encrypted plus clear track, or clear tracks plus the muxed output.
+This is not a universal storage limit. Debug/retention settings, repacking,
+audio transcoding, hybrid processing, filesystems without hard links and
+cross-filesystem copies can need more. Check free space on the temporary
+filesystem as well as the final destination; the mux is staged before it is
+committed to the downloads directory.
+
 ## Migration gates
 
 1. One UniDL distribution contains the service layer and download engine; no

@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.5.3] - 2026-10-28
+
+### Windows clipboard
+
+- Fixed copying Unicode text on Windows through native clipboard APIs with pointer-sized handles, an owned clipboard window and bounded retries, without requiring PowerShell or terminal clipboard support.
+- Unified copy-result handling across mouse selection, commands, paths, keys, links and logs; showed success only after a confirmed native write and warned when terminal-only copying could not be confirmed.
+- Preserved the application-local clipboard fallback and native macOS/Linux clipboard tools, without crashing the interface on copy failures.
+
+### Temporary disk usage
+
+- Removed redundant VOD download parts before whole-file decryption when later processing no longer needed them, reducing temporary storage carried into decryption and muxing.
+- Validated the assembled track and atomically removed its checkpoint's fragment dependencies before cleanup, preserving retries without redownloading after decryption failure and reducing older checkpoints on retry.
+- Retained inputs needed for fragment decryption, section/timestamp processing and live recording, honored temporary-file retention settings, and documented filesystem and processing conditions that could still require additional space.
+
+### Service subtitles and episodes
+
+- Added Fawesome TV and FilmRise API subtitles to the shared track picker and selected-sidecar download/mux flow, retaining subtitle format metadata.
+- Added bounded, deduplicated season-episode pagination for both services so longer seasons no longer stopped at the first page.
+
 ## [2.5.2] - 2026-10-27
 
 ### Muxed audio/video separation

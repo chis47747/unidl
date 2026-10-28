@@ -1,24 +1,37 @@
 """FilmRise - free ad-supported movies, TV shows, and live FAST channels.
-
-Authorization:  Anonymous session (no credentials needed), auto-refreshing token.
-Catalogue:      App Browse Home (sections, shelves/categories), native search, live FAST channels, and reference IDs.
-Playback:       Clear HLS/MP4 or Widevine DRM DASH MPD; live HLS with macro cleanup.
-Attachments:    Posters, backdrops, banners, thumbnails, and icons.
-Chapters:       Intro and credits navigation markers.
-Subtitles:      Multi-language closed captions.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
 from ...core.cdm import CdmError
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
-from ...core.playback import DrmInfo, Playback
+from ...core.playback import DrmInfo, ExternalTrack, Playback
+from ...core.secureio import atomic_write_bytes, private_directory
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
+from ...downloader.models import StreamInfo
 from . import api
+
+_SUBTITLE_CODECS = {
+    "srt": "subrip",
+    "vtt": "webvtt",
+    "ttml": "ttml",
+    "dfxp": "ttml",
+    "xml": "ttml",
+}
+
+
+def _subtitle_extension(url: str) -> str:
+    clean = str(url or "").lower().split("?", 1)[0]
+    for ext in (".srt", ".vtt", ".ttml", ".dfxp", ".xml"):
+        if clean.endswith(ext):
+            return ext[1:]
+    return "srt"
 
 
 @registry.register
@@ -48,7 +61,6 @@ class FilmRise(Service):
         super().__init__(ctx)
         self._api: api.FilmRiseApi | None = None
 
-    # -------------------------------------------------------------------- auth
 
     def auth_status(self) -> AuthStatus:
         raw = self.ctx.tokens.read(self.TOKEN_FILE) or {}
@@ -118,14 +130,8 @@ class FilmRise(Service):
         self._api = client
         return client
 
-    # ------------------------------------------------------------------ menu
 
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
-        """FilmRise main service menu.
-
-        Because FilmRise has no web app, browsing home categories and shelves
-        is provided directly as the primary discovery entrypoint alongside native search.
-        """
         while True:
             status = self._auth_status_quietly()
             options: list[Choice] = [
@@ -197,10 +203,8 @@ class FilmRise(Service):
             if not ctx.interactive:
                 break
 
-    # ------------------------------------------------------------- browsing
 
     def browse(self, ctx: FlowContext) -> Iterator[Ask]:
-        """Browse FilmRise home sections, shelves, and titles."""
         client = self.client(ctx)
         ctx.status("Loading FilmRise home sections")
         try:
@@ -292,10 +296,6 @@ class FilmRise(Service):
                 yield from self._emit_playable(ctx, client, chosen)
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
-        """Search using native FilmRise search API (recipes.php?searchType=search).
-
-        Decoupled from Core JustWatch search.
-        """
         client = self.client(ctx)
         ctx.status(f"Searching FilmRise for {query}")
         try:
@@ -326,7 +326,6 @@ class FilmRise(Service):
                 yield from self._emit_playable(ctx, client, chosen)
 
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
-        """Browse and stream live FAST channels."""
         client = self.client(ctx)
         ctx.status("Loading FilmRise live channels")
         try:
@@ -354,7 +353,6 @@ class FilmRise(Service):
             yield from self._emit_live(ctx, client, chosen)
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
-        """Open a content reference ID or supported URL."""
         try:
             kind, content_id = api.parse_filmrise_reference(target)
         except api.FilmRiseError as exc:
@@ -373,7 +371,6 @@ class FilmRise(Service):
         client = self.client(ctx)
         yield from self._open_reference(ctx, client, kind, content_id, title_hint=title_hint)
 
-    # ------------------------------------------------------------- resolutions
 
     def _open_reference(
         self,
@@ -385,12 +382,10 @@ class FilmRise(Service):
     ) -> Iterator[Ask]:
         trimmed = api.trim_id(content_id)
 
-        # 1. Explicit TV Show
         if kind == "show":
             yield from self._open_show(ctx, client, trimmed)
             return
 
-        # 2. Explicit Live channel
         if kind == "live":
             ctx.status(f"Loading live channel {trimmed}")
             channels = client.get_live_channels()
@@ -401,7 +396,6 @@ class FilmRise(Service):
             ctx.error(f"Live channel {content_id} not found")
             return
 
-        # 3. Explicit Movie
         if kind == "movie":
             ctx.status(f"Loading movie {trimmed}")
             try:
@@ -412,7 +406,6 @@ class FilmRise(Service):
                 ctx.error(str(exc))
                 return
 
-        # 4. Auto: probe if it's a TV show first
         try:
             series_item, seasons = client.get_show(trimmed)
             if seasons:
@@ -421,7 +414,6 @@ class FilmRise(Service):
         except Exception:
             pass
 
-        # If not a show, fetch as movie
         ctx.status(f"Loading title {trimmed}")
         try:
             item = client.get_video(trimmed, title_hint=title_hint)
@@ -450,12 +442,10 @@ class FilmRise(Service):
         if series_item and series_item.title:
             series = series_item
 
-        # Single season: pick episode directly
         if len(seasons) == 1:
             yield from self._pick_episodes(ctx, client, series, seasons[0])
             return
 
-        # Multiple seasons: pick season first
         while True:
             try:
                 chosen_season = yield ctx.pick(
@@ -509,8 +499,6 @@ class FilmRise(Service):
             for ep in selected:
                 yield from self._emit_playable(ctx, client, ep, series=series)
             return
-
-    # ------------------------------------------------------------- emissions
 
     def _emit_playable(
         self,
@@ -606,7 +594,6 @@ class FilmRise(Service):
             note=item.detail,
         )
 
-        # DRM setup
         if item.is_drm:
             playback.drm = DrmInfo(
                 system="widevine",
@@ -616,16 +603,13 @@ class FilmRise(Service):
         else:
             playback.drm = DrmInfo(clear=True)
 
-        # Subtitles
         playback.subtitle_references = client.extract_subtitles(item)
 
-        # Chapters
         if self.fetch_chapters_enabled():
             chapters = client.parse_chapters(item)
             if chapters:
                 playback.chapters = chapters
 
-        # Attachments
         if self.fetch_attachments_enabled():
             attachments = client.extract_attachments(item)
             if attachments:
@@ -633,8 +617,93 @@ class FilmRise(Service):
 
         return playback
 
+    def augment_tracks(
+        self, playback: Playback, tracks, log
+    ) -> list[StreamInfo] | None:
+        del tracks
+        rows: list[StreamInfo] = []
+        seen: set[str] = set()
+        for index, reference in enumerate(playback.subtitle_references, 1):
+            url = str(reference.url or "").strip()
+            if not url:
+                continue
+            key = url.split("?", 1)[0].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            extension = reference.format or _subtitle_extension(url)
+            codec = _SUBTITLE_CODECS.get(extension, "subrip" if extension == "srt" else "webvtt")
+            language = reference.language or "und"
+            name = reference.name or language
+            rows.append(
+                StreamInfo(
+                    manifest_type="service",
+                    media_type="subtitle",
+                    url=url,
+                    original_url=url,
+                    id=f"filmrise-subtitle-{index}",
+                    group_id=reference.kind or "normal",
+                    name=name,
+                    language=language,
+                    codecs=codec,
+                    extension=extension,
+                    extra={
+                        "service_sidecar": "subtitle",
+                        "subtitle_reference_url": url,
+                        "subtitle_kind": reference.kind or "normal",
+                    },
+                )
+            )
+        if rows:
+            log(f"FilmRise: added {len(rows)} API subtitle track(s) to the picker")
+        return rows
+
+    def prepare_download(self, playback: Playback, log) -> None:
+        selected = [subtitle for subtitle in playback.subtitle_references if subtitle.selected]
+        if not selected:
+            return
+        client = self._api or self._new_client()
+        try:
+            directory = private_directory(self.ctx.subtitle_dir())
+        except OSError as exc:
+            log(f"Could not create FilmRise subtitle directory: {exc}")
+            return
+        staged = {Path(item.path).resolve() for item in playback.mux_imports if item.path}
+        prepared = 0
+        for index, subtitle in enumerate(selected, 1):
+            try:
+                data = client.fetch_subtitle(subtitle.url)
+            except api.FilmRiseError as exc:
+                log(f"could not download {subtitle.name or subtitle.language} subtitles: {exc}")
+                continue
+            extension = subtitle.format or _subtitle_extension(subtitle.url)
+            digest = hashlib.sha256(subtitle.url.encode("utf-8") + b"\0" + data).hexdigest()[:12]
+            language = subtitle.language or "und"
+            stem = f"{playback.save_name}.{language}.{index}.{digest}"[:180] or "FilmRise"
+            path = directory / f"{stem}.{extension}"
+            try:
+                atomic_write_bytes(path, data)
+            except OSError as exc:
+                log(f"could not write {subtitle.name or subtitle.language} subtitles: {exc}")
+                continue
+            resolved = path.resolve()
+            if resolved in staged:
+                continue
+            staged.add(resolved)
+            playback.mux_imports.append(
+                ExternalTrack(
+                    path=str(path),
+                    language=language,
+                    name=subtitle.name or language,
+                    kind=subtitle.kind or "normal",
+                    default=True if subtitle.selected and prepared == 0 else None,
+                )
+            )
+            prepared += 1
+        if prepared:
+            log(f"FilmRise subtitles: prepared {prepared}/{len(selected)} track(s)")
+
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
-        """Acquire Widevine DRM license from FilmRise license proxy."""
         client = self._api or self._new_client()
         try:
             return client.widevine_license(drm.license_url, challenge)

@@ -21,7 +21,6 @@ from ...core.playback import SubtitleReference
 
 logger = logging.getLogger(__name__)
 
-# Android TV APK Constants
 APP_PACKAGE = "com.future.moviesByFawesomeAndroidTV"
 APP_VERSION = "18.7"
 VERSION_CODE = 179
@@ -33,7 +32,6 @@ DEVICE_TYPE = 2
 DEVICE_TYPE_STR = "googletv-moviesByFawesomeAndroidTV"
 USER_AGENT = "okhttp/4.9.0"
 
-# Base Endpoints
 BASE_URL = "https://rapi.ifood.tv"
 INDEX_URL = f"{BASE_URL}/index.php"
 SUBCAT_URL = f"{BASE_URL}/sub-categories.php"
@@ -71,12 +69,6 @@ class FawesomeTVError(Exception):
 
 
 def trim_id(val: str | int | None) -> str:
-    """Trim 2000-prefixed IDs to canonical node/show IDs.
-
-    Matches com.future.util.Utilities.trimID:
-    If str contains '2000', removes the leading '2' and strips leading zeros.
-    E.g. '200000010834544' -> '10834544', '200000000017570' -> '17570'.
-    """
     s = str(val or "").strip()
     if s and "2000" in s:
         s = re.sub(r"^2", "", s)
@@ -85,7 +77,6 @@ def trim_id(val: str | int | None) -> str:
 
 
 def clean_live_macro_url(url: str) -> str:
-    """Strip unexpanded ad-tracking macros ([FT_...]) from FAST channel playlist URLs."""
     if not url:
         return ""
     parsed = urlparse(url)
@@ -101,7 +92,6 @@ def clean_live_macro_url(url: str) -> str:
 
 
 def normalize_language(lang: str) -> str:
-    """Normalize subtitle language names to standard codes."""
     if not lang:
         return "und"
     clean = lang.strip().lower()
@@ -114,7 +104,6 @@ def normalize_language(lang: str) -> str:
 
 @dataclass
 class TokenState:
-    """Anonymous session state aligned with Android TV APK."""
 
     device_id: str = ""
     session_id: str = ""
@@ -129,11 +118,9 @@ class TokenState:
     expires_at: float = 0.0
 
     def is_valid(self) -> bool:
-        """Whether the session has a device_id and is within its expiration window."""
         return bool(self.device_id and self.session_id and time.time() < (self.expires_at - 60))
 
     def is_refreshable(self) -> bool:
-        """Whether we can refresh this session without re-generating device_id."""
         return bool(self.device_id)
 
     def to_cache(self) -> dict[str, Any]:
@@ -199,7 +186,6 @@ class TokenState:
 
 @dataclass
 class TitleItem:
-    """A VOD item (movie or episode), or TV show series."""
 
     id: str
     node_id: str
@@ -270,7 +256,6 @@ class TitleItem:
 
 @dataclass
 class SeasonItem:
-    """A TV show season holding its episodes."""
 
     number: int
     title: str
@@ -282,7 +267,6 @@ class SeasonItem:
 
 @dataclass
 class LiveChannel:
-    """A FAST live TV channel."""
 
     id: str
     title: str
@@ -309,7 +293,6 @@ class LiveChannel:
 
 @dataclass
 class CategoryItem:
-    """Root or sub-category from index navigation."""
 
     id: str
     title: str
@@ -318,7 +301,6 @@ class CategoryItem:
 
 
 class FawesomeTVApi:
-    """Client for Fawesome TV backend APIs."""
 
     def __init__(
         self,
@@ -336,19 +318,15 @@ class FawesomeTVApi:
         self.state = state or TokenState()
         self.on_update = on_update
 
-    # ------------------------------------------------------------------ session
 
     def ensure_session(self) -> TokenState:
-        """Ensure an active anonymous session exists, refreshing if expired."""
         if self.state.is_valid():
             return self.state
 
         if self.state.is_refreshable():
             return self.refresh_session()
 
-        # Mint completely fresh anonymous session
         self.state = TokenState.mint_anonymous()
-        # Validate connectivity by pinging index.php
         try:
             self._get_json(INDEX_URL)
         except Exception as exc:
@@ -359,7 +337,6 @@ class FawesomeTVApi:
         return self.state
 
     def refresh_session(self) -> TokenState:
-        """Refresh current anonymous session token and save."""
         self.state.refresh()
         try:
             self._get_json(INDEX_URL)
@@ -382,8 +359,6 @@ class FawesomeTVApi:
 
     def get_drm_license_url(self) -> str:
         return DRM_LICENSE_URL_TEMPLATE.format(device_id=self.get_device_id())
-
-    # ---------------------------------------------------------------- HTTP base
 
     def _default_params(self) -> dict[str, str]:
         return {
@@ -409,14 +384,7 @@ class FawesomeTVApi:
         except (ValueError, json.JSONDecodeError) as exc:
             raise FawesomeTVError(f"Invalid JSON returned from {url}: {exc}") from exc
 
-    # ----------------------------------------------------------- Native Search
-
     def search(self, query: str, max_results: int = 50) -> list[TitleItem]:
-        """Perform native search using recipes.php?searchType=search.
-
-        Notice: Uses Fawesome's own native search API, strictly decoupled from
-        Core's JustWatch search.
-        """
         query_str = str(query or "").strip()
         if not query_str:
             return []
@@ -435,10 +403,8 @@ class FawesomeTVApi:
                 items.append(item)
         return items
 
-    # ---------------------------------------------------------------- Catalogues
 
     def get_categories(self) -> list[CategoryItem]:
-        """Retrieve top-level navigation categories from index.php."""
         data = self._get_json(INDEX_URL)
         channels = data.get("channels", []) if isinstance(data, dict) else []
         cats: list[CategoryItem] = []
@@ -459,8 +425,6 @@ class FawesomeTVApi:
         return cats
 
     def get_live_channels(self) -> list[LiveChannel]:
-        """Retrieve all live FAST channels by following index -> Live sub-categories."""
-        # 1. Fetch index to get Live subcategory URL
         cats = self.get_categories()
         live_cat = next((c for c in cats if c.is_live), None)
         subcat_url = (
@@ -477,7 +441,6 @@ class FawesomeTVApi:
             logger.debug("Failed to load live sub-categories: %s", exc)
             sub_rows = []
 
-        # 2. Iterate each live row feed
         for row in sub_rows:
             feed_url = row.get("url") or ""
             row_title = row.get("title") or "Live TV"
@@ -523,12 +486,10 @@ class FawesomeTVApi:
                     raw=ch,
                 )
 
-        # Populate current playing program from EPG if available
         live_list = list(channels_dict.values())
         return live_list
 
     def get_channel_epg(self, epg_url: str) -> list[dict[str, Any]]:
-        """Fetch program schedule from channel's epg_url."""
         if not epg_url:
             return []
         try:
@@ -538,10 +499,8 @@ class FawesomeTVApi:
             logger.debug("Failed to fetch EPG from %s: %s", epg_url, exc)
             return []
 
-    # ------------------------------------------------------------- Shows & VODs
 
     def get_show(self, show_id: str) -> tuple[TitleItem, list[SeasonItem]]:
-        """Fetch TV show details and its list of seasons."""
         trimmed = trim_id(show_id)
         params = {
             "searchType": "listoflist",
@@ -557,10 +516,8 @@ class FawesomeTVApi:
         if not isinstance(channels, dict) or not channels:
             raise FawesomeTVError(f"Show {show_id} contains no season channels")
 
-        # Create base TitleItem for the series
         first_season_data = next(iter(channels.values()), {})
         series_title = first_season_data.get("title") or f"Show {show_id}"
-        # If season title is like "Series Name S01", strip the season suffix
         clean_series_title = re.sub(r"\s+S\d+$", "", series_title, flags=re.IGNORECASE)
 
         series_year = None
@@ -617,28 +574,64 @@ class FawesomeTVApi:
                 )
             )
 
-        # Sort seasons by season number
         seasons.sort(key=lambda s: s.number)
         return series_item, seasons
 
-    def get_season_episodes(self, feed_url: str) -> list[TitleItem]:
-        """Fetch episodes for a specific season feed URL."""
+    def get_season_episodes(self, feed_url: str, page_size: int = 100) -> list[TitleItem]:
         if not feed_url:
             return []
-        data = self._get_json(feed_url)
-        results = data.get("results", []) if isinstance(data, dict) else []
+
         episodes: list[TitleItem] = []
-        for raw in results:
-            ep = self._parse_recipe_item(raw, default_kind="episode")
-            if ep:
-                episodes.append(ep)
+        seen_ids: set[str] = set()
+        page = 0
+        max_pages = 50  # Safety bound (up to 5000 episodes)
+
+        while page < max_pages:
+            params = {
+                "max-results": str(page_size),
+                "start-index": str(page),
+            }
+            try:
+                data = self._get_json(feed_url, params=params)
+            except Exception as exc:
+                logger.debug("Failed to fetch season episodes page %d: %s", page, exc)
+                break
+
+            if not isinstance(data, dict):
+                break
+
+            results = data.get("results", [])
+            if not isinstance(results, list) or not results:
+                break
+
+            new_count = 0
+            for raw in results:
+                ep = self._parse_recipe_item(raw, default_kind="episode")
+                if ep and ep.id not in seen_ids:
+                    seen_ids.add(ep.id)
+                    episodes.append(ep)
+                    new_count += 1
+
+            if new_count == 0:
+                break
+
+            total_count = data.get("count")
+            if total_count is not None:
+                try:
+                    if len(episodes) >= int(total_count):
+                        break
+                except (ValueError, TypeError):
+                    pass
+            elif len(results) < page_size:
+                break
+
+            page += 1
+
         return episodes
 
     def get_video(self, video_id: str, title_hint: str = "") -> TitleItem:
-        """Fetch video information by node ID using recipeInfo.php or search."""
         trimmed = trim_id(video_id)
 
-        # 1. If title_hint provided, try searching it first to get rich metadata including release_year
         if title_hint:
             try:
                 for it in self.search(title_hint, max_results=10):
@@ -647,7 +640,6 @@ class FawesomeTVApi:
             except Exception:
                 pass
 
-        # 2. Try recipeInfo.php?searchType=nid&nid=...
         data = self._get_json(RECIPE_INFO_URL, params={"searchType": "nid", "nid": trimmed})
         if isinstance(data, dict) and data.get("status") == "ok":
             node = data.get("node_data") or {}
@@ -664,7 +656,6 @@ class FawesomeTVApi:
                         pass
                 return self._parse_node_data(node, original_id=video_id)
 
-        # 3. Try searching by ID or looking up in search results
         search_results = self.search(trimmed, max_results=20)
         for it in search_results:
             if trim_id(it.id) == trimmed or trim_id(it.node_id) == trimmed:
@@ -672,10 +663,8 @@ class FawesomeTVApi:
 
         raise FawesomeTVError(f"No video found for ID {video_id}")
 
-    # ------------------------------------------------------------- DRM License
 
     def widevine_license(self, license_url: str, challenge: bytes) -> bytes:
-        """Execute Widevine DRM license acquisition."""
         url = license_url or self.get_drm_license_url()
         headers = {
             "User-Agent": USER_AGENT,
@@ -696,7 +685,14 @@ class FawesomeTVApi:
         except requests.RequestException as exc:
             raise FawesomeTVError(f"Widevine license acquisition failed: {exc}") from exc
 
-    # ---------------------------------------------------------- Content Parsers
+    def fetch_subtitle(self, url: str) -> bytes:
+        try:
+            resp = self.session.get(url, timeout=DEFAULT_TIMEOUT)
+            resp.raise_for_status()
+            return resp.content
+        except requests.RequestException as exc:
+            raise FawesomeTVError(f"Failed to fetch subtitle from {url}: {exc}") from exc
+
 
     def _parse_recipe_item(
         self, raw: dict[str, Any], default_kind: str = "movie"
@@ -719,10 +715,8 @@ class FawesomeTVApi:
             kind = "movie"
 
         video_url = raw.get("video_url") or raw.get("url") or ""
-        # Check DRM flag
         is_drm = raw.get("drm") == 1 or ".mpd" in video_url
 
-        # Duration & Year
         duration = None
         if raw.get("runtime"):
             try:
@@ -752,7 +746,6 @@ class FawesomeTVApi:
                 except (ValueError, TypeError):
                     pass
 
-        # Season and episode
         season_num = None
         if raw.get("season") is not None:
             try:
@@ -767,7 +760,6 @@ class FawesomeTVApi:
             except (ValueError, TypeError):
                 pass
 
-        # Subtitles
         subtitles: list[dict[str, str]] = []
         if raw.get("cc_path"):
             subtitles.append({"language": "English", "file_path": str(raw["cc_path"]), "name": "English"})
@@ -781,13 +773,11 @@ class FawesomeTVApi:
                         "name": lang_name,
                     })
 
-        # Chapters (seconds)
         intro_st = int(raw.get("intro_st") or 0)
         intro_et = int(raw.get("intro_et") or 0)
         endcredit_st = int(raw.get("endcredit_st") or 0)
         endcredit_et = int(raw.get("endcredit_et") or 0)
 
-        # Images
         images: dict[str, str] = {}
         for k, v in (
             ("hero_image", "hero"),
@@ -837,7 +827,6 @@ class FawesomeTVApi:
         video_url = node.get("video_url") or ""
         desc = node.get("field_recipe_description_value") or ""
         if isinstance(desc, str):
-            # Clean possible WYSIWYG residue
             desc = re.sub(r'\{.*?"class":"media-element file-wysiwyg"\}', "", desc).strip()
 
         year = None
@@ -881,10 +870,8 @@ class FawesomeTVApi:
             raw=node,
         )
 
-    # ------------------------------------------------ Chapters & Attachments
 
     def parse_chapters(self, item: TitleItem) -> list[Chapter]:
-        """Convert intro_st/et and endcredit_st/et (in seconds) to milliseconds Chapters."""
         chapters: list[Chapter] = []
         # Intro skip marker
         if item.intro_et > item.intro_st and item.intro_et > 0:
@@ -897,7 +884,6 @@ class FawesomeTVApi:
                 )
             )
 
-        # End credits skip marker
         if item.endcredit_st > 0:
             end_ms = item.endcredit_et * 1000 if item.endcredit_et > item.endcredit_st else None
             chapters.append(
@@ -912,11 +898,9 @@ class FawesomeTVApi:
         return chapters
 
     def extract_attachments(self, item: TitleItem) -> list[Attachment]:
-        """Extract posters, backdrops, and thumbnails as Attachments."""
         attachments: list[Attachment] = []
         seen_urls: set[str] = set()
 
-        # Priority order: poster, backdrop/hero, banner, thumbnail, icon
         mapping = [
             ("poster", "Poster", "poster"),
             ("hero", "Backdrop", "artwork"),
@@ -941,7 +925,6 @@ class FawesomeTVApi:
         return attachments
 
     def extract_subtitles(self, item: TitleItem) -> list[SubtitleReference]:
-        """Extract SubtitleReferences from item subtitles list."""
         refs: list[SubtitleReference] = []
         seen: set[str] = set()
         for idx, sub in enumerate(item.subtitles):
@@ -951,11 +934,17 @@ class FawesomeTVApi:
             seen.add(file_url)
             lang_name = sub.get("name") or sub.get("language") or "Subtitle"
             lang_code = normalize_language(lang_name)
+            clean = file_url.split("?", 1)[0].lower()
+            format_ext = next(
+                (ext for ext in ("srt", "vtt", "ttml", "dfxp", "xml") if clean.endswith("." + ext)),
+                "srt",
+            )
             refs.append(
                 SubtitleReference(
                     url=file_url,
                     language=lang_code,
                     name=lang_name,
+                    format=format_ext,
                     selected=(idx == 0),
                 )
             )
@@ -983,36 +972,29 @@ def parse_fawesometv_reference(target: str) -> tuple[str, str]:
     if not raw:
         raise FawesomeTVError("Empty Fawesome TV target reference")
 
-    # 1. Scheme URI: fawesometv:kind:id or fawesometv:id
     scheme_match = re.match(r"^(?:fawesometv|fawesome):(?:(movie|show|live|video):)?([0-9]+)$", raw, re.IGNORECASE)
     if scheme_match:
         k = scheme_match.group(1) or "auto"
         cid = scheme_match.group(2)
         return ("movie" if k == "video" else k.lower()), cid
 
-    # 2. Deep link scheme: happykids://play?...
     deep_match = re.search(r"[?&](?:contentID|keys|nid|id)=([0-9]+)", raw, re.IGNORECASE)
     if deep_match:
         return "auto", deep_match.group(1)
 
-    # 3. Web URLs
     if "fawesome.tv" in raw or "ifood.tv" in raw:
-        # Check shows / tv-shows
         show_match = re.search(r"/(?:shows|tv-shows)/([0-9]+)", raw, re.IGNORECASE)
         if show_match:
             return "show", show_match.group(1)
 
-        # Check live
         live_match = re.search(r"/(?:live|live-tv)/([0-9]+)", raw, re.IGNORECASE)
         if live_match:
             return "live", live_match.group(1)
 
-        # Check movies / topics
         movie_match = re.search(r"/(?:movies|movie|fawesome-topics)/([0-9]+)", raw, re.IGNORECASE)
         if movie_match:
             return "movie", movie_match.group(1)
 
-    # 4. Pure numeric ID
     if re.fullmatch(r"[0-9]+", raw):
         return "auto", raw
 

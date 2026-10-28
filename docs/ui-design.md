@@ -335,7 +335,21 @@ count and says when it includes rows the filter is hiding.
 ### Mouse
 
 Clicking anything actionable activates it. Dragging to select text copies it on
-release, through OSC 52 and through the OS clipboard tool where one exists.
+release through the shared clipboard boundary. Windows writes native Unicode
+text (including non-Latin characters and emoji) without requiring PowerShell
+or an OSC 52-capable terminal. If another application briefly holds the Windows
+clipboard, access is retried for up to about 80 ms. macOS uses `pbcopy`; Linux
+tries `wl-copy`, `xclip`, then `xsel` when available.
+
+Mouse selection, commands, export paths, keys, links and log copying share the
+same result handling. A Copied notification requires a successful native write;
+failed writes do not produce success notifications or crash the TUI. OSC 52 and
+the app-local cache remain available as fallbacks. A terminal-only attempt is
+reported as unconfirmed, since sending an escape sequence does not prove the
+terminal accepted it. If pasting still fails, select the visible text and use
+the terminal's own Copy command. Internal code calling `app.copy_text(text)`
+should stop its success notification when the result is `False`; the app has
+already shown a localized warning.
 
 ### Destructive actions confirm
 

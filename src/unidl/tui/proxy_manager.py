@@ -369,7 +369,8 @@ class ExpressLoginScreen(Screen[bool]):
 
     def action_copy(self) -> None:
         if self.authorization is not None:
-            self.app.copy_text(self.authorization.user_code)
+            if self.app.copy_text(self.authorization.user_code) is False:
+                return
             self.notify(tr("proxy.login.copied"), timeout=3)
 
     def action_cancel(self) -> None:

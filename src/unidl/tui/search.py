@@ -68,7 +68,8 @@ def copy_key_record(app, record: KeyRecord, notify) -> None:
     """Use the same clipboard boundary and feedback on Home and Vault search."""
     detail = f"{record.service} · {record.title or tr('search.unknown_title')}"
     try:
-        app.copy_text(record.pair())
+        if app.copy_text(record.pair()) is False:
+            return
         notify(f"{tr('search.copied', pair=record.pair())}\n{detail}", timeout=4)
     except Exception:
         notify(

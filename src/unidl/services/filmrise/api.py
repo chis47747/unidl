@@ -21,7 +21,6 @@ from ...core.playback import SubtitleReference
 
 logger = logging.getLogger(__name__)
 
-# Android TV APK Constants (com.recipe.filmrise v12.3-146)
 APP_PACKAGE = "com.recipe.filmrise"
 APP_VERSION = "12.3"
 VERSION_CODE = 146
@@ -71,12 +70,6 @@ class FilmRiseError(Exception):
 
 
 def trim_id(val: str | int | None) -> str:
-    """Trim 2000-prefixed IDs to canonical node/show IDs.
-
-    Matches com.recipe.util.Utilities.trimID:
-    If str contains '2000', removes the leading '2' and strips leading zeros.
-    E.g. '200000010758618' -> '10758618', '200000000082992' -> '82992'.
-    """
     s = str(val or "").strip()
     if s and "2000" in s:
         s = re.sub(r"^2", "", s)
@@ -85,7 +78,6 @@ def trim_id(val: str | int | None) -> str:
 
 
 def clean_live_macro_url(url: str) -> str:
-    """Strip unexpanded ad-tracking macros ([FT_...]) from FAST channel playlist URLs."""
     if not url:
         return ""
     parsed = urlparse(url)
@@ -101,7 +93,6 @@ def clean_live_macro_url(url: str) -> str:
 
 
 def normalize_language(lang: str) -> str:
-    """Normalize subtitle language names to standard codes."""
     if not lang:
         return "und"
     clean = lang.strip().lower()
@@ -114,7 +105,6 @@ def normalize_language(lang: str) -> str:
 
 @dataclass
 class TokenState:
-    """Anonymous session state aligned with Android TV APK."""
 
     device_id: str = ""
     session_id: str = ""
@@ -129,11 +119,9 @@ class TokenState:
     expires_at: float = 0.0
 
     def is_valid(self) -> bool:
-        """Whether the session has a device_id and is within its expiration window."""
         return bool(self.device_id and self.session_id and time.time() < (self.expires_at - 60))
 
     def is_refreshable(self) -> bool:
-        """Whether we can refresh this session without re-generating device_id."""
         return bool(self.device_id)
 
     def to_cache(self) -> dict[str, Any]:
@@ -199,7 +187,6 @@ class TokenState:
 
 @dataclass
 class TitleItem:
-    """A VOD item (movie or episode), or TV show series."""
 
     id: str
     node_id: str
@@ -286,7 +273,6 @@ class SeasonItem:
 
 @dataclass
 class LiveChannel:
-    """A FAST live TV channel."""
 
     id: str
     title: str
@@ -313,7 +299,6 @@ class LiveChannel:
 
 @dataclass
 class SectionItem:
-    """A top-level section from index.php (e.g. Home, TV, Movies, Live)."""
 
     id: str
     title: str
@@ -324,7 +309,6 @@ class SectionItem:
 
 @dataclass
 class ShelfItem:
-    """A shelf/row from sub-categories.php (e.g. Featured Movies & TV, Trending, etc.)."""
 
     id: str
     title: str
@@ -335,7 +319,6 @@ class ShelfItem:
 
 
 class FilmRiseApi:
-    """Client for FilmRise backend APIs."""
 
     def __init__(
         self,
@@ -353,19 +336,15 @@ class FilmRiseApi:
         self.state = state or TokenState()
         self.on_update = on_update
 
-    # ------------------------------------------------------------------ session
 
     def ensure_session(self) -> TokenState:
-        """Ensure an active anonymous session exists, refreshing if expired."""
         if self.state.is_valid():
             return self.state
 
         if self.state.is_refreshable():
             return self.refresh_session()
 
-        # Mint completely fresh anonymous session
         self.state = TokenState.mint_anonymous()
-        # Validate connectivity by pinging index.php
         try:
             self._get_json(INDEX_URL)
         except Exception as exc:
@@ -376,7 +355,6 @@ class FilmRiseApi:
         return self.state
 
     def refresh_session(self) -> TokenState:
-        """Refresh current anonymous session token and save."""
         self.state.refresh()
         try:
             self._get_json(INDEX_URL)
@@ -400,7 +378,6 @@ class FilmRiseApi:
     def get_drm_license_url(self) -> str:
         return DRM_LICENSE_URL_TEMPLATE.format(device_id=self.get_device_id())
 
-    # ---------------------------------------------------------------- HTTP base
 
     def _default_params(self) -> dict[str, str]:
         return {
@@ -426,14 +403,8 @@ class FilmRiseApi:
         except (ValueError, json.JSONDecodeError) as exc:
             raise FilmRiseError(f"Invalid JSON returned from {url}: {exc}") from exc
 
-    # ----------------------------------------------------------- Native Search
 
     def search(self, query: str, max_results: int = 50) -> list[TitleItem]:
-        """Perform native search using recipes.php?searchType=search.
-
-        Notice: Uses FilmRise's own native search API, strictly decoupled from
-        Core's JustWatch search.
-        """
         query_str = str(query or "").strip()
         if not query_str:
             return []
@@ -452,10 +423,8 @@ class FilmRiseApi:
                 items.append(item)
         return items
 
-    # --------------------------------------------------- Browse Home Navigation
 
     def get_sections(self) -> list[SectionItem]:
-        """Fetch top-level sections from index.php (Home, TV, Movies, Live)."""
         data = self._get_json(INDEX_URL)
         if not isinstance(data, dict) or data.get("status") != "ok":
             raise FilmRiseError("Failed to fetch FilmRise index categories")
@@ -484,7 +453,6 @@ class FilmRiseApi:
         return sections
 
     def get_shelves(self, section_name: str = "Home", section_url: str = "") -> list[ShelfItem]:
-        """Fetch rows/shelves for a section from sub-categories.php."""
         target_url = section_url or SUBCAT_URL
         params: dict[str, str] = {}
         if not section_url:
@@ -507,7 +475,7 @@ class FilmRiseApi:
             url = ch.get("url") or ""
             row_type = ch.get("row_type") or ""
             feed_type = ch.get("feed_type") or ""
-            # Filter out external child-app links that don't host FilmRise videos
+
             if "promoapps.php" in url:
                 continue
             is_live = row_type == "live" or "searchtype=live" in url.lower() or title.lower() == "live"
@@ -523,18 +491,16 @@ class FilmRiseApi:
             )
         return shelves
 
-    def get_shelf_items(self, shelf_url: str) -> list[TitleItem | LiveChannel]:
-        """Fetch content items (TitleItems or LiveChannels) from a shelf's feed URL."""
+    def get_shelf_items(self, shelf_url: str, page_size: int = 100) -> list[TitleItem | LiveChannel]:
         if not shelf_url:
             return []
 
-        data = self._get_json(shelf_url)
+        params = {"max-results": str(page_size)}
+        data = self._get_json(shelf_url, params=params)
         if not isinstance(data, dict) or data.get("status") != "ok":
             return []
 
-        # If the shelf contains TV shows as a listoflist channel mapping
         if "channels" in data and isinstance(data["channels"], dict):
-            # Show container format
             items: list[TitleItem | LiveChannel] = []
             for k, s_val in data["channels"].items():
                 if isinstance(s_val, dict):
@@ -571,11 +537,8 @@ class FilmRiseApi:
                     shelf_items.append(it)
         return shelf_items
 
-    # ----------------------------------------------------------- Live Channels
 
     def get_live_channels(self) -> list[LiveChannel]:
-        """Fetch active FAST live channels from FilmRise lineup."""
-        # 1. First attempt: fetch from Live section sub-categories
         try:
             live_shelves = self.get_shelves("Live")
             for shelf in live_shelves:
@@ -587,7 +550,6 @@ class FilmRiseApi:
         except Exception as exc:
             logger.debug("Failed to fetch live channels via Live shelf: %s", exc)
 
-        # 2. Second attempt: fetch from Home section's Live TV row
         try:
             home_shelves = self.get_shelves("Home")
             for shelf in home_shelves:
@@ -599,7 +561,6 @@ class FilmRiseApi:
         except Exception as exc:
             logger.debug("Failed to fetch live channels via Home Live shelf: %s", exc)
 
-        # 3. Fallback direct live searchType call
         params = {
             "searchType": "live",
             "keys": "110374",
@@ -660,7 +621,6 @@ class FilmRiseApi:
         )
 
     def get_epg_now_playing(self, epg_url: str) -> list[dict[str, Any]]:
-        """Fetch EPG schedule items for a live channel."""
         if not epg_url:
             return []
         try:
@@ -670,10 +630,8 @@ class FilmRiseApi:
             logger.debug("Failed to fetch EPG from %s: %s", epg_url, exc)
             return []
 
-    # ------------------------------------------------------------- Shows & VODs
 
     def get_show(self, show_id: str) -> tuple[TitleItem, list[SeasonItem]]:
-        """Fetch TV show details and its list of seasons."""
         trimmed = trim_id(show_id)
         params = {
             "searchType": "listoflist",
@@ -741,24 +699,61 @@ class FilmRiseApi:
         seasons.sort(key=lambda s: s.number)
         return series_item, seasons
 
-    def get_season_episodes(self, feed_url: str) -> list[TitleItem]:
-        """Fetch episodes for a specific season feed URL."""
+    def get_season_episodes(self, feed_url: str, page_size: int = 100) -> list[TitleItem]:
         if not feed_url:
             return []
-        data = self._get_json(feed_url)
-        results = data.get("results", []) if isinstance(data, dict) else []
+
         episodes: list[TitleItem] = []
-        for raw in results:
-            ep = self._parse_recipe_item(raw, default_kind="episode")
-            if ep:
-                episodes.append(ep)
+        seen_ids: set[str] = set()
+        page = 0
+        max_pages = 50
+
+        while page < max_pages:
+            params = {
+                "max-results": str(page_size),
+                "start-index": str(page),
+            }
+            try:
+                data = self._get_json(feed_url, params=params)
+            except Exception as exc:
+                logger.debug("Failed to fetch season episodes page %d: %s", page, exc)
+                break
+
+            if not isinstance(data, dict):
+                break
+
+            results = data.get("results", [])
+            if not isinstance(results, list) or not results:
+                break
+
+            new_count = 0
+            for raw in results:
+                ep = self._parse_recipe_item(raw, default_kind="episode")
+                if ep and ep.id not in seen_ids:
+                    seen_ids.add(ep.id)
+                    episodes.append(ep)
+                    new_count += 1
+
+            if new_count == 0:
+                break
+
+            total_count = data.get("count")
+            if total_count is not None:
+                try:
+                    if len(episodes) >= int(total_count):
+                        break
+                except (ValueError, TypeError):
+                    pass
+            elif len(results) < page_size:
+                break
+
+            page += 1
+
         return episodes
 
     def get_video(self, video_id: str, title_hint: str = "") -> TitleItem:
-        """Fetch video information by node ID using recipeInfo.php or search."""
         trimmed = trim_id(video_id)
 
-        # 1. If title_hint provided, try searching it first to get rich metadata
         if title_hint:
             try:
                 for it in self.search(title_hint, max_results=10):
@@ -767,7 +762,6 @@ class FilmRiseApi:
             except Exception:
                 pass
 
-        # 2. Try recipeInfo.php?searchType=nid&nid=...
         data = self._get_json(RECIPE_INFO_URL, params={"searchType": "nid", "nid": trimmed})
         if isinstance(data, dict) and data.get("status") == "ok":
             node = data.get("node_data") or {}
@@ -784,7 +778,6 @@ class FilmRiseApi:
                         pass
                 return self._parse_node_data(node, original_id=video_id)
 
-        # 3. Try searching by ID in search results
         search_results = self.search(trimmed, max_results=20)
         for it in search_results:
             if trim_id(it.id) == trimmed or trim_id(it.node_id) == trimmed:
@@ -792,10 +785,8 @@ class FilmRiseApi:
 
         raise FilmRiseError(f"No video found for ID {video_id}")
 
-    # ------------------------------------------------------------- DRM License
 
     def widevine_license(self, license_url: str, challenge: bytes) -> bytes:
-        """Execute Widevine DRM license acquisition."""
         url = license_url or self.get_drm_license_url()
         headers = {
             "User-Agent": USER_AGENT,
@@ -816,7 +807,14 @@ class FilmRiseApi:
         except requests.RequestException as exc:
             raise FilmRiseError(f"Widevine license acquisition failed: {exc}") from exc
 
-    # ---------------------------------------------------------- Content Parsers
+    def fetch_subtitle(self, url: str) -> bytes:
+        try:
+            resp = self.session.get(url, timeout=DEFAULT_TIMEOUT)
+            resp.raise_for_status()
+            return resp.content
+        except requests.RequestException as exc:
+            raise FilmRiseError(f"Failed to fetch subtitle from {url}: {exc}") from exc
+
 
     def _parse_recipe_item(
         self, raw: dict[str, Any], default_kind: str = "movie"
@@ -842,7 +840,6 @@ class FilmRiseApi:
         video_url = raw.get("video_url") or raw.get("url") or ""
         is_drm = raw.get("drm") == 1 or ".mpd" in video_url
 
-        # Duration & Year
         duration = None
         if raw.get("runtime"):
             try:
@@ -872,7 +869,6 @@ class FilmRiseApi:
                 except (ValueError, TypeError):
                     pass
 
-        # Season and episode
         season_num = None
         if raw.get("season") is not None:
             try:
@@ -887,7 +883,6 @@ class FilmRiseApi:
             except (ValueError, TypeError):
                 pass
 
-        # Subtitles
         subtitles: list[dict[str, str]] = []
         if raw.get("cc_path"):
             subtitles.append({"language": "English", "file_path": str(raw["cc_path"]), "name": "English"})
@@ -901,13 +896,11 @@ class FilmRiseApi:
                         "name": lang_name,
                     })
 
-        # Chapters (seconds)
         intro_st = int(raw.get("intro_st") or 0)
         intro_et = int(raw.get("intro_et") or 0)
         endcredit_st = int(raw.get("endcredit_st") or 0)
         endcredit_et = int(raw.get("endcredit_et") or 0)
 
-        # Images
         images: dict[str, str] = {}
         for k, v in (
             ("hero_image", "hero"),
@@ -1000,10 +993,8 @@ class FilmRiseApi:
             raw=node,
         )
 
-    # ------------------------------------------------ Chapters & Attachments
 
     def parse_chapters(self, item: TitleItem) -> list[Chapter]:
-        """Convert intro_st/et and endcredit_st/et (in seconds) to milliseconds Chapters."""
         chapters: list[Chapter] = []
         if item.intro_et > item.intro_st and item.intro_et > 0:
             chapters.append(
@@ -1029,7 +1020,6 @@ class FilmRiseApi:
         return chapters
 
     def extract_attachments(self, item: TitleItem) -> list[Attachment]:
-        """Extract posters, backdrops, and thumbnails as Attachments."""
         attachments: list[Attachment] = []
         seen_urls: set[str] = set()
 
@@ -1057,7 +1047,6 @@ class FilmRiseApi:
         return attachments
 
     def extract_subtitles(self, item: TitleItem) -> list[SubtitleReference]:
-        """Extract SubtitleReferences from item subtitles list."""
         refs: list[SubtitleReference] = []
         seen: set[str] = set()
         for idx, sub in enumerate(item.subtitles):
@@ -1067,11 +1056,17 @@ class FilmRiseApi:
             seen.add(file_url)
             lang_name = sub.get("name") or sub.get("language") or "Subtitle"
             lang_code = normalize_language(lang_name)
+            clean = file_url.split("?", 1)[0].lower()
+            format_ext = next(
+                (ext for ext in ("srt", "vtt", "ttml", "dfxp", "xml") if clean.endswith("." + ext)),
+                "srt",
+            )
             refs.append(
                 SubtitleReference(
                     url=file_url,
                     language=lang_code,
                     name=lang_name,
+                    format=format_ext,
                     selected=(idx == 0),
                 )
             )
@@ -1097,7 +1092,6 @@ def parse_filmrise_reference(target: str) -> tuple[str, str]:
     if not raw:
         raise FilmRiseError("Empty FilmRise target reference")
 
-    # 1. Scheme URI: filmrise:kind:id or filmrise:id
     scheme_match = re.match(
         r"^(?:filmrise|film_rise|filmrisetv):(?:(movie|show|series|live|video):)?([0-9]+)$",
         raw,
@@ -1112,7 +1106,6 @@ def parse_filmrise_reference(target: str) -> tuple[str, str]:
             return "movie", cid
         return k.lower(), cid
 
-    # 2. Deep link scheme: happykids://play?...
     tvshow_match = re.search(r"[?&]Tvshowkey=([0-9]+)", raw, re.IGNORECASE)
     if tvshow_match:
         return "show", tvshow_match.group(1)
@@ -1121,7 +1114,6 @@ def parse_filmrise_reference(target: str) -> tuple[str, str]:
     if deep_match:
         return "auto", deep_match.group(1)
 
-    # 3. Web URLs (filmrise.com or fawesome/ifood.tv links)
     if "filmrise.com" in raw or "fawesome.tv" in raw or "ifood.tv" in raw:
         show_match = re.search(r"/(?:shows|tv-shows|series)/([0-9]+)", raw, re.IGNORECASE)
         if show_match:
@@ -1135,7 +1127,6 @@ def parse_filmrise_reference(target: str) -> tuple[str, str]:
         if movie_match:
             return "movie", movie_match.group(1)
 
-    # 4. Pure numeric ID
     if re.fullmatch(r"[0-9]+", raw):
         return "auto", raw
 

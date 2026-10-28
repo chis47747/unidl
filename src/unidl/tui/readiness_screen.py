@@ -175,7 +175,8 @@ class ReadinessScreen(Screen[None]):
                     lines.append(f"      {item.hint}")
         text = "\n".join(lines)
         try:
-            self.app.copy_text(text)
+            if self.app.copy_text(text) is False:
+                return
         except Exception:  # noqa: BLE001 - a terminal that refuses the clipboard
             self.notify(text, title=tr("ready.title"), timeout=12)
             return

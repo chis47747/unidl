@@ -2387,6 +2387,8 @@ def _download_selected_stream(
         if isinstance(progress_display, _DownloadProgress):
             progress_display.finish()
     current_path = checkpoint.path or result.path
+    if not checkpoint.reached("decrypted"):
+        result = _release_redundant_download_parts(stream, result, current_path, checkpoint, hls_crypto, args, colors)
     cleanup_paths = [current_path, *projection_cleanup]
     result_temp_dir = result.temp_dir
     if not checkpoint.reached("decrypted") and projection_result is None:
@@ -2599,6 +2601,31 @@ def _download_selected_stream(
         cleanup_paths=cleanup_paths,
         cache_filename=name,
     )
+
+
+def _release_redundant_download_parts(stream, result, current_path, checkpoint, hls_crypto, args, colors=None):
+    """Retain one resumable assembly, not both it and unused download parts."""
+    if stream.is_live or getattr(args, "keep_temp", False) or not getattr(args, "del_after_done", True):
+        return result
+    if result.temp_dir is None or not Path(current_path).is_file():
+        return result
+    if _download_parts_needed_for_postprocess(stream, result, hls_crypto, args):
+        return result
+    if _should_finalize_clear_hls_sections(stream, result, hls_crypto):
+        return result
+    if result.parts:
+        try:
+            if Path(current_path).stat().st_size != sum(part.stat().st_size for part in result.parts):
+                return result
+        except OSError:
+            return result
+    # Never delete an assembly or its durable checkpoint along with its parts.
+    if _path_is_under(Path(current_path), result.temp_dir) or _path_is_under(checkpoint.root, result.temp_dir):
+        return result
+    if not checkpoint.release_download_parts():
+        return result
+    remaining = _cleanup_track_temp_dir(result.temp_dir, args, colors)
+    return replace(result, temp_dir=remaining, parts=None, sections=None)
 
 
 def _should_decrypt_fragmented_parts(stream, result) -> bool:

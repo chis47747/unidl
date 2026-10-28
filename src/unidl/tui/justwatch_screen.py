@@ -759,7 +759,8 @@ class AvailabilityScreen(Screen):
         if not url:
             self.notify(tr("justwatch.no_link"), severity="warning", timeout=3)
             return
-        self.app.copy_text(url)
+        if self.app.copy_text(url) is False:
+            return
         self.notify(tr("justwatch.copied", url=url), timeout=4)
 
     def action_regions(self) -> None:

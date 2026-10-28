@@ -725,7 +725,8 @@ class AskHost(Screen):
             self.notify("The log is empty", timeout=3)
             return
         try:
-            self.app.copy_text(text)
+            if self.app.copy_text(text) is False:
+                return
         except Exception:  # noqa: BLE001 - a terminal that refuses the clipboard
             self.notify("This terminal would not take the clipboard", timeout=4)
             return
@@ -1085,7 +1086,8 @@ class AskHost(Screen):
         if not text:
             return
         try:
-            self.app.copy_text(text)
+            if self.app.copy_text(text) is False:
+                return
         except Exception:
             # a terminal that refuses the clipboard is not a failure worth an
             # error: show the value instead, so it can still be read off
@@ -1112,7 +1114,8 @@ class AskHost(Screen):
             return
         count = len(panel.ask.actions) or 1
         try:
-            self.app.copy_text(text)
+            if self.app.copy_text(text) is False:
+                return
         except Exception:
             self.notify(text, title="Copy", timeout=10)
             return

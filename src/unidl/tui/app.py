@@ -49,6 +49,7 @@ from ..core.secureio import atomic_write_text, private_file
 from ..core.service import Capabilities, Service, registry
 from ..core.settings import SettingsStore, global_settings
 from ..core.vault import KeyVault
+from .clipboard import write_system_clipboard
 from .home import HomeScreen
 from .palette import UnidlCommands
 from .theme import CSS, THEME_NAMES, THEMES, Palette, palette_for
@@ -608,28 +609,26 @@ class UnidlApp(App):
             return
         if not text or not text.strip():
             return
-        self.copy_text(text)
+        if self.copy_text(text) is False:
+            return
         shown = text.strip().splitlines()[0][:60]
         self.notify(tr("notify.copied", text=shown), timeout=2)
 
-    def copy_text(self, text: str) -> None:
-        """Copy through the terminal, and through the OS where we can.
-
-        ``copy_to_clipboard`` uses OSC 52, which several macOS terminals ignore,
-        so ``pbcopy`` is used as well when present.
-        """
+    def copy_text(self, text: str) -> bool:
+        """Copy natively; terminal escape sequences alone are not confirmation."""
+        sent_to_terminal = False
         try:
             self.copy_to_clipboard(text)
+            sent_to_terminal = self._driver is not None
         except Exception:
             pass
-        tool = shutil.which("pbcopy") or shutil.which("wl-copy") or shutil.which("xclip")
-        if not tool:
-            return
-        argv = [tool] if "xclip" not in tool else [tool, "-selection", "clipboard"]
-        try:
-            subprocess.run(argv, input=text, text=True, timeout=5, check=False)  # noqa: S603
-        except (OSError, subprocess.SubprocessError):
-            pass
+        if write_system_clipboard(text):
+            return True
+        self.notify(
+            tr("notify.copy_unconfirmed" if sent_to_terminal else "notify.copy_failed"),
+            severity="warning", timeout=5,
+        )
+        return False
 
     def open_url(self, url: str) -> None:
         """Hand a link to the browser, for activation pages you would have to type.

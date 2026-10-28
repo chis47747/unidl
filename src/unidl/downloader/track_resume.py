@@ -117,6 +117,37 @@ class TrackCheckpoint:
     def reached(self, phase: str) -> bool:
         return bool(self.phase) and PHASES.index(self.phase) >= PHASES.index(phase)
 
+    def release_download_parts(self) -> bool:
+        """Make an assembled download independent of its redundant fragments.
+
+        Publish the smaller dependency set before the caller removes parts. Keep
+        temp_dir as an optional cleanup hint, so an interrupted removal can be
+        retried without making checkpoint restoration depend on those files.
+        """
+        if not self.enabled:
+            return True
+        if self.phase != "downloaded" or self.path is None or self._snapshot is None:
+            return False
+        with locked_path(self.record):
+            try:
+                data = json.loads(self.record.read_text("utf-8"))
+                if (
+                    data["identity"] != self.identity or data["phase"] != "downloaded"
+                    or data["generation"] != self._snapshot.parent.name
+                    or data["current_name"] != self._snapshot.name
+                ):
+                    return False
+                signature = next(item["signature"] for item in data["files"] if item["name"] == data["current_name"])
+                if _signature(self._snapshot) != signature or _signature(self.path) != signature:
+                    return False
+            except (OSError, ValueError, KeyError, TypeError, StopIteration):
+                return False
+            if data.get("parts") or data.get("sections"):
+                data["parts"] = []
+                data["sections"] = []
+                atomic_write_text(self.record, json.dumps(data, ensure_ascii=False, sort_keys=True))
+        return True
+
     def restore(self, stream) -> None:
         if not self.enabled:
             return
