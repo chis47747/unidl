@@ -149,6 +149,14 @@ signalling regardless of the codec label. The legacy `audio_codec=atmos` value
 is accepted as an alias for the Atmos profile. `audio_codec=ac4` matches raw
 `ac-4`, `ac4`, and `dac4` codec declarations.
 
+For Smooth Streaming (ISM), E-AC-3 audio with an explicit `HasAtmos="true"`
+or `HasAtmos="1"` declaration is shown as **E-AC-3 Atmos** and matches the
+Atmos profile. A QualityLevel declaration takes precedence over a StreamIndex
+default, including an explicit `false`/`0`. The flag also feeds release naming
+and is retained when a native manifest source is replayed. A 448 Kbps bitrate
+or six-channel layout alone is not evidence of Atmos. This metadata is read
+from the manifest without requesting media fragments.
+
 `audio_quality=best` or `worst` ranks only tracks left after all of those filters.
 It never widens a language, codec, profile, or channel condition.
 

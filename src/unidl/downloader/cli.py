@@ -2370,6 +2370,7 @@ def _download_selected_stream(
                 check_segments_count=getattr(args, "check_segments_count", True),
                 assemble_output=not _should_skip_assembled_download_output(stream, args, hls_crypto),
                 gate=lambda: _checkpoint_embedding(args),
+                diagnostic=_download_diagnostic(args),
             )
             checkpoint.save("downloaded", result.path, result)
         else:
@@ -8070,6 +8071,12 @@ def _looks_like_vgc_bridge_error(exc: DownloadError) -> bool:
 def _print_child_request_header_warnings(input_url: str, headers: dict[str, str], colors: bool | None) -> None:
     for warning in child_request_header_warnings(input_url, headers):
         print(paint("Warning:", Palette.yellow, colors) + f" {warning}", file=sys.stderr)
+
+
+def _download_diagnostic(args: argparse.Namespace) -> Callable[[str], None] | None:
+    if not getattr(args, "log_file_path", None):
+        return None
+    return lambda message: _log_line(args, message)
 
 
 def _log_line(args: argparse.Namespace, message: str) -> None:

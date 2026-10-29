@@ -421,6 +421,7 @@ def download_stream(
     assemble_output: bool = True,
     host_limiter: _HostAdaptiveLimiter | None = None,
     gate: Callable[[], None] | None = None,
+    diagnostic: Callable[[str], None] | None = None,
 ) -> DownloadResult:
     headers = source_request_headers(stream.extra, headers)
     output_path = _output_path(stream, output_dir, filename)
@@ -500,6 +501,7 @@ def download_stream(
         host_limiter = _HostAdaptiveLimiter(
             max_parallel=host_max_parallel,
             initial_parallel=host_initial_parallel,
+            diagnostic=diagnostic,
         )
     _emit_progress(progress, stream, completed, len(urls), downloaded_bytes, total_bytes, start)
 
@@ -2577,11 +2579,12 @@ class RateLimiter:
 
 
 class _HostAdaptiveLimiter:
-    def __init__(self, max_parallel: int, initial_parallel: int | None = None):
+    def __init__(self, max_parallel: int, initial_parallel: int | None = None, *, diagnostic: Callable[[str], None] | None = None):
         self.max_parallel = max(1, int(max_parallel or 1))
         self.initial_parallel = max(1, min(self.max_parallel, int(initial_parallel or self.max_parallel)))
         self._states: dict[str, _HostAdaptiveState] = {}
         self._lock = threading.Lock()
+        self._diagnostic = diagnostic
 
     def acquire(self, url: str) -> _HostPermit | None:
         key = _adaptive_host_key(url)
@@ -2590,14 +2593,14 @@ class _HostAdaptiveLimiter:
         with self._lock:
             state = self._states.get(key)
             if state is None:
-                state = _HostAdaptiveState(self.max_parallel, self.initial_parallel)
+                state = _HostAdaptiveState(self.max_parallel, self.initial_parallel, origin=key, diagnostic=self._diagnostic)
                 self._states[key] = state
-        state.acquire()
-        return _HostPermit(state)
+        epoch = state.acquire()
+        return _HostPermit(state, epoch)
 
 
 class _HostAdaptiveState:
-    def __init__(self, max_parallel: int, initial_parallel: int | None = None):
+    def __init__(self, max_parallel: int, initial_parallel: int | None = None, *, origin: str = "", diagnostic: Callable[[str], None] | None = None):
         self.max_parallel = max(1, max_parallel)
         self.limit = max(1, min(self.max_parallel, int(initial_parallel or self.max_parallel)))
         self.active = 0
@@ -2605,10 +2608,25 @@ class _HostAdaptiveState:
         self.success_streak = 0
         self.cooldown_until = 0.0
         self.condition = threading.Condition()
+        self.epoch = 0
+        self._last_failure_kind = ""
+        self._batch_limit = self.limit
+        self._failures = 0
+        self._origin = origin
+        self._diagnostic = diagnostic
+        self._report(f"start parallel={self.limit}/{self.max_parallel}")
 
-    def acquire(self) -> None:
+    def _report(self, message: str) -> None:
+        if self._diagnostic is not None:
+            try:
+                self._diagnostic(f"network host={self._origin} {message}")
+            except Exception:
+                pass  # Diagnostics must never stop a media transfer.
+
+    def acquire(self) -> int:
         with self.condition:
             while True:
+                _runtime_checkpoint()
                 now = time.monotonic()
                 wait_for = self.cooldown_until - now
                 if wait_for > 0:
@@ -2616,49 +2634,96 @@ class _HostAdaptiveState:
                     continue
                 if self.active < max(1, min(self.limit, self.max_parallel)):
                     self.active += 1
-                    return
+                    return self.epoch
                 self.condition.wait(0.1)
 
-    def release_success(self) -> None:
+    def release_success(self, epoch: int | None = None) -> None:
+        message = ""
         with self.condition:
             self.active = max(0, self.active - 1)
-            self.success_streak += 1
-            if self.success_streak >= max(4, self.limit):
-                self.success_streak = 0
-                self.failure_streak = 0
-                self.limit = min(self.max_parallel, self.limit + 1)
-                self.cooldown_until = 0.0
+            # Successes already in flight before a backoff do not prove the
+            # origin recovered, and must not cancel its cooldown.
+            if epoch is None or epoch == self.epoch:
+                self.success_streak += 1
+                if self.success_streak >= max(4, self.limit // 2):
+                    self.success_streak = 0
+                    self.failure_streak = 0
+                    previous = self.limit
+                    self.limit = min(self.max_parallel, self.limit + max(1, self.limit // 2))
+                    if self.limit != previous:
+                        message = f"recovery parallel={previous}->{self.limit}/{self.max_parallel} active={self.active}"
             self.condition.notify_all()
+        if message:
+            self._report(message)
 
-    def release_failure(self, retryable: bool) -> None:
+    def release_failure(self, retryable: bool, *, epoch: int | None = None, kind: str = "server") -> None:
         with self.condition:
             self.active = max(0, self.active - 1)
-            if retryable:
-                self.failure_streak = min(self.failure_streak + 1, 6)
+            self._failures += 1
+            current_batch = epoch is None or epoch == self.epoch
+            # A server refusal from the same batch may upgrade a mild
+            # transport backoff, but never repeatedly halve that batch.
+            upgrade = (
+                retryable and not current_batch and epoch == self.epoch - 1
+                and self._last_failure_kind == "transport" and kind in {"server", "throttle"}
+            )
+            applied = retryable and (current_batch or upgrade)
+            if applied:
+                if current_batch:
+                    self._batch_limit = self.limit
+                    self.epoch += 1
+                    self.failure_streak = min(self.failure_streak + 1, 6)
                 self.success_streak = 0
-                if self.limit > 1:
-                    self.limit = max(1, min(self.limit - 1, self.limit // 2))
-                cooldown = min(0.5 * (2 ** (self.failure_streak - 1)), 6.0)
+                self._last_failure_kind = kind
+                if kind == "transport":
+                    self.limit = max(1, self.limit - max(1, self.limit // 4))
+                    cooldown = min(0.1 * (2 ** (self.failure_streak - 1)), 1.0)
+                else:
+                    self.limit = max(1, min(self.limit, self._batch_limit // 2))
+                    cooldown = min(0.5 * (2 ** (self.failure_streak - 1)), 6.0)
                 self.cooldown_until = max(self.cooldown_until, time.monotonic() + cooldown)
+            message = (
+                f"failure={kind} retryable={retryable} backoff={applied} "
+                f"parallel={self.limit}/{self.max_parallel} active={self.active} "
+                f"cooldown={max(0.0, self.cooldown_until - time.monotonic()):.2f}s failures={self._failures}"
+            )
             self.condition.notify_all()
+        self._report(message)
 
 
 class _HostPermit:
-    def __init__(self, state: _HostAdaptiveState):
+    def __init__(self, state: _HostAdaptiveState, epoch: int | None = None):
         self.state = state
+        self.epoch = state.epoch if epoch is None else epoch
         self.closed = False
 
     def success(self) -> None:
         if self.closed:
             return
         self.closed = True
-        self.state.release_success()
+        self.state.release_success(self.epoch)
 
-    def failure(self, retryable: bool) -> None:
+    def failure(self, retryable: bool, *, error: BaseException | None = None) -> None:
         if self.closed:
             return
         self.closed = True
-        self.state.release_failure(retryable)
+        self.state.release_failure(retryable, epoch=self.epoch, kind=_adaptive_failure_kind(error, retryable))
+
+
+def _adaptive_failure_kind(error: BaseException | None, retryable: bool) -> str:
+    if not retryable:
+        return "nonretryable" if error is not None else "interrupted"
+    if error is None:
+        return "server"  # Preserve conservative behavior for boolean-only callers.
+    text = _error_text(error).lower()
+    if getattr(error, "code", None) == 429 or "http error 429" in text or "too many requests" in text:
+        return "throttle"
+    if getattr(error, "code", None) in {500, 502, 503, 504} or any(
+        token in text for token in ("http error 500", "http error 502", "http error 503", "http error 504",
+                                   "temporarily unavailable", "service unavailable")
+    ):
+        return "server"
+    return "transport"
 
 
 def _adaptive_host_key(url: str) -> str | None:
@@ -2815,7 +2880,7 @@ def _stream_part_to_file(
         except DownloadError as exc:
             last_error = exc
             if permit:
-                permit.failure(_is_adaptive_retryable_error(exc))
+                permit.failure(_is_adaptive_retryable_error(exc), error=exc)
             try:
                 tmp_out.unlink()
             except OSError:
@@ -2976,7 +3041,7 @@ def _stream_part_to_file(
         except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException, HttpClientError, DownloadError) as exc:
             last_error = exc
             if permit:
-                permit.failure(_is_adaptive_retryable_error(exc))
+                permit.failure(_is_adaptive_retryable_error(exc), error=exc)
             invalid_query_bbts = (
                 segment.allow_range_status_200
                 and not plain_query_fallback
@@ -3348,7 +3413,7 @@ def _fetch_bytes(
         except DownloadError as exc:
             last_error = exc
             if permit:
-                permit.failure(_is_adaptive_retryable_error(exc))
+                permit.failure(_is_adaptive_retryable_error(exc), error=exc)
 
     for attempt in range(max(1, retries)):
         while True:
@@ -3385,7 +3450,7 @@ def _fetch_bytes(
                         raise
                     last_error = exc
                     if permit:
-                        permit.failure(_is_adaptive_retryable_error(exc))
+                        permit.failure(_is_adaptive_retryable_error(exc), error=exc)
                     _runtime_checkpoint()
                     if attempt + 1 < retries:
                         _runtime_sleep(_retry_delay(attempt))
@@ -3394,7 +3459,7 @@ def _fetch_bytes(
             except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException, HttpClientError, DownloadError) as exc:
                 last_error = exc
                 if permit:
-                    permit.failure(_is_adaptive_retryable_error(exc))
+                    permit.failure(_is_adaptive_retryable_error(exc), error=exc)
                 _runtime_checkpoint()
                 if attempt + 1 < retries:
                     _runtime_sleep(_retry_delay(attempt))

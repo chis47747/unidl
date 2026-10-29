@@ -78,6 +78,31 @@ never decode and rebuild a signed query to fix a space. Raw control characters
 are rejected before URL parsing rather than silently stripped. This encoding
 belongs to the download transport and does not change service authentication.
 
+## HTTP connection reuse and adaptive concurrency
+
+Native HTTP/1 connections apply each request's timeout to both the connection
+object and its existing socket. A short metadata/range probe therefore cannot
+silently impose its deadline on a later media download; reducing the timeout
+also takes effect on reused connections. Closed pooled sockets are discarded.
+
+The Python downloader limits active requests per origin within its configured
+worker budget. A cohort of requests already in flight when an error occurs
+does not repeatedly reduce the same host's concurrency. Timeouts, disconnects
+and incomplete transfers use a smaller reduction and a short bounded cooldown;
+HTTP 429 and retryable server errors retain stronger reduction/backoff. A
+server refusal may upgrade a mild reduction from the same cohort once.
+Successes from before a reduction cannot cancel its cooldown. Successful new
+requests increase concurrency progressively; repeated failing new cohorts can
+still reduce it to one. Authentication errors and rejected Range requests do not
+trigger host-wide adaptive throttling. Waiting for a host slot is cancellable.
+
+When a task debug log is enabled, `network host=...` entries record the initial
+limit, failure class/count, whether a new backoff was applied, active requests,
+cooldown and concurrency recovery. These entries include only the origin, not
+signed segment paths, query strings, request headers, raw error messages or keys.
+They do not add network probes or console/TUI messages. This is generic transport
+behavior, not a per-service speed override or a guarantee of CDN throughput.
+
 ## HLS initialization-section key scope
 
 For whole-segment HLS encryption (such as AES-128), an `EXT-X-MAP`

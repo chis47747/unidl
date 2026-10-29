@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.5.4] - 2026-10-29
+
+### Download retries and recovery
+
+- Applied each request's timeout to reused HTTP/1 sockets as well as connection objects, preventing short probes from imposing their deadline on later media transfers and discarding closed pooled sockets safely.
+- Prevented a cohort of in-flight failures from repeatedly reducing the same origin's concurrency, used milder bounded backoff for transport interruptions and stronger backoff for HTTP 429/retryable server errors, and restored concurrency progressively within the configured worker budget.
+- Kept stale successes from cancelling a newer cooldown, retained cancellation while waiting for host slots, and left authentication and rejected-Range errors outside host-wide adaptive throttling.
+- Added optional task-log diagnostics for origin-level limits, failure classes, backoff and recovery without signed paths, queries, headers, raw error payloads or extra network probes.
+
+### Smooth Streaming Atmos
+
+- Recognized explicit HasAtmos=true/1 declarations on E-AC-3 ISM audio, honoring QualityLevel overrides of StreamIndex defaults, including false/0 overrides.
+- Carried Atmos identification into track display, audio-profile selection, release naming and native source replay without fetching media fragments or guessing from bitrate, channel count or track names.
+
 ## [2.5.3] - 2026-10-28
 
 ### Windows clipboard

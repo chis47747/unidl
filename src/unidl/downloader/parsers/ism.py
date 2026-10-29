@@ -118,6 +118,7 @@ def parse_ism(uri: str, text: str) -> list[StreamInfo]:
                 is_live=is_live,
                 segments=segments,
                 extra={
+                    **({"audio_atmos": 1} if _audio_is_atmos(media_type, codec, quality, stream_index) else {}),
                     "fourcc": quality.attrib.get("FourCC"),
                     "codec_private_data": quality.attrib.get("CodecPrivateData"),
                     "kid": track_kid,
@@ -219,6 +220,24 @@ def _codec_from_quality(quality: ET.Element) -> str | None:
     if fourcc in {"TTML", "DFXP"}:
         return "stpp"
     return fourcc.lower() if fourcc else None
+
+
+def _audio_is_atmos(media_type: str, codec: str | None, quality: ET.Element, stream_index: ET.Element) -> bool:
+    """Honor explicit E-AC-3 Atmos declarations, never bitrate or channel count."""
+    if media_type != "audio" or codec != "ec-3":
+        return False
+    # A rendition-level declaration overrides its stream-level default,
+    # including an explicit false. XML boolean values are true/false or 1/0.
+    for element in (quality, stream_index):
+        for key, value in element.attrib.items():
+            if _local(key).casefold() != "hasatmos":
+                continue
+            normalized = value.strip().casefold()
+            if normalized in {"true", "1"}:
+                return True
+            if normalized in {"false", "0"}:
+                return False
+    return False
 
 
 def _media_type(value: str) -> str:

@@ -253,6 +253,17 @@ class NativeHttpClient:
                 if not getattr(connection, "sock", None):
                     continue
                 connection.timeout = timeout
+                try:
+                    connection.sock.settimeout(timeout)
+                except OSError:
+                    # A pooled socket can be closed between requests. Do not
+                    # reuse it, or fail an otherwise valid new request.
+                    self._connections.discard(connection)
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+                    continue
                 self._connections.add(connection)
                 return connection
         if origin.scheme == "https":
