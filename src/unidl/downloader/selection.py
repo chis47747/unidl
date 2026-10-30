@@ -464,13 +464,14 @@ def _extra_bool(stream: StreamInfo, key: str) -> bool:
 
 
 def _language_matches(language: str | None, values: list[str]) -> bool:
-    if not language:
-        return "und" in values or "*" in values
-    language_values = _language_tokens(language)
-    wanted = {token for value in values for token in _language_tokens(value)}
-    if "*" in wanted:
-        return True
-    return bool(language_values & wanted)
+    actual = _language_tag(language)
+    primary = actual.partition("-")[0]
+    # Only a primary-language request may accept variants. An explicit region,
+    # script or provider suffix must not collapse to the shared primary tag.
+    return any(
+        target == "*" or actual == target or ("-" not in target and primary == target)
+        for target in (_language_tag(value) for value in values)
+    )
 
 
 _LANGUAGE_ALIASES = {
@@ -493,17 +494,11 @@ _LANGUAGE_ALIASES = {
 }
 
 
-def _language_tokens(value: str | None) -> set[str]:
-    """Return exact, primary and common ISO-639 aliases for a language tag."""
-    raw = str(value or "").strip().replace("_", "-").casefold()
-    if not raw:
-        return set()
-    parts = raw.split("-")
-    primary = _LANGUAGE_ALIASES.get(parts[0], parts[0])
-    tokens = {raw, parts[0], primary}
-    if len(parts) > 1:
-        tokens.add(f"{primary}-{'-'.join(parts[1:])}")
-    return tokens
+def _language_tag(value: str | None) -> str:
+    """Normalize aliases while preserving the complete language variant."""
+    raw = str(value or "und").strip().replace("_", "-").casefold()
+    primary, separator, suffix = raw.partition("-")
+    return _LANGUAGE_ALIASES.get(primary, primary) + (separator + suffix if separator else "")
 
 
 def _range_matches(stream: StreamInfo, value: str) -> bool:
@@ -817,7 +812,7 @@ def _language_buckets(candidates: list[StreamInfo], value: str | None) -> list[l
 def _language_buckets_by_language(candidates: list[StreamInfo]) -> list[list[StreamInfo]]:
     buckets: dict[str, list[StreamInfo]] = {}
     for stream in candidates:
-        key = next(iter(sorted(_language_tokens(stream.language))), "und")
+        key = _language_tag(stream.language)
         buckets.setdefault(key, []).append(stream)
     return list(buckets.values())
 

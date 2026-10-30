@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterator
 
 _CONTAINERS = {
@@ -178,4 +179,120 @@ def video_range_from_init(data: bytes | bytearray) -> str | None:
     return None
 
 
-__all__ = ["audio_channel_count_from_init", "video_range_from_init"]
+def video_signature_from_init(data: bytes | bytearray) -> tuple[str, int, int, bytes | None] | None:
+    """Actual codec/dimensions/colour declaration of one visual sample entry."""
+    entries = [item for item in walk_boxes(data) if item[2] in _VIDEO_ENTRIES]
+    if len(entries) != 1:
+        return None
+    position, size, kind, header = entries[0]
+    if size < header + 78:
+        return None
+    children = list(walk_boxes(data, position + header + 78, position + size))
+    if kind == b"encv":
+        formats = [bytes(data[p + h:p + h + 4]) for p, s, k, h in children if k == b"frma" and s >= h + 4]
+        if len(formats) != 1:
+            return None
+        kind = formats[0]
+    codecs = {b"avc1": "h264", b"avc3": "h264", b"hvc1": "h265", b"hev1": "h265", b"dvh1": "h265", b"dvhe": "h265"}
+    codec = codecs.get(kind)
+    width = int.from_bytes(data[position + header + 24:position + header + 26], "big")
+    height = int.from_bytes(data[position + header + 26:position + header + 28], "big")
+    if codec is None or not width or not height:
+        return None
+    colour = next((bytes(data[p + h + 4:p + h + 10]) for p, s, k, h in children
+                   if k == b"colr" and s >= h + 10 and bytes(data[p + h:p + h + 4]) in {b"nclx", b"nclc"}), None)
+    return codec, width, height, colour
+
+
+def normalize_empty_c608_samples(data: bytearray) -> int:
+    """Replace only all-zero clear c608 placeholders with same-size CC padding.
+
+    Bounds come from real trak/tfhd/trun/mdat boxes, never payload searches.
+    Ambiguous descriptions, encrypted entries and unsupported offsets are left
+    alone. Valid captions and all audio/video sample bytes remain unchanged.
+    """
+    if sum(kind == b"moov" for _p, _s, kind, _h in _boxes(data)) != 1:
+        return 0
+    tracks: set[int] = set()
+    for position, size, kind, header in walk_boxes(data):
+        if kind != b"trak":
+            continue
+        fields = list(walk_boxes(data, position + header, position + size))
+        tkhd = next((item for item in fields if item[2] == b"tkhd"), None)
+        stsd = next((item for item in fields if item[2] == b"stsd"), None)
+        if tkhd is None or stsd is None:
+            continue
+        p, s, _k, h = stsd
+        if s < h + 8:
+            continue
+        entries = list(_boxes(data, p + h + 8, p + s))
+        if int.from_bytes(data[p + h + 4:p + h + 8], "big") != 1 or len(entries) != 1 or entries[0][2] != b"c608":
+            continue
+        p, s, _k, h = tkhd
+        if s < h + 4 or data[p + h] not in {0, 1}:
+            continue
+        offset = p + h + (20 if data[p + h] == 1 else 12)
+        if offset + 4 <= p + s:
+            tracks.add(int.from_bytes(data[offset:offset + 4], "big"))
+    if not tracks:
+        return 0
+    mdats = [(p + h, p + s) for p, s, k, h in _boxes(data) if k == b"mdat"]
+    mdat_starts = [start for start, _end in mdats]
+    changed = 0
+    for mp, ms, mk, mh in _boxes(data):
+        if mk != b"moof":
+            continue
+        for tp, ts, tk, th in _boxes(data, mp + mh, mp + ms):
+            if tk != b"traf":
+                continue
+            fields = list(_boxes(data, tp + th, tp + ts))
+            tfhd = next((item for item in fields if item[2] == b"tfhd"), None)
+            if tfhd is None or any(k in {b"senc", b"saiz", b"saio"} for _p, _s, k, _h in fields):
+                continue
+            p, s, _k, h = tfhd
+            if s < h + 8 or data[p + h] != 0:
+                continue
+            flags = int.from_bytes(data[p + h + 1:p + h + 4], "big")
+            track_id = int.from_bytes(data[p + h + 4:p + h + 8], "big")
+            if track_id not in tracks or not flags & 0x020000 or flags & 1:
+                continue  # only an explicit moof-relative base is unambiguous
+            cursor = p + h + 8
+            if flags & 2:
+                if cursor + 4 > p + s or int.from_bytes(data[cursor:cursor + 4], "big") != 1:
+                    continue
+                cursor += 4
+            cursor += 4 if flags & 8 else 0
+            if cursor + (4 if flags & 16 else 0) + (4 if flags & 32 else 0) > p + s:
+                continue
+            default_size = int.from_bytes(data[cursor:cursor + 4], "big") if flags & 16 and cursor + 4 <= p + s else 0
+            next_sample = None
+            for p, s, k, h in fields:
+                if k != b"trun" or s < h + 8 or data[p + h] not in {0, 1}:
+                    continue
+                flags = int.from_bytes(data[p + h + 1:p + h + 4], "big")
+                count = int.from_bytes(data[p + h + 4:p + h + 8], "big")
+                cursor = p + h + 8
+                if flags & 1:
+                    if cursor + 4 > p + s:
+                        break
+                    next_sample = mp + int.from_bytes(data[cursor:cursor + 4], "big", signed=True)
+                    cursor += 4
+                cursor += 4 if flags & 4 else 0
+                stride = 4 * sum(bool(flags & flag) for flag in (0x100, 0x200, 0x400, 0x800))
+                if next_sample is None or count > 1_000_000 or cursor + count * stride > p + s or (not flags & 0x200 and not default_size):
+                    break
+                for _ in range(count):
+                    size_offset = cursor + (4 if flags & 0x100 else 0)
+                    sample_size = int.from_bytes(data[size_offset:size_offset + 4], "big") if flags & 0x200 else default_size
+                    stop = next_sample + sample_size
+                    mdat_index = bisect_right(mdat_starts, next_sample) - 1
+                    if 10 <= sample_size <= 65536 and sample_size % 2 == 0 and mdat_index >= 0 and stop <= mdats[mdat_index][1]:
+                        if not any(data[next_sample:stop]):
+                            data[next_sample:stop] = sample_size.to_bytes(4, "big") + b"cdat" + b"\x80\x80" * ((sample_size - 8) // 2)
+                            changed += 1
+                    next_sample = stop
+                    cursor += stride
+    return changed
+
+
+__all__ = ["audio_channel_count_from_init", "video_range_from_init", "video_signature_from_init", "normalize_empty_c608_samples"]

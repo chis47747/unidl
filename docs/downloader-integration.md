@@ -152,6 +152,47 @@ initialization data and unsupported layouts are not evidence of clear audio.
 `--no-decrypt`, transport ciphers and genuinely encrypted media retain their
 existing behavior. This does not change service licensing or key-vault policy.
 
+### HLS initialization sections and placeholder KIDs
+
+A selected HLS track may contain several `EXT-X-MAP` sections with different
+keys, for example a main feature followed by a localized credit sequence.
+All required keys are retained. During section decryption, each MAP's segment
+KIDs are passed separately instead of giving every section the track-wide list.
+This lets a section with a zero `tenc.default_KID` use its one unambiguous
+playlist KID. A nonzero initialization KID or an explicit fragment KID is not
+overwritten by that fallback.
+
+Unknown or ambiguous section KIDs are not resolved by trying the first supplied
+key; normal missing-key errors remain in effect. The mapping is rebuilt from
+the selected segments on retries too, so already downloaded sections can be
+reused. No additional manifest, media or licence request is introduced, and
+single-init, DASH/ISM and live-recording decryption paths are unchanged.
+
+### Section concat compatibility and output validation
+
+During MP4 section finalization, clear `c608` samples that consist entirely of
+zero bytes are normalized to same-size EIA-608 padding atoms. Some origins use
+these as empty caption placeholders; FFmpeg's concat reader rejects them even
+when only video is selected. Track/sample boundaries and media-data bounds are
+validated before modification. Valid captions, protected entries and all
+audio/video payloads are left unchanged; arbitrary malformed captions are not
+silently ignored.
+
+For non-live Apple HLS video, a trailing sequence explicitly named as the same
+asset's `FF_credit-` resources may contain an incompatible optional credit
+render. After download, the actual initialization data is compared with the
+main programme's codec, coded dimensions and available colour declarations.
+Only confirmed incompatible credit sections are excluded, with their count and
+duration logged. Compatible or unknown sections, ordinary programme sections,
+other assets/providers and live streams are retained. This does not infer
+incompatibility from a KID or discontinuity, transcode video, alter the cached
+source files, or make extra network/licence requests.
+
+FFmpeg concat runs with fatal-error handling and also rejects an explicit
+demuxing error when the process unexpectedly returns zero. It writes a temporary
+output that is published only after success; partial/empty outputs are removed
+without replacing an existing finished file.
+
 ## Separately compressed MP4 initialization
 
 An origin can gzip its MP4 initialization resource independently of the media

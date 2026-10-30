@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .cenc_fragment import CencInitMetadata, CencProgressCallback, decrypt_cenc_fragment, load_cenc_init_metadata
 from .embedding import DownloadRuntime, current_download_runtime, managed_popen, managed_run
-from .mp4_metadata import box_ranges
+from .mp4_metadata import box_ranges, normalize_empty_c608_samples
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, looks_like_h266, safe_temp_root
 
@@ -210,13 +210,20 @@ def decrypt_sections(
     section_fragment_durations: list[list[float]] | None = None,
     normalize_large_composition_offsets: bool = False,
     event_callback: DecryptEventCallback | None = None,
+    section_expected_kids: list[list[str]] | None = None,
 ) -> Path:
     if not section_paths:
         raise ValueError("No sections to decrypt.")
     sections = [Path(path) for path in section_paths]
+    if section_expected_kids is not None and len(section_expected_kids) != len(sections):
+        raise ValueError("Section KID inventory does not match initialization section count.")
     output = Path(output_path) if output_path else _decrypted_output_path(sections[0])
     decrypted_sections: list[Path] = []
-    for section in sections:
+    for index, section in enumerate(sections):
+        # A zero tenc KID is a placeholder, not another licence requirement.
+        # Scope its fallback to this MAP's inventory; never choose the first
+        # key from the whole track. Real init/fragment KIDs still take priority.
+        section_kids = section_expected_kids[index] if section_expected_kids is not None else None
         section_output = bounded_path(
             section.with_name(f"{section.stem}.dec{section.suffix}"),
             max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
@@ -227,7 +234,7 @@ def decrypt_sections(
             decrypter=decrypter,
             stream_type=stream_type,
             output_path=section_output,
-            expected_kids=expected_kids,
+            expected_kids=section_kids or expected_kids,
             event_callback=event_callback,
         )
         if restamp_timestamps and stream_type == "video":
@@ -624,9 +631,12 @@ def restamp_fragmented_mp4_timestamps(
     input_path = Path(input_path)
     output = Path(output_path) if output_path else input_path
     data = bytearray(input_path.read_bytes())
+    fixed_captions = normalize_empty_c608_samples(data)
     tfdt_positions = _mp4_find_tfdt_positions(data)
     if not tfdt_positions:
-        if output != input_path:
+        if fixed_captions:
+            output.write_bytes(data)
+        elif output != input_path:
             shutil.copyfile(input_path, output)
         return output, next_decode_time
 
@@ -681,7 +691,8 @@ def restamp_fragmented_mp4_timestamps(
 
     durations = _mp4_sidx_durations(data) or _mp4_trun_durations(data)
     if current is None or not durations:
-        if normalize_large_composition_offsets and _mp4_normalize_large_composition_offsets(data):
+        composition_changed = normalize_large_composition_offsets and _mp4_normalize_large_composition_offsets(data)
+        if fixed_captions or composition_changed:
             output.write_bytes(data)
         elif output != input_path:
             shutil.copyfile(input_path, output)
@@ -1245,16 +1256,21 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path) -> Pat
         raise RuntimeError("ffmpeg not found.")
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as list_file:
-        list_path = Path(list_file.name)
-        for item in inputs:
-            list_file.write(f"file '{_ffmpeg_concat_path(Path(item))}'\n")
+    fd, temporary_name = tempfile.mkstemp(prefix=".unidl-concat-", suffix=output.suffix, dir=output.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    list_path = None
     try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as list_file:
+            list_path = Path(list_file.name)
+            for item in inputs:
+                list_file.write(f"file '{_ffmpeg_concat_path(Path(item))}'\n")
         _run_external(
             [
                 executable,
                 "-hide_banner",
                 "-y",
+                "-xerror",
                 "-fflags",
                 "+genpts",
                 "-f",
@@ -1267,15 +1283,21 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path) -> Pat
                 "copy",
                 "-avoid_negative_ts",
                 "make_zero",
-                str(output),
+                str(temporary),
             ],
             "section concat",
+            reject_demux_errors=True,
         )
+        if not temporary.stat().st_size:
+            raise RuntimeError("section concat produced an empty output")
+        temporary.replace(output)
     finally:
-        try:
-            list_path.unlink()
-        except OSError:
-            pass
+        for path in (temporary, list_path):
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
     return output
 
 
@@ -2405,13 +2427,17 @@ def _run_ffmpeg_progress(
                 runtime.unregister_process(process)
 
 
-def _run_external(args: list[str], action: str) -> None:
+def _run_external(args: list[str], action: str, *, reject_demux_errors: bool = False) -> None:
     result = managed_run(args, capture_output=True)
-    if result.returncode == 0:
-        return
     raw = result.stderr or result.stdout
-    details = _command_details(raw.decode("utf-8", errors="replace") if raw else "")
+    text = raw.decode("utf-8", errors="replace") if raw else ""
+    fatal_demux = reject_demux_errors and "error during demuxing" in text.casefold()
+    if result.returncode == 0 and not fatal_demux:
+        return
+    details = _command_details(text)
     suffix = f": {details}" if details else ""
+    if result.returncode == 0:
+        raise RuntimeError(f"{action} command reported a demuxing error despite status 0{suffix}")
     raise RuntimeError(f"{action} command failed with status {result.returncode}{suffix}")
 
 

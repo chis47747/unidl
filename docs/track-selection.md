@@ -181,9 +181,19 @@ For example, `audio_codec=ac4`, `audio_langs=en`, and `audio_selection=best`
 does not select every English audio track. It selects the best English AC-4 track
 after the codec filter. An AAC English track is not a fallback.
 
-Language matching accepts exact and primary BCP-47 forms (`es-419` and `es`, for
-example), plus common ISO-639 aliases. Unknown `und` tracks are not guessed as a
-user language unless `und` is explicitly requested.
+Language matching is directional. A primary tag such as `es` accepts `es`,
+`es-419` and `es-ES`; an explicit variant such as `es-419` accepts only that
+complete tag, not `es-ES` or an unspecified `es`. The same rule applies to
+scripts and provider suffixes: `zh-Hant` does not match `zh-Hans`. Common
+ISO-639 aliases, case and underscores are normalized without dropping the
+suffix (`SPA_419` and `es-419` are equivalent). Unknown `und` tracks are not
+guessed as a user language unless `und` is explicitly requested.
+
+With `audio_langs=es-419,es-ES` and Best selection, each requested variant is
+ranked separately, so both are retained when available. With only `es`, Best
+chooses one track across the eligible Spanish variants. A missing explicit
+variant does not fall back to another region; the existing unmatched-selection
+handling applies. These rules also apply to subtitle languages.
 
 ### Selecting original audio and subtitles
 
@@ -215,8 +225,10 @@ channel settings; original subtitles must also satisfy the subtitle-kind filter.
 Quality ranking runs only after those constraints.
 
 Best selects one eligible track per language group; original tracks in different
-languages retain separate groups. If an original track also matches an explicit
-language in the list, that language group is ranked once, not once per token.
+languages or variants retain separate groups using their complete normalized
+tags. Subtitle Best without a language filter uses these same full-tag groups.
+If an original track also matches an explicit language in the list, that
+language group is ranked once, not once per token.
 All matching retains every eligible rendition. For example, `original,en` does
 not add a second, lower-ranked English rendition merely because it is original.
 

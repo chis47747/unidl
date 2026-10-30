@@ -98,6 +98,7 @@ from .live_rules import (
 )
 from .loader import LoadError, normalize_headers
 from .models import SegmentInfo, StreamInfo
+from .mp4_metadata import video_signature_from_init
 from .mux_audio import normalize_default_audio, resolve_default_audio
 from .mux_subtitle import normalize_default_subtitle, resolve_default_subtitle
 from .muxed import MuxedSourceCache, check_source, demux_file, is_demux_stream, projection_source
@@ -2389,6 +2390,10 @@ def _download_selected_stream(
             progress_display.finish()
     current_path = checkpoint.path or result.path
     if not checkpoint.reached("decrypted"):
+        result, credit_note = _filter_incompatible_apple_credit_sections(stream, result)
+        if credit_note:
+            emit(credit_note)
+            _log_line(args, credit_note)
         result = _release_redundant_download_parts(stream, result, current_path, checkpoint, hls_crypto, args, colors)
     cleanup_paths = [current_path, *projection_cleanup]
     result_temp_dir = result.temp_dir
@@ -2500,6 +2505,7 @@ def _download_selected_stream(
                                 section_fragment_durations=section_fragment_durations,
                                 normalize_large_composition_offsets=restamp_sections and stream.media_type == "video",
                                 event_callback=decrypt_event,
+                                section_expected_kids=_stream_section_key_ids(stream),
                             )
                     else:
                         current_path = decrypt_file(
@@ -2866,7 +2872,9 @@ def _stream_sections_need_timestamp_restamp(stream) -> bool:
         return False
     if _stream_uses_webm_container(stream):
         return False
-    return bool(stream.segments and sum(1 for segment in stream.segments if segment.index == -1) > 1)
+    return bool(stream.extra.get("apple_credit_filter_applied") or (
+        stream.segments and sum(1 for segment in stream.segments if segment.index == -1) > 1
+    ))
 
 
 def _stream_sections_need_whole_file_decryption(stream) -> bool:
@@ -2882,7 +2890,7 @@ def _should_finalize_clear_hls_sections(stream, result, hls_crypto) -> bool:
         return False
     if _stream_needs_external_decryption(stream, hls_crypto):
         return False
-    if not result.sections or len(result.sections) <= 1:
+    if not result.sections or (len(result.sections) <= 1 and not stream.extra.get("apple_credit_filter_applied")):
         return False
     if not _stream_sections_need_timestamp_restamp(stream):
         return False
@@ -2941,6 +2949,90 @@ def _normalize_hls_video_sample_timing(path: Path, stream) -> None:
 
 def _stream_section_durations(stream) -> list[float]:
     return [sum(durations) for durations in _stream_section_fragment_durations(stream)]
+
+
+def _filter_incompatible_apple_credit_sections(stream, result):
+    """Skip only proven incompatible, same-asset Apple credit suffixes."""
+    if stream.manifest_type != "hls" or stream.media_type != "video" or stream.is_live or not result.sections:
+        return result, None
+    groups = _segment_init_groups(stream.segments)
+    if len(groups) != len(result.sections) or len(groups) < 2:
+        return result, None
+
+    def asset(group, kind):
+        identities = set()
+        for segment in group:
+            parsed = urlparse(segment.url)
+            host = (parsed.hostname or "").lower()
+            if not any(host == domain or host.endswith("." + domain) for domain in ("itunes.apple.com", "tv.apple.com")):
+                return None
+            match = re.match(r"P(\d+)_A(\d+)_FF_" + kind, Path(unquote(parsed.path)).name)
+            if match is None:
+                return None
+            identities.add(match.groups())
+        return next(iter(identities)) if len(identities) == 1 else None
+
+    def signature(path):
+        import mmap
+
+        try:
+            with Path(path).open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                return video_signature_from_init(data)
+        except (OSError, ValueError):
+            return None
+
+    identity = asset(groups[0], "video_")
+    main = signature(result.sections[0]) if identity is not None else None
+    if main is None:
+        return result, None
+    skipped = set()
+    for index in range(len(groups) - 1, 0, -1):
+        if asset(groups[index], "credit-") != identity:
+            break
+        candidate = signature(result.sections[index])
+        if candidate is not None and (
+            candidate[:3] != main[:3] or (candidate[3] is not None and main[3] is not None and candidate[3] != main[3])
+        ):
+            skipped.add(index)
+    if not skipped:
+        return result, None
+    duration = sum(segment.duration or 0 for index in skipped for segment in groups[index])
+    kept = [segment for index, group in enumerate(groups) if index not in skipped for segment in group]
+    parts = result.parts
+    if parts is not None:
+        if len(parts) != len(stream.segments):
+            return result, None
+        kept_ids = {id(segment) for segment in kept}
+        parts = [part for part, segment in zip(parts, stream.segments, strict=True) if id(segment) in kept_ids]
+    stream.segments = kept
+    stream.duration = sum(segment.duration or 0 for segment in kept)
+    stream.size_bytes = None
+    kids = list(dict.fromkeys(kid for segment in kept if (kid := _normalize_kid_text(segment.key_id)) and kid != "0" * 32))
+    stream.extra["key_ids"] = kids
+    stream.extra["key_id"] = kids[0] if kids else None
+    stream.extra["apple_credit_filter_applied"] = True
+    stream.extra["apple_credit_skipped_seconds"] = duration
+    filtered = replace(result, sections=[path for index, path in enumerate(result.sections) if index not in skipped], parts=parts)
+    return filtered, (
+        f"Apple HLS: skipped {len(skipped)} incompatible appended credit section(s), {duration:.3f}s; "
+        "the main programme is retained without transcoding."
+    )
+
+
+def _stream_section_key_ids(stream) -> list[list[str]] | None:
+    """Keep HLS MAP-scoped KIDs separate for zero-default init metadata."""
+    if stream.manifest_type != "hls":
+        return None
+    groups = _segment_init_groups(getattr(stream, "segments", []) or [])
+    if len(groups) <= 1:
+        return None
+    return [
+        list(dict.fromkeys(
+            kid for segment in group
+            if (kid := _normalize_kid_text(getattr(segment, "key_id", None))) and kid != "0" * 32
+        ))
+        for group in groups
+    ]
 
 
 def _stream_section_fragment_durations(stream) -> list[list[float]]:

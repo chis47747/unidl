@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.5.5] - 2026-10-30
+
+### Track language selection
+
+- Matched primary language requests across their variants while keeping explicit regions, scripts and provider suffixes exact, with case, underscore and ISO-639 alias normalization.
+- Ranked each requested audio or subtitle variant separately for Best selection and retained full language tags for original-track groups and subtitle selection without a language filter, without falling back to an unrequested region.
+
+### HLS section decryption
+
+- Passed each HLS initialization section its own playlist KIDs so zero-default initialization metadata could use an unambiguous section key instead of the whole track's key list.
+- Preserved real initialization and fragment KIDs, missing-key validation and retry reuse, without extra media or licence requests or changes to single-init, DASH/ISM and live decryption paths.
+
+### MP4 section finalization
+
+- Normalized only validated all-zero clear c608 caption placeholders into same-size padding before section concatenation, leaving protected captions and audio/video payloads unchanged.
+- Excluded only confirmed incompatible, same-asset trailing Apple HLS credit sections after checking actual codec, dimensions and available colour metadata, while retaining compatible, unknown and ordinary programme sections.
+- Made section concatenation reject fatal demuxing errors and publish only a successful nonempty temporary output, preserving existing finished files and removing partial output on failure.
+
 ## [2.5.4] - 2026-10-29
 
 ### Download retries and recovery
