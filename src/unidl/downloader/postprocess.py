@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import mmap
 import os
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import zlib
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -19,6 +21,119 @@ from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, looks_like_h266, safe_temp_root
 
 DecryptEventCallback = Callable[[str], None]
+
+
+class _MP4MetadataBuffer:
+    """Read-only media mapping plus small, private fixed-size metadata pages.
+
+    Unlike ACCESS_COPY, this does not reserve file-sized copy-on-write commit
+    on Windows. Only pages actually edited are buffered; source/checkpoint
+    inodes are never modified, including when the destination is the source.
+    """
+
+    PAGE_SIZE = 4096
+
+    def __init__(self, source):
+        self.source = source
+        self.pages: dict[int, bytearray] = {}
+
+    def __len__(self):
+        return len(self.source)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            index = key + len(self) if key < 0 else key
+            if not 0 <= index < len(self):
+                raise IndexError("MP4 metadata index out of range")
+            page = self.pages.get(index // self.PAGE_SIZE)
+            return page[index % self.PAGE_SIZE] if page is not None else self.source[index]
+        start, stop, step = key.indices(len(self))
+        if step != 1:
+            return bytes(self[index] for index in range(start, stop, step))
+        result = self.source[start:stop]
+        patched = None
+        if self.pages and stop > start:
+            for index in range(start // self.PAGE_SIZE, (stop - 1) // self.PAGE_SIZE + 1):
+                page = self.pages.get(index)
+                if page is None:
+                    continue
+                if patched is None:
+                    patched = bytearray(result)
+                page_start = index * self.PAGE_SIZE
+                begin, end = max(start, page_start), min(stop, page_start + len(page))
+                patched[begin - start:end - start] = page[begin - page_start:end - page_start]
+        return bytes(patched) if patched is not None else result
+
+    def __setitem__(self, key, value):
+        if isinstance(key, int):
+            index = key + len(self) if key < 0 else key
+            if not 0 <= index < len(self):
+                raise IndexError("MP4 metadata index out of range")
+            key, value = slice(index, index + 1), bytes([value])
+        start, stop, step = key.indices(len(self))
+        if step != 1 or len(value) != stop - start:
+            raise ValueError("MP4 metadata edits must preserve byte offsets and file size")
+        if self[key] == value:
+            return
+        cursor = start
+        while cursor < stop:
+            index = cursor // self.PAGE_SIZE
+            page_start = index * self.PAGE_SIZE
+            page = self.pages.get(index)
+            if page is None:
+                page = bytearray(self.source[page_start:min(page_start + self.PAGE_SIZE, len(self))])
+                self.pages[index] = page
+            end = min(stop, page_start + len(page))
+            page[cursor - page_start:end - page_start] = value[cursor - start:end - start]
+            cursor = end
+
+
+def _mp4_file_view(handle):
+    return mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) if os.fstat(handle.fileno()).st_size else nullcontext(b"")
+
+
+def _read_mp4_metadata(path, read):
+    with Path(path).open("rb") as handle, _mp4_file_view(handle) as data:
+        return read(data)
+
+
+def _rewrite_mp4_metadata(input_path, output_path, edit, *, ignore_input_errors=False):
+    """Publish a streamed source copy with only the edited metadata pages."""
+    source_path, output = Path(input_path), Path(output_path)
+    temporary = None
+    try:
+        try:
+            source = source_path.open("rb")
+        except OSError:
+            if ignore_input_errors:
+                return False
+            raise
+        with source:
+            try:
+                view = _mp4_file_view(source)
+            except OSError:
+                if ignore_input_errors:
+                    return False
+                raise
+            with view as data:
+                buffer = _MP4MetadataBuffer(data)
+                result = edit(buffer)
+                if output == source_path and not buffer.pages:
+                    return result
+                with tempfile.NamedTemporaryFile("w+b", prefix=".unidl-mp4-", suffix=".tmp", dir=output.parent, delete=False) as target:
+                    temporary = Path(target.name)
+                    source.seek(0)
+                    shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
+                    for index, page in sorted(buffer.pages.items()):
+                        target.seek(index * buffer.PAGE_SIZE)
+                        target.write(page)
+        # Close every source handle/mapping before replacing an in-place
+        # destination: Windows does not permit replacing an open mapped file.
+        temporary.replace(output)
+        return result
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +403,7 @@ def restamp_fragmented_mp4_sequence(
         # duration as the boundary instead.
         if fragment_durations is not None:
             try:
-                fragment_count = len(_mp4_find_tfdt_positions(section.read_bytes()))
+                fragment_count = _read_mp4_metadata(section, lambda data: len(_mp4_find_tfdt_positions(data)))
             except OSError:
                 fragment_count = 0
             if fragment_count != len(fragment_durations):
@@ -584,10 +699,9 @@ def patch_mp4_tenc_default_kid(input_path: str | Path, kid: str, output_path: st
 
 def mp4_tenc_default_kids(input_path: str | Path) -> list[str]:
     try:
-        data = Path(input_path).read_bytes()
+        return _read_mp4_metadata(input_path, mp4_tenc_default_kids_from_bytes)
     except OSError:
         return []
-    return mp4_tenc_default_kids_from_bytes(data)
 
 
 def mp4_tenc_default_kids_from_bytes(data: bytes | bytearray) -> list[str]:
@@ -630,15 +744,26 @@ def restamp_fragmented_mp4_timestamps(
 ) -> tuple[Path, int | None]:
     input_path = Path(input_path)
     output = Path(output_path) if output_path else input_path
-    data = bytearray(input_path.read_bytes())
-    fixed_captions = normalize_empty_c608_samples(data)
+    next_time = _rewrite_mp4_metadata(
+        input_path, output,
+        lambda data: _restamp_mp4_metadata(
+            data, next_decode_time, min_duration_seconds, fallback_duration_seconds,
+            fallback_duration_ticks, fragment_durations_seconds, preserve_source_deltas,
+            normalize_large_composition_offsets, timescale_hint,
+        ),
+    )
+    return output, next_time
+
+
+def _restamp_mp4_metadata(
+    data, next_decode_time, min_duration_seconds, fallback_duration_seconds,
+    fallback_duration_ticks, fragment_durations_seconds, preserve_source_deltas,
+    normalize_large_composition_offsets, timescale_hint,
+):
+    normalize_empty_c608_samples(data)
     tfdt_positions = _mp4_find_tfdt_positions(data)
     if not tfdt_positions:
-        if fixed_captions:
-            output.write_bytes(data)
-        elif output != input_path:
-            shutil.copyfile(input_path, output)
-        return output, next_decode_time
+        return next_decode_time
 
     current = next_decode_time if next_decode_time is not None else _mp4_first_tfdt_time(data)
     if fragment_durations_seconds is not None:
@@ -659,8 +784,7 @@ def restamp_fragmented_mp4_timestamps(
                 next_time = current + sum(durations)
                 if len(tfdt_positions) > len(durations):
                     next_time = cursor
-                output.write_bytes(data)
-                return output, next_time
+                return next_time
 
     if preserve_source_deltas and fallback_duration_seconds is not None:
         timescale = timescale_hint or _mp4_fragment_timescale(data)
@@ -673,8 +797,7 @@ def restamp_fragmented_mp4_timestamps(
                 _mp4_patch_tfdt(data, position, target_time)
             if normalize_large_composition_offsets:
                 _mp4_normalize_large_composition_offsets(data)
-            output.write_bytes(data)
-            return output, current + int(round(max(0.0, fallback_duration_seconds) * timescale))
+            return current + int(round(max(0.0, fallback_duration_seconds) * timescale))
 
     if preserve_source_deltas and fallback_duration_ticks is not None:
         source_times = _mp4_tfdt_times(data)
@@ -686,17 +809,13 @@ def restamp_fragmented_mp4_timestamps(
                 _mp4_patch_tfdt(data, position, target_time)
             if normalize_large_composition_offsets:
                 _mp4_normalize_large_composition_offsets(data)
-            output.write_bytes(data)
-            return output, current + int(max(0, fallback_duration_ticks))
+            return current + int(max(0, fallback_duration_ticks))
 
     durations = _mp4_sidx_durations(data) or _mp4_trun_durations(data)
     if current is None or not durations:
-        composition_changed = normalize_large_composition_offsets and _mp4_normalize_large_composition_offsets(data)
-        if fixed_captions or composition_changed:
-            output.write_bytes(data)
-        elif output != input_path:
-            shutil.copyfile(input_path, output)
-        return output, next_decode_time
+        if normalize_large_composition_offsets:
+            _mp4_normalize_large_composition_offsets(data)
+        return next_decode_time
     if len(durations) < len(tfdt_positions):
         durations.extend([durations[-1]] * (len(tfdt_positions) - len(durations)))
     if min_duration_seconds is not None:
@@ -717,24 +836,25 @@ def restamp_fragmented_mp4_timestamps(
     if normalize_large_composition_offsets:
         _mp4_normalize_large_composition_offsets(data)
 
-    output.write_bytes(data)
-    return output, current
+    return current
 
 
 def fragmented_mp4_decode_time(input_path: str | Path) -> int | None:
     try:
-        return _mp4_first_tfdt_time(Path(input_path).read_bytes())
+        return _read_mp4_metadata(input_path, _mp4_first_tfdt_time)
     except OSError:
         return None
 
 
 def fragmented_mp4_timing(input_path: str | Path) -> tuple[int | None, int | None, int | None]:
+    def read(data):
+        durations = _mp4_sidx_durations(data) or _mp4_trun_durations(data)
+        return _mp4_first_tfdt_time(data), _mp4_fragment_timescale(data), sum(durations) if durations else None
+
     try:
-        data = Path(input_path).read_bytes()
+        return _read_mp4_metadata(input_path, read)
     except OSError:
         return None, None, None
-    durations = _mp4_sidx_durations(data) or _mp4_trun_durations(data)
-    return _mp4_first_tfdt_time(data), _mp4_fragment_timescale(data), sum(durations) if durations else None
 
 
 def split_fragmented_mp4_init_media(
@@ -1763,14 +1883,7 @@ def _mp4_normalize_large_sample_durations(input_path: str | Path) -> bool:
     path = Path(input_path)
     if _mp4_file_is_fragmented(path):
         return False
-    try:
-        data = bytearray(path.read_bytes())
-    except OSError:
-        return False
-    changed = _mp4_normalize_large_stts_durations(data)
-    if changed:
-        path.write_bytes(data)
-    return changed
+    return _rewrite_mp4_metadata(path, path, _mp4_normalize_large_stts_durations, ignore_input_errors=True)
 
 
 def _mp4_file_is_fragmented(path: Path) -> bool:

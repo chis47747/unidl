@@ -152,6 +152,36 @@ initialization data and unsupported layouts are not evidence of clear audio.
 `--no-decrypt`, transport ciphers and genuinely encrypted media retain their
 existing behavior. This does not change service licensing or key-vault policy.
 
+### Apple HLS programme identity and A/V alignment
+
+Apple HLS playlists may bundle a main programme with a bumper and other assets.
+Localized video, audio and subtitle resources can have different `P` programme
+numbers while sharing one `A` playback asset number. For Apple-hosted VOD with
+an explicit `mainAssetAdamId`, or a single numeric `a` parameter, the downloader
+matches that asset against the actual `P…_A…_` media filenames. It applies the
+same rule to all selected track types, retaining complete initialization groups
+(or individual plain WebVTT segments). Query strings and `_HLS_prefill` hints do
+not identify the current media. A list of assets is never resolved by choosing
+its first entry. The legacy programme-ID rule remains available when no usable
+Apple asset identity is exposed.
+
+Filtering also runs for already populated/imported segment lists before resume
+checkpoints are consulted. Duration and size estimates are refreshed; complete
+segment KID inventories exclude keys used only by removed assets. Incomplete
+inventories retain their existing init/session fallback. A changed track cannot
+reuse a completed checkpoint for the old, unfiltered audio. No extra playlist,
+media or licence request is introduced by identity matching.
+Numbered fragment caches use the exact filtered segment-list identity: the
+legacy URL-only fallback cannot adopt an older cache with shifted part indexes.
+Existing source caches are not modified or deleted by this check.
+
+This does not crop by duration, stretch audio, impose an arbitrary sync delay,
+or rewrite source timestamps. Same-asset sections, including localized credits,
+remain available for the separate compatibility check below. A missing or
+unrecognized asset match leaves the track intact rather than guessing. Live
+recordings are not programme-filtered, and other providers do not gain Apple's
+asset-ID interpretation.
+
 ### HLS initialization sections and placeholder KIDs
 
 A selected HLS track may contain several `EXT-X-MAP` sections with different
@@ -192,6 +222,27 @@ FFmpeg concat runs with fatal-error handling and also rejects an explicit
 demuxing error when the process unexpectedly returns zero. It writes a temporary
 output that is published only after success; partial/empty outputs are removed
 without replacing an existing finished file.
+
+### Bounded-memory MP4 metadata editing
+
+Timestamp/section finalization and local timing/KID probes no longer load the
+entire media file into a Python byte buffer. Probes use a read-only file mapping
+and skip media payload boxes. Edits retain only changed 4 KiB pages; publishing
+streams the source in 8 MiB chunks and applies those metadata pages to an
+atomic temporary output. This avoids both file-sized Python copies and
+Windows file-sized copy-on-write mapping reservations. Working memory still
+depends on metadata complexity, and operating-system file caching is separate.
+
+Timing calculations, media bytes and empty-caption normalization are unchanged.
+Failed edits leave the source, an existing destination and linked checkpoints
+intact. Unchanged in-place edits do not copy the file. This is a memory
+optimization, not a change to temporary-file retention, licence/decryption
+policy, muxer selection or the number of staged sections.
+
+Checkpoint directory totals may count several hard-linked names for the same
+media data. Compare allocated/unique-file space, not only the sum of file sizes.
+Debug/keep-temp mode may also retain earlier encrypted and clear generations;
+those are disk files, not a corresponding allocation of resident RAM.
 
 ## Separately compressed MP4 initialization
 

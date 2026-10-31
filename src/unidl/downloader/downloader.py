@@ -1826,6 +1826,12 @@ def _resume_temp_dir(
     if target.exists() or not search_fallback:
         return target
 
+    # Apple programme filtering can remove leading MAPs and renumber every
+    # retained part. Only the exact segment-list key is safe: the old URL-only
+    # fallback could read a bumper's numbered part as the main programme.
+    if stream.extra.get("asset_filter_adam_id"):
+        return target
+
     # A refreshed manifest can legitimately change its segment list (for
     # example, a service may add a new init segment) while still pointing at the
     # same title.  Older versions keyed the directory by every segment URL, so

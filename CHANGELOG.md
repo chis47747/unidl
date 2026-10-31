@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.5.6] - 2026-10-31
+
+### Download memory usage
+
+- Replaced whole-file Python buffers in MP4 timestamp/section finalization and timing/KID probes with read-only mappings and small edited metadata pages, avoiding file-sized copy-on-write reservations on Windows.
+- Published metadata edits through bounded 8 MiB copies and atomic temporary outputs, preserving media payloads, linked checkpoints and existing destinations on failure and skipping unchanged in-place rewrites.
+- Kept timing calculations and decryption policy unchanged and documented operating-system file caching, metadata-dependent working memory and hard-linked disk usage.
+
+### HLS audio/video alignment
+
+- Matched Apple-hosted VOD video, audio and subtitles to an explicit, unambiguous playback asset identity instead of relying on programme numbers that differ between localized renditions, preventing unrelated bumpers or assets from shifting alignment.
+- Applied matching to populated and imported segment lists before checkpoint lookup, refreshed duration, size and complete KID inventories, and preserved complete initialization groups and same-asset localized credits without extra requests or artificial timing offsets.
+- Prevented asset-filtered tracks from adopting older URL-only numbered-fragment caches with shifted indexes, while preserving existing cache files, unmatched tracks, legacy programme matching and live-recording behavior.
+
 ## [2.5.5] - 2026-10-30
 
 ### Track language selection

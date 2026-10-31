@@ -9841,6 +9841,7 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
 
     headers = source_request_headers(stream.extra, headers) or {}
     if stream.segments:
+        _filter_hls_segments_for_requested_asset(stream)
         return stream
     if stream.manifest_type not in {"hls", "m3u"}:
         return stream
@@ -10178,31 +10179,92 @@ def _apply_detected_stream_key_ids(
 
 
 def _filter_hls_segments_for_requested_asset(stream) -> None:
-    if stream.manifest_type != "hls" or not stream.segments:
+    if stream.manifest_type != "hls" or stream.is_live or not stream.segments:
         return
     asset_id = _requested_asset_id(stream.original_url)
-    if not asset_id:
+    # Localized Apple renditions can have different P (programme) numbers but
+    # share the requested A (playback asset). Prefer that identity consistently
+    # across video, audio and subtitles; query/prefill hints are not media IDs.
+    apple_asset_id = _requested_apple_hls_asset_id(stream.original_url)
+    if apple_asset_id and not any(_apple_hls_segment_asset_id(segment) for segment in stream.segments):
+        apple_asset_id = None
+    if not asset_id and not apple_asset_id:
         return
-    if _is_subtitle_stream(stream):
-        matching_segments = [segment for segment in stream.segments if _hls_segment_matches_requested_asset(segment, asset_id)]
+
+    def matches(segment):
+        if apple_asset_id:
+            return _apple_hls_segment_asset_id(segment) == apple_asset_id
+        return _hls_segment_matches_requested_asset(segment, asset_id)
+
+    if apple_asset_id and any(matches(segment) for segment in stream.segments):
+        stream.extra["asset_filter_adam_id"] = apple_asset_id
+
+    # Plain WebVTT has no MAP; fragmented subtitles must retain the complete
+    # matching initialization group, just like audio/video.
+    if _is_subtitle_stream(stream) and not any(segment.index == -1 for segment in stream.segments):
+        matching_segments = [segment for segment in stream.segments if matches(segment)]
         if not matching_segments or len(matching_segments) == len(stream.segments):
             return
         removed = len(stream.segments) - len(matching_segments)
-        stream.segments = matching_segments
-        stream.duration = sum(segment.duration or 0 for segment in stream.segments) or stream.duration
-        stream.extra["asset_filter_id"] = asset_id
         stream.extra["asset_filter_removed_segments"] = removed
-        return
-    groups = _segment_init_groups(stream.segments)
-    matching = [group for group in groups if any(_hls_segment_matches_requested_asset(segment, asset_id) for segment in group)]
-    if not matching or len(matching) == len(groups):
-        return
-    stream.segments = [segment for group in matching for segment in group]
+    else:
+        groups = _segment_init_groups(stream.segments)
+        matching = [group for group in groups if any(matches(segment) for segment in group)]
+        if not matching or len(matching) == len(groups):
+            return
+        matching_segments = [segment for group in matching for segment in group]
+        stream.extra["asset_filter_removed_sections"] = len(groups) - len(matching)
+    stream.segments = matching_segments
     stream.duration = sum(segment.duration or 0 for segment in stream.segments) or stream.duration
+    stream.size_bytes = None
     stream.encrypted = any(segment.encrypted for segment in stream.segments)
-    stream.encryption_scheme = next((segment.encryption_scheme for segment in stream.segments if segment.encryption_scheme), stream.encryption_scheme)
-    stream.extra["asset_filter_id"] = asset_id
-    stream.extra["asset_filter_removed_sections"] = len(groups) - len(matching)
+    stream.encryption_scheme = (
+        next((segment.encryption_scheme for segment in stream.segments if segment.encryption_scheme), stream.encryption_scheme)
+        if stream.encrypted else None
+    )
+    if asset_id:
+        stream.extra["asset_filter_id"] = asset_id
+    if apple_asset_id:
+        stream.extra["asset_filter_adam_id"] = apple_asset_id
+        # Drop keys belonging only to excluded assets when the retained
+        # segments supply a complete inventory. Unknown KIDs still need their
+        # existing session/init fallback; do not guess or discard that data.
+        kids = [_normalize_kid_text(segment.key_id) for segment in stream.segments if segment.encrypted]
+        if all(kid and kid != "0" * 32 for kid in kids):
+            kids = list(dict.fromkeys(kids))
+            stream.extra["key_ids"] = kids
+            stream.extra["key_id"] = kids[0] if kids else None
+
+
+def _requested_apple_hls_asset_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not any(
+        host == domain or host.endswith("." + domain) for domain in ("itunes.apple.com", "tv.apple.com")
+    ):
+        return None
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    # A combined child playlist can list many ``a`` values but declare the
+    # authoritative mainAssetAdamId. Never choose the first asset from a list.
+    for key in ("mainAssetAdamId", "a"):
+        if key in query:
+            values = query[key]
+            value = values[0].strip() if len(values) == 1 else ""
+            return value if re.fullmatch(r"[0-9]+", value) else None
+    return None
+
+
+def _apple_hls_segment_asset_id(segment) -> str | None:
+    parsed = urlparse(getattr(segment, "url", "") or "")
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not any(
+        host == domain or host.endswith("." + domain) for domain in ("itunes.apple.com", "tv.apple.com")
+    ):
+        return None
+    match = re.match(r"P[0-9]+_A([0-9]+)_", Path(unquote(parsed.path)).name)
+    return match.group(1) if match else None
 
 
 def _hls_segment_matches_requested_asset(segment, asset_id: str) -> bool:
