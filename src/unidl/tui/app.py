@@ -582,6 +582,35 @@ class UnidlApp(App):
         self.push_screen(controller.start_screen())
         return True
 
+    def open_import_queue(self, items) -> bool:
+        """Start one serial queue without merging independent export documents."""
+        from ..core import exports
+        from .import_queue import ImportQueueController
+
+        items = tuple(items)
+        if not items:
+            self.notify(tr("import.queue.empty"), severity="warning")
+            return False
+        # This neutral envelope is only a batch count/worker entry point. Each
+        # source retains its own format, settings, manifests, keys and hooks.
+        envelope = exports.Document(
+            service="mixed-import", service_name=tr("import.queue.title"),
+            entries=[item.entry for item in items],
+        )
+        service = self.registry.build(
+            _portable_import_service_class(envelope), self.config,
+            self.settings_store, globals_scope=self.globals,
+        )
+        service.ctx.extras["initial_import"] = envelope
+        controller = ImportQueueController(
+            self, service,
+            Engine(self.config, vault=self.vault, vault_collection=self.vaults),
+            items,
+        )
+        self.register_session(controller)
+        self.push_screen(controller.start_screen())
+        return True
+
     # ------------------------------------------------------------ global actions
     def action_global_back(self) -> None:
         screen = self.screen

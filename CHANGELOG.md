@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.5.7] - 2026-11-01
+
+### Redesigned Add keys
+
+- Rebuilt the Add keys layout with side-by-side service/title fields on wide terminals, stacked fields on narrow terminals and a scrollable editor while keeping destination and action controls available.
+- Collapsed selected-service suggestions, fitted service labels to terminal width and brought validation/conflict details into view, preserving explicit review and replacement confirmation.
+
+### Cross-file import queue
+
+- Added a Mixed download queue entry to Import for selecting titles across export files, services and media types, reviewing their order and moving or removing items before serial download.
+- Preserved each source's keys, manifests, settings, selection and delivery context, retaining installed-service hooks for native exports and generic delivery for unmatched or third-party sources without merging export files.
+- Kept per-title failures and retry contexts separate, returned Back to the queue builder with its order intact and added responsive controls, localized labels and workflow documentation.
+
+### Audio and subtitle language tags
+
+- Normalized provider language labels and legacy aliases at the mux metadata boundary, including Mandarin and Cantonese labels, while preserving valid regional, script, variant and private-use tags.
+- Applied the same handling to downloaded and imported audio/subtitles, default-track metadata and FFmpeg output without changing source labels, exports or automatic selection.
+- Used und for unknown or malformed output labels and retried only language options explicitly rejected by mkvmerge's registry, without hiding other mux failures, switching muxers or redownloading media.
+
 ## [2.5.6] - 2026-10-31
 
 ### Download memory usage

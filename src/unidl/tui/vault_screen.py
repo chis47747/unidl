@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -22,6 +23,7 @@ from textual.widgets.option_list import Option
 
 from ..core import vaults
 from ..core.i18n import phrase, tr
+from ..core.terminal_cells import cell_width, crop
 from ..core.vault import (
     KeyConflict,
     KeyConflictError,
@@ -29,7 +31,7 @@ from ..core.vault import (
     PairParseError,
     parse_pairs,
 )
-from .bidi import visual_markup
+from .bidi import visual_markup, visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 
@@ -132,37 +134,43 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         self._selected_service = self.service_id if self.service_id in known else ""
 
         yield Chrome(show_search=False, show_settings=False)
-        yield Static(tr("vault.add.title"), id="masthead")
-        yield Static(tr("vault.add.help"), id="subhead")
-        with VerticalScroll(id="vault-add-body"):
+        with Vertical(id="vault-add-body"):
             with Vertical(id="vault-add-card"):
-                yield Label(tr("vault.field.service"), classes="vault-field-label")
-                yield Input(
-                    value=self._selected_service,
-                    placeholder=tr("vault.placeholder.service"),
-                    id="vault-service-query",
-                )
-                yield Static("", id="vault-service-state")
-                yield OptionList(id="vault-service-list")
-                yield Label(tr("vault.field.title"), classes="vault-field-label")
-                yield Input(placeholder=tr("vault.placeholder.title"), id="vault-title")
-                yield Label(tr("vault.field.keys"), classes="vault-field-label")
-                yield TextArea(
-                    self.initial,
-                    soft_wrap=False,
-                    tab_behavior="focus",
-                    show_line_numbers=True,
-                    placeholder=tr("vault.placeholder.keys"),
-                    id="vault-pairs",
-                )
-                yield Static("", id="vault-validation")
+                yield Static(tr("vault.add.title"), id="masthead")
+                yield Static(tr("vault.add.help"), id="subhead")
+                with VerticalScroll(id="vault-form-scroll"):
+                    with Horizontal(id="vault-add-metadata"):
+                        with Vertical(id="vault-service-field"):
+                            yield Label(tr("vault.field.service"), classes="vault-field-label")
+                            yield Input(
+                                value=self._selected_service,
+                                placeholder=tr("vault.placeholder.service"),
+                                id="vault-service-query",
+                            )
+                            yield Static("", id="vault-service-state")
+                            yield OptionList(id="vault-service-list")
+                        with Vertical(id="vault-title-field"):
+                            yield Label(tr("vault.field.title"), classes="vault-field-label")
+                            yield Input(placeholder=tr("vault.placeholder.title"), id="vault-title")
+                    yield Label(tr("vault.field.keys_short"), classes="vault-field-label")
+                    yield Static(tr("vault.field.keys_help"), id="vault-keys-help")
+                    yield TextArea(
+                        self.initial,
+                        soft_wrap=False,
+                        tab_behavior="focus",
+                        show_line_numbers=True,
+                        placeholder=tr("vault.placeholder.keys"),
+                        id="vault-pairs",
+                    )
+                    yield Static("", id="vault-validation")
                 yield Label(tr("vault.field.destinations"), classes="vault-field-label")
                 with Horizontal(id="vault-destination-row"):
                     yield Static("", id="vault-destination-state")
                     yield Button(tr("vault.choose_vaults"), id="vault-destination-choose")
                 with Horizontal(id="vault-add-actions"):
-                    yield Button(tr("vault.review_add"), variant="primary", id="vault-save")
                     yield Button(phrase("Cancel"), id="vault-cancel")
+                    yield Static("", id="vault-action-gap")
+                    yield Button(tr("vault.review_add"), id="vault-save")
         yield KeyBar(
             ("^s", "review and add"),
             ("tab", "move between fields"),
@@ -171,6 +179,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         )
 
     def on_mount(self) -> None:
+        self._size_classes()
         self._vaults = self.app.vaults
         configured_descriptors = [
             descriptor
@@ -206,6 +215,52 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         self._rebuild_services()
         target = "#vault-pairs" if self._selected_service else "#vault-service-query"
         self.query_one(target).focus()
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._refresh_service_rows)
+        self.call_after_refresh(self._refresh_service_rows)
+
+    def _size_classes(self) -> None:
+        self.set_class(self.size.width < 100, "narrow")
+        self.set_class(self.size.height < 32, "compact")
+
+    def on_resize(self) -> None:
+        self._size_classes()
+        if self.is_mounted:
+            self.call_after_refresh(self._refresh_service_rows)
+
+    def _service_prompt(self, service_id: str, name: str) -> Text:
+        palette = self.app.palette
+        width = max(6, self.query_one("#vault-service-list").size.width - 3)
+        shown = visual_text(" ".join(name.split()))
+        suffix = f" · {service_id}"
+        available = max(1, width - cell_width(suffix))
+        if cell_width(shown) > available:
+            shown = crop(shown, max(0, available - 1)) + "…"
+        row = Text(shown, style=palette.fg)
+        row.append(suffix, style=palette.dim)
+        if cell_width(row.plain) > width:
+            row.truncate(width, overflow="ellipsis")
+        return row
+
+    def _refresh_service_rows(self, _theme=None) -> None:
+        if not self.is_mounted:
+            return
+        listing = self.query_one("#vault-service-list", OptionList)
+        names = {service_id: name for service_id, name, _search in self._service_rows}
+        for index, service_id in enumerate(self._visible_services):
+            listing.replace_option_prompt_at_index(index, self._service_prompt(service_id, names[service_id]))
+        listing.styles.height = max(1, min(3 if self.size.height < 32 else 4, len(self._visible_services)))
+        if self._selected_service:
+            self._update_selected_service_state(names[self._selected_service])
+
+    def _update_selected_service_state(self, name: str) -> None:
+        palette = self.app.palette
+        selected = Text(tr("vault.selected"), style=palette.ok)
+        selected.append(" · ", style=palette.dim)
+        selected.append(visual_text(name), style=palette.fg)
+        selected.append(f" · {tr('vault.selected_hint')}", style=palette.dim)
+        self.query_one("#vault-service-state", Static).update(selected)
 
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
@@ -215,16 +270,14 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         if len(labels) >= 4:
             labels[0].update(tr("vault.field.service"))
             labels[1].update(tr("vault.field.title"))
-            labels[2].update(tr("vault.field.keys"))
+            labels[2].update(tr("vault.field.keys_short"))
             labels[3].update(tr("vault.field.destinations"))
         self.query_one("#vault-service-query", Input).placeholder = tr("vault.placeholder.service")
         self.query_one("#vault-title", Input).placeholder = tr("vault.placeholder.title")
         self.query_one("#vault-pairs", TextArea).placeholder = tr("vault.placeholder.keys")
+        self.query_one("#vault-keys-help", Static).update(tr("vault.field.keys_help"))
         self.query_one("#vault-destination-choose", Button).label = tr("vault.choose_vaults")
-        save = self.query_one("#vault-save", Button)
-        save.label = (
-            tr("vault.replace_add") if self._confirm_signature is not None else tr("vault.review_add")
-        )
+        self._update_save_label()
         self.query_one("#vault-cancel", Button).label = phrase("Cancel")
         if self._service_rows:
             service_id, _name, search = self._service_rows[-1]
@@ -258,13 +311,8 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         option_list.clear_options()
         names = {service_id: name for service_id, name, _search in self._service_rows}
         for service_id in self._visible_services:
-            mark = f"  [$ok]{tr('vault.selected').lower()}[/]" if service_id == self._selected_service else ""
             option_list.add_option(
-                Option(
-                    f"  [$foreground]{visual_markup(names[service_id])}[/]  "
-                    f"[$dim]{service_id}[/]{mark}",
-                    id=service_id,
-                )
+                Option(self._service_prompt(service_id, names[service_id]), id=service_id)
             )
         if self._visible_services:
             option_list.highlighted = (
@@ -274,18 +322,17 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
             )
         else:
             option_list.add_option(Option(f"  [$dim]{tr('vault.no_platform_row')}[/]", disabled=True))
-        # Mount at most eight rows and give the empty rows back immediately as
-        # the query narrows. An exact selection is one row, leaving the key editor
-        # and save controls visible without scrolling on an ordinary-height TUI.
-        option_list.styles.height = max(1, min(6, len(self._visible_services)))
+        # Keep the eight candidates scrollable in a small suggestion area.
+        # Once selected, the input/status already identify the service; a
+        # duplicate single-row list only pushes the editor down.
+        selected = bool(self._selected_service and value.casefold() == self._selected_service.casefold())
+        option_list.display = not selected
+        self.call_after_refresh(self._refresh_service_rows)
 
         state = self.query_one("#vault-service-state", Static)
         if self._selected_service and value.casefold() == self._selected_service.casefold():
             name = names.get(self._selected_service, self._selected_service)
-            state.update(
-                f"[$ok]{tr('vault.selected')}[/] {visual_markup(name)}  "
-                f"[$dim]· {tr('vault.selected_hint')}[/]"
-            )
+            self._update_selected_service_state(name)
         else:
             count = len(ranked)
             shown = min(8, count)
@@ -342,7 +389,16 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         if self._raw_signature() == self._confirm_signature:
             return
         self._confirm_signature = None
-        self.query_one("#vault-save", Button).label = tr("vault.review_add")
+        self._update_save_label()
+
+    def _update_save_label(self) -> None:
+        save = self.query_one("#vault-save", Button)
+        save.label = (
+            tr("vault.replace_add") if self._confirm_signature is not None else tr("vault.review_add")
+        )
+        # Button.label refreshes its paint, not its auto-width. The longer
+        # conflict-confirmation label must not be clipped to the old width.
+        save.refresh(layout=True)
 
     def on_text_area_changed(self, _event: TextArea.Changed) -> None:
         self._reset_confirmation()
@@ -375,6 +431,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         state = self.query_one("#vault-destination-state", Static)
         if not self._write_targets:
             state.update(f"[$warn]{tr('vault.no_destination')}[/]")
+            state.tooltip = tr("vault.no_destination")
             return
         kinds = {descriptor.name: descriptor.remote for descriptor in self._descriptors}
         labels = [
@@ -382,6 +439,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
             for name in self._write_targets
         ]
         state.update(visual_markup(", ".join(labels)))
+        state.tooltip = ", ".join(labels)
 
     def _pick_destinations(self) -> None:
         from .vault_targets import VaultTargetResult, VaultTargetScreen
@@ -472,7 +530,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         if conflicts and self._confirm_signature != signature:
             self._confirm_signature = signature
             self._show_conflicts(conflicts, new, existing)
-            self.query_one("#vault-save", Button).label = tr("vault.replace_add")
+            self._update_save_label()
             return
 
         self._set_busy(True)
@@ -509,12 +567,21 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         rows.append(tr("vault.conflict_review"))
         self.query_one("#vault-validation", Static).update("\n".join(rows))
         self.query_one("#vault-validation", Static).set_class(True, "warning")
+        self._reveal_validation()
 
     def _problem(self, message: str) -> None:
         status = self.query_one("#vault-validation", Static)
         status.update(message)
         status.set_class(True, "error")
         status.set_class(False, "warning")
+        self._reveal_validation()
+
+    def _reveal_validation(self) -> None:
+        status = self.query_one("#vault-validation", Static)
+        status.display = True
+        self.query_one("#vault-form-scroll", VerticalScroll).scroll_end(
+            animate=False, x_axis=False,
+        )
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -533,6 +600,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
             status.update(tr("vault.writing"))
             status.set_class(False, "error")
             status.set_class(False, "warning")
+            self._reveal_validation()
 
     def action_service_cursor(self, delta: int) -> None:
         if getattr(self.focused, "id", "") not in (

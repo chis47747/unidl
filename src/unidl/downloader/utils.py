@@ -314,6 +314,72 @@ def language_name(language: str | None) -> str | None:
     return getattr(entry, "common_name", None) or getattr(entry, "name", None)
 
 
+_MUX_LANGUAGE_ALIASES = {
+    "guoyu": "cmn",
+    "mandarin": "cmn",
+    "putonghua": "cmn",
+    "国语": "cmn",
+    "國語": "cmn",
+    "普通话": "cmn",
+    "普通話": "cmn",
+    "cantonese": "yue",
+    "yueyu": "yue",
+    "粤语": "yue",
+    "粵語": "yue",
+    "sp": "es",
+    "iw": "he",
+    "in": "id",
+    "ji": "yi",
+    "jp": "ja",
+    "cz": "cs",
+    "gr": "el",
+    "zh-chs": "zh-Hans",
+    "zh-cht": "zh-Hant",
+}
+
+_MUX_LANGUAGE_TAG = re.compile(
+    r"(?:[a-z]{2,3}(?:-[a-z]{3}){0,3}(?:-[a-z]{4})?(?:-(?:[a-z]{2}|[0-9]{3}))?"
+    r"(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*"
+    r"(?:-[0-9a-wyz](?:-[a-z0-9]{2,8})+)*(?:-x(?:-[a-z0-9]{1,8})+)?"
+    r"|x(?:-[a-z0-9]{1,8})+)",
+    re.IGNORECASE | re.ASCII,
+)
+
+_MUX_GRANDFATHERED_TAGS = frozenset(
+    "en-gb-oed i-ami i-bnn i-default i-enochian i-hak i-klingon i-lux i-mingo "
+    "i-navajo i-pwn i-tao i-tay i-tsu sgn-be-fr sgn-be-nl sgn-ch-de art-lojban "
+    "cel-gaulish no-bok no-nyn zh-guoyu zh-hakka zh-min zh-min-nan zh-xiang".split()
+)
+
+
+@lru_cache(maxsize=512)
+def normalize_mux_language(language: str | None) -> str:
+    """Normalize output metadata only, without changing source/selection tags.
+
+    Muxers require language tags, not provider labels. Preserve full regional,
+    script, variant and private-use tags; unknown primary codes or malformed
+    tags become ``und`` rather than aborting an otherwise valid download.
+    """
+    normalized = (language or "").strip().replace("_", "-")
+    alias = _MUX_LANGUAGE_ALIASES.get(normalized.casefold())
+    if alias:
+        return alias
+    if normalized.casefold() in _MUX_GRANDFATHERED_TAGS:
+        return normalized
+    if not _MUX_LANGUAGE_TAG.fullmatch(normalized):
+        return "und"
+    primary = normalized.split("-", 1)[0].lower()
+    if primary == "x" or (len(primary) == 3 and "qaa" <= primary <= "qtz"):
+        return normalized
+    import pycountry
+
+    entry = (
+        pycountry.languages.get(alpha_2=primary) if len(primary) == 2 else
+        pycountry.languages.get(alpha_3=primary) or pycountry.languages.get(bibliographic=primary)
+    )
+    return normalized if entry is not None else "und"
+
+
 def track_language_label(language: str | None, *identifiers: str | None) -> str | None:
     """Display language (explicit region), separate from the original tag."""
     name = language_name(language)

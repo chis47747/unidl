@@ -164,6 +164,13 @@ service id and choose a live filtered result. The typed query stays visible. Edi
 or delete the selected id to clear it and immediately choose another service;
 only the first eight matches are mounted, rather than a 150-service dropdown.
 
+On wide terminals, the service and optional title sit side by side; narrow
+terminals stack them. Selecting a service collapses its suggestions until the
+query is edited again. The key editor scrolls independently of the destination
+and action rows, which stay available at the bottom. Actions use compact,
+single-line controls; validation and conflict details scroll into view before
+confirmation.
+
 The editor takes one `KID:key` per line. It also accepts copied `--key KID:key`
 arguments, several direct pairs in a JSON or command line, dashed UUID-shaped
 KIDs, upper-case hex and a full-width colon. Blank lines are ignored. Every other

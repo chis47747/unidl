@@ -967,92 +967,158 @@ Input > .input--cursor {
 /* ---------------------------------------------------------- manual key entry */
 #vault-add-body {
     height: 1fr;
-    padding: 1 2;
+    padding: 1 2 0 2;
     align-horizontal: center;
 }
 #vault-add-card {
-    width: 90;
-    max-width: 96%;
-    height: auto;
-    padding: 1 2;
-    border: round $accent;
-    background: $recessed;
+    width: 104;
+    max-width: 100%;
+    height: 1fr;
+    padding: 0;
+    border: none;
+    background: transparent;
 }
+AddKeysScreen #masthead {
+    height: 1;
+    padding: 0 1;
+}
+AddKeysScreen #subhead {
+    height: auto;
+    max-height: 3;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+#vault-form-scroll {
+    height: 1fr;
+    min-height: 3;
+    padding: 0 1;
+    overflow-x: hidden;
+}
+#vault-add-metadata {
+    height: auto;
+    min-height: 3;
+}
+#vault-service-field, #vault-title-field {
+    height: auto;
+    width: 1fr;
+    min-width: 0;
+}
+#vault-service-field { padding-right: 2; }
+#vault-title-field { padding-left: 2; border-left: solid $rule; }
+AddKeysScreen.narrow #vault-add-metadata { layout: vertical; }
+AddKeysScreen.narrow #vault-service-field { padding-right: 0; }
+AddKeysScreen.narrow #vault-title-field { padding-left: 0; border: none; }
 .vault-field-label {
-    height: 2;
+    height: auto;
+    min-height: 2;
     padding: 1 0 0 0;
-    color: $muted;
+    color: $fg2;
 }
 #vault-service-query, #vault-title {
-    height: 3;
+    height: 1;
+    padding: 0 1;
+    background: $recessed;
 }
+#vault-service-query:focus, #vault-title:focus { background: $highlight; }
 #vault-service-state {
     width: 100%;
-    height: 1;
+    height: auto;
+    max-height: 2;
     padding: 0 1;
     color: $dim;
 }
 #vault-service-list {
     width: 100%;
-    height: 6;
+    height: 4;
     border: none;
-    background: $highlight;
+    background: transparent;
+    overflow-x: hidden;
 }
 #vault-service-list > .option-list--option-highlighted {
-    background: $visual;
-    color: $foreground;
-}
-#vault-pairs {
-    height: 9;
-    min-height: 5;
-    border: none;
-    border-left: solid $accent;
-    padding: 0 1;
     background: $highlight;
     color: $foreground;
 }
-#vault-pairs:focus {
-    background: $visual;
+#vault-keys-help {
+    height: auto;
+    max-height: 2;
+    margin-bottom: 1;
+    color: $muted;
 }
+#vault-pairs {
+    height: 10;
+    min-height: 5;
+    border: none;
+    padding: 0 1;
+    background: $recessed;
+    color: $foreground;
+}
+#vault-pairs:focus { background: $highlight; }
 #vault-validation {
+    display: none;
     width: 100%;
     height: auto;
-    max-height: 7;
     padding: 1 0 0 0;
     color: $dim;
 }
-#vault-validation.warning {
-    color: $warn;
-}
-#vault-validation.error {
-    color: $bad;
-}
+#vault-validation.warning { color: $warn; }
+#vault-validation.error { color: $bad; }
+#vault-add-card > .vault-field-label { padding: 0 1; min-height: 1; }
 #vault-destination-row {
     width: 100%;
     height: auto;
-    margin: 1 0 0 0;
-    align: left middle;
+    min-height: 1;
+    max-height: 3;
+    margin: 0 0 1 0;
 }
 #vault-destination-state {
     width: 1fr;
     height: auto;
+    max-height: 3;
     padding: 0 1;
-    color: $foreground;
-}
-#vault-destination-choose {
-    width: auto;
-    min-width: 16;
+    color: $muted;
 }
 #vault-add-actions {
     width: 100%;
-    height: 3;
-    align: right middle;
+    height: 2;
+    border-top: solid $rule;
+    margin: 0 0 1 0;
+    padding: 0 1;
 }
-#vault-add-actions Button {
+#vault-action-gap { width: 1fr; height: 1; }
+AddKeysScreen Button {
     width: auto;
-    min-width: 14;
-    margin: 0 0 0 1;
+    min-width: 6;
+    height: 1;
+    min-height: 1;
+    border: none;
+    background: transparent;
+    padding: 0 1;
+    color: $muted;
+    text-style: none;
 }
+AddKeysScreen Button:hover, AddKeysScreen Button:focus, AddKeysScreen Button.-active {
+    border: none;
+    background: $highlight;
+    color: $foreground;
+    text-style: bold;
+}
+#vault-save {
+    max-width: 75%;
+    color: $accent;
+    text-style: bold;
+}
+AddKeysScreen Button:disabled {
+    border: none;
+    background: transparent;
+    text-opacity: 0.6;
+}
+AddKeysScreen.compact #vault-add-body { padding-top: 0; }
+AddKeysScreen.compact #subhead { margin-bottom: 0; max-height: 2; }
+AddKeysScreen.compact #vault-pairs { height: 6; }
+AddKeysScreen.compact .vault-field-label { min-height: 1; padding-top: 0; }
+AddKeysScreen.compact #vault-keys-help { margin-bottom: 0; }
+AddKeysScreen.compact #vault-destination-row { margin-bottom: 0; }
+AddKeysScreen.compact #vault-add-actions { margin-bottom: 0; }
 
 /* -------------------------------------------------------- responsive grid */
 #grid-area {

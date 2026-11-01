@@ -158,6 +158,10 @@ class ImportScreen(Screen[None]):
         )
         self.query_one("#import-note", Static).update(note)
 
+        option_list.add_option(Option(
+            f"    [bold $accent]{_esc(tr('import.queue.title'))}[/]",
+            id="mixed-import",
+        ))
         for path, document, problem in self._rows:
             option_list.add_option(Option(self._row_markup(path, document, problem)))
         if not self._rows:
@@ -168,9 +172,9 @@ class ImportScreen(Screen[None]):
                 )
             )
 
-        if previous is not None and self._rows:
-            option_list.highlighted = min(previous, len(self._rows) - 1)
-        elif self._rows:
+        if previous is not None:
+            option_list.highlighted = min(previous, len(self._rows))
+        else:
             option_list.highlighted = 0
 
     def _row_markup(
@@ -197,13 +201,18 @@ class ImportScreen(Screen[None]):
     def _selected(self) -> tuple[Path, exports.Document | None, str] | None:
         option_list = self.query_one("#import-list", OptionList)
         index = option_list.highlighted
-        if index is None or index >= len(self._rows):
+        if index is None or index < 1 or index > len(self._rows):
             return None
-        return self._rows[index]
+        return self._rows[index - 1]
 
     # --------------------------------------------------------------------- doing
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
+        if event.option.id == "mixed-import":
+            from .import_queue import ImportQueueScreen
+
+            self.app.push_screen(ImportQueueScreen())
+            return
         chosen = self._selected()
         if chosen is None:
             return
@@ -229,7 +238,7 @@ class ImportScreen(Screen[None]):
         self.app.open_path(folder)
 
 
-class ExportEntryScreen(Screen[None]):
+class ExportEntryScreen(Screen[list[int] | None]):
     """Choose which titles in one export file should enter delivery.
 
     ``SelectionList`` gives the export flow the same keyboard contract as every
@@ -250,10 +259,14 @@ class ExportEntryScreen(Screen[None]):
         Binding("enter", "confirm", "Open selected", show=True),
     ]
 
-    def __init__(self, document: exports.Document, *, source_name: str = "") -> None:
+    def __init__(
+        self, document: exports.Document, *, source_name: str = "",
+        queue_selection: bool = False,
+    ) -> None:
         super().__init__()
         self.document = document
         self.source_name = source_name
+        self.queue_selection = queue_selection
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True, show_settings=False)
@@ -274,7 +287,7 @@ class ExportEntryScreen(Screen[None]):
             ("space", "select / clear"),
             ("a", "select all"),
             ("n", "clear all"),
-            ("enter", "open selected"),
+            ("enter", tr("import.queue.add") if self.queue_selection else "open selected"),
             ("^b", "back to exports"),
             ("esc", "quit"),
         )
@@ -304,6 +317,11 @@ class ExportEntryScreen(Screen[None]):
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
         self._render_head()
+        if self.queue_selection:
+            self.query_one(KeyBar).render_pairs(
+                ("space", "select / clear"), ("a", "select all"), ("n", "clear all"),
+                ("enter", tr("import.queue.add")), ("^b", "back to exports"), ("esc", "quit"),
+            )
 
     def on_resize(self) -> None:
         # ``join_fitted`` depends on the available width. Rebuild both status
@@ -337,6 +355,8 @@ class ExportEntryScreen(Screen[None]):
         self.query_one("#import-entry-head", Static).update(head)
         selected = len(self._list().selected) if self.is_mounted else 0
         source = self.source_name or self.document.service_name or self.document.service
+        if self.queue_selection:
+            source = tr("import.queue.add") + " · " + source
         note = join_fitted(
             [
                 (f"[$muted]{_esc(source)}[/]", source),
@@ -373,6 +393,9 @@ class ExportEntryScreen(Screen[None]):
                 self.notify("Select at least one title", severity="warning", timeout=3)
                 return
             selected = [int(entries.get_option_at_index(highlighted).value)]
+        if self.queue_selection:
+            self.dismiss(sorted(selected))
+            return
         chosen = [self.document.entries[index] for index in selected]
         if not self.app.open_import(replace(self.document, entries=chosen)):
             return

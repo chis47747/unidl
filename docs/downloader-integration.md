@@ -134,6 +134,27 @@ This path buffers the file before decoding; it does not add streaming decryption
 or partial-file resume. Existing FLAC filenames and `<Ext>` naming patterns keep
 their `.flac` suffix, including when no audio conversion was requested.
 
+## Mux language metadata
+
+Provider language labels are normalized only when building mux metadata.
+Mandarin labels such as `guoyu`, `putonghua` and `国语` map to `cmn`;
+Cantonese labels such as `yueyu` map to `yue`. Existing legacy aliases and
+underscore-separated locale tags are normalized too. Full ISO language,
+region, script and private-use tags (for example `es-419`, `zh-Hant-HK` and
+`eng-x-51`) are retained. Unrecognized primary codes or malformed labels use
+`und` rather than aborting a valid media mux.
+
+The same boundary applies to downloaded tracks, external subtitle/audio
+imports, default-track layout flags, and FFmpeg output metadata. Source tags,
+track names, exported manifests and automatic track selection are unchanged;
+an unknown label is not guessed to be a different language.
+
+If mkvmerge explicitly rejects a remaining tag against its own IANA registry,
+only the rejected `--language` values are retried as `und`. Other languages,
+names, default flags, timing and media remain unchanged. This bounded fallback
+does not retry disk, codec, input, cancellation or other mux failures, and does
+not switch muxers or redownload media.
+
 ## MP4 encryption evidence and clear audio
 
 Encryption metadata is read at actual ISO-BMFF box boundaries, including nested

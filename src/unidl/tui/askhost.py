@@ -1181,6 +1181,10 @@ class AskHost(Screen):
             if self.waiting:
                 self._resolve(BACK)
             return True
+        if controller is not None and getattr(controller, "mixed_import_session", False):
+            if self.waiting:
+                self._resolve(BACK)
+            return bool(controller.return_to_import())
         if self.waiting:
             root_back = getattr(self, "_ask_scope", None) == SCOPE_ROOT
             controller = getattr(self, "controller", None)

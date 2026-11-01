@@ -142,6 +142,7 @@ from .utils import (
     format_size,
     format_time,
     looks_like_h266,
+    normalize_mux_language,
     pretty_codec,
     safe_temp_root,
     unique_path,
@@ -9470,26 +9471,8 @@ def _mux_language(stream) -> str | None:
     return _normalize_mux_language(language)
 
 
-_MUX_LANGUAGE_ALIASES = {
-    "cantonese": "yue",
-    "sp": "es",
-    "iw": "he",
-    "in": "id",
-    "ji": "yi",
-    "jp": "ja",
-    "cz": "cs",
-    "gr": "el",
-    "zh-chs": "zh-Hans",
-    "zh-cht": "zh-Hant",
-}
-
-
 def _normalize_mux_language(language: str) -> str:
-    normalized = language.strip()
-    alias = _MUX_LANGUAGE_ALIASES.get(normalized.lower())
-    if alias:
-        return alias
-    return normalized
+    return normalize_mux_language(language)
 
 
 def _mux_track_name(stream) -> str | None:

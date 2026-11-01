@@ -18,7 +18,13 @@ from .cenc_fragment import CencInitMetadata, CencProgressCallback, decrypt_cenc_
 from .embedding import DownloadRuntime, current_download_runtime, managed_popen, managed_run
 from .mp4_metadata import box_ranges, normalize_empty_c608_samples
 from .subtitles import SubtitleConversionError, convert_subtitle_file
-from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_path, looks_like_h266, safe_temp_root
+from .utils import (
+    WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    bounded_path,
+    looks_like_h266,
+    normalize_mux_language,
+    safe_temp_root,
+)
 
 DecryptEventCallback = Callable[[str], None]
 
@@ -969,7 +975,7 @@ def mux_files(
                     if source_index == input_index:
                         flags.extend(["--default-track-flag", f"{track_id}:{'yes' if stream is chosen_audio else 'no'}"])
                         if item.language:
-                            flags.extend(["--language", f"{track_id}:{item.language}"])
+                            flags.extend(["--language", f"{track_id}:{normalize_mux_language(item.language)}"])
                         if item.name:
                             flags.extend(["--track-name", f"{track_id}:{item.name}"])
                 for source_index, track_id, stream in subtitle_layout:
@@ -977,7 +983,7 @@ def mux_files(
                         flags.extend(["--default-track-flag", f"{track_id}:{'yes' if stream is chosen_subtitle else 'no'}"])
                         flags.extend(["--forced-track", f"{track_id}:{'yes' if stream.extra.get('forced') else 'no'}"])
                         if item.language:
-                            flags.extend(["--language", f"{track_id}:{item.language}"])
+                            flags.extend(["--language", f"{track_id}:{normalize_mux_language(item.language)}"])
                         if item.name:
                             flags.extend(["--track-name", f"{track_id}:{item.name}"])
                 metadata_item = (
@@ -1056,13 +1062,44 @@ def mux_files(
             args.append(str(output))
         else:
             raise ValueError(f"Unsupported muxer: {muxer}")
-        _run_external(args, "muxing")
+        if selected == "mkvmerge":
+            _run_mkvmerge_mux(args)
+        else:
+            _run_external(args, "muxing")
         return output
     finally:
         if temp_dir is not None:
             shutil.rmtree(temp_dir, ignore_errors=True)
         if chapter_temp_dir is not None:
             shutil.rmtree(chapter_temp_dir, ignore_errors=True)
+
+
+def _run_mkvmerge_mux(args: list[str]) -> None:
+    # A syntactically valid tag can still be rejected by this mkvmerge
+    # version's IANA registry (e.g. an unknown variant/script). Only recover
+    # from its explicit language-validation error, not a media/mux failure.
+    command = list(args)
+    for _attempt in range(command.count("--language") + 1):
+        try:
+            _run_external(command, "muxing")
+            return
+        except RuntimeError as exc:
+            match = re.search(
+                r"is not a valid IETF BCP 47/RFC 5646 language tag in '--language ([0-9]+):([^']+)'",
+                str(exc),
+            )
+            if not match or match[2] == "und":
+                raise
+            changed = False
+            for index, option in enumerate(command[:-1]):
+                if option != "--language":
+                    continue
+                track, separator, tag = command[index + 1].partition(":")
+                if separator and tag == match[2]:
+                    command[index + 1] = f"{track}:und"
+                    changed = True
+            if not changed:
+                raise
 
 
 def _probe_mux_tracks(item: MuxInput, muxer: str, executable: str) -> list[dict]:
@@ -1190,7 +1227,7 @@ def _ffmpeg_default_audio_args(layout, chosen) -> list[str]:
             f"-disposition:a:{audio_index}", "+default" if stream is chosen else "-default",
         ])
         if stream.language:
-            args.extend([f"-metadata:s:a:{audio_index}", f"language={stream.language}"])
+            args.extend([f"-metadata:s:a:{audio_index}", f"language={normalize_mux_language(stream.language)}"])
         if stream.name:
             args.extend([f"-metadata:s:a:{audio_index}", f"title={stream.name}"])
     return args
@@ -1208,7 +1245,7 @@ def _ffmpeg_default_subtitle_args(layout, chosen) -> list[str]:
             f"-disposition:s:{subtitle_index}", "+".join(dispositions) if dispositions else "0",
         ])
         if stream.language:
-            args.extend([f"-metadata:s:s:{subtitle_index}", f"language={stream.language}"])
+            args.extend([f"-metadata:s:s:{subtitle_index}", f"language={normalize_mux_language(stream.language)}"])
         if stream.name:
             args.extend([f"-metadata:s:s:{subtitle_index}", f"title={stream.name}"])
     return args
@@ -1481,7 +1518,7 @@ def _mkvmerge_import_args(item: MuxInput) -> list[str]:
     elif item.track_type_filter == "audio":
         args.extend(["--no-video", "--no-subtitles", "--no-buttons"])
     if item.language:
-        args.extend(["--language", f"0:{item.language}"])
+        args.extend(["--language", f"0:{normalize_mux_language(item.language)}"])
     if item.name:
         args.extend(["--track-name", f"0:{item.name}"])
     if item.default is not None:
@@ -1510,7 +1547,7 @@ def _ffmpeg_delay_value(delay_ms: int) -> str:
 def _ffmpeg_import_metadata_args(output_index: int, item: MuxInput) -> list[str]:
     args: list[str] = []
     if item.language:
-        args.extend([f"-metadata:s:{output_index}", f"language={item.language}"])
+        args.extend([f"-metadata:s:{output_index}", f"language={normalize_mux_language(item.language)}"])
     if item.name:
         args.extend([f"-metadata:s:{output_index}", f"title={item.name}"])
     if item.default is not None or item.forced is not None:

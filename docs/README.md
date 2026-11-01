@@ -21,6 +21,8 @@ and extending the project.
   integration.
 - [Third-party exports](third-party-exports.md) — Unshackle and other non-UniDL
   export files delivered through the generic downloader.
+- [Mixed import queue](import-queue.md) — ordered downloads across export files,
+  services and media types.
 - [Testing](testing.md) — offline checks, live checks and regression practice.
 
 ## Playback and delivery
