@@ -1,5 +1,36 @@
 # Track selection
 
+## Embedded HLS closed captions
+
+A master playlist may declare `TYPE=CLOSED-CAPTIONS` with an `INSTREAM-ID`
+instead of a subtitle URL. Such declarations appear in the picker as
+`CC · Embedded` subtitles with their declared language and channel. They use
+the existing subtitle language/kind selection and default-subtitle preference.
+Listing tracks does not probe video segments to discover them.
+
+For VOD, selecting one of these subtitles also requires its video carrier:
+UniDL reuses a selected video from the same master/caption group, or uses that
+group's lowest-bandwidth rendition as a temporary dependency. The video is
+downloaded/decrypted once even when video and captions are selected together.
+Subtitle-only output keeps only the requested subtitles, not that temporary
+video. Any carrier keys must be present/licensed through the normal selected
+track flow; the dependency never licenses the entire ladder.
+
+Extraction currently supports MP4 `c608` tracks for CEA-608 `CC1` and `CC3`,
+using FFmpeg and ffprobe. Other channels, CEA-708 services, live recording and
+captions carried only in video SEI/TS require another extraction method and
+produce an explicit unsupported error rather than substituting a different
+channel or reporting an absent track as an empty download.
+Fragmented MP4 extraction copies only caption samples into a small temporary
+container, retaining their timing and normalizing empty c608 placeholders.
+It does not decode video or allocate a video-sized copy for caption conversion.
+Normal subtitle format settings apply after extraction. With
+**Download behavior → Muxer → No mux**, original captions are retained as a
+caption-only MOV instead of being converted to SRT. This file retains the
+original c608 track and can contain both data fields; it is not a decoded,
+single-channel text subtitle. Reference and media-playlist exports retain the
+caption declaration and carrier relationship without expanded segment lists.
+
 UniDL has one shared output-track selector for every service. It runs after the
 service has authorized and parsed its manifest (and after any service-owned
 subtitle sidecar rows have been added). It decides which parsed video, audio and

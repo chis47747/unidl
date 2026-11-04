@@ -37,6 +37,15 @@ from .audio import (
     transcode_audio,
 )
 from .bbts import decrypt_bbts_file
+from .captions import PRESERVE as _PRESERVE_CAPTIONS
+from .captions import (
+    bind_caption_sources,
+    caption_source,
+    extract_caption,
+    is_caption,
+    update_caption_source,
+    validate_caption,
+)
 from .cenc_fragment import CencFragmentKeyError, fragment_cenc_key_ids_from_bytes, mp4_audio_is_explicitly_clear
 from .chapters import ChapterFileError, load_chapters_file
 from .console import Palette, color_enabled, paint
@@ -904,6 +913,12 @@ def _download_impl(args: argparse.Namespace) -> int:
         print(paint("No stream selected.", Palette.yellow, colors))
         return 1
     selected = _replace_direct_audio_with_matching_sabr_audio(selected, streams)
+    bind_caption_sources(selected, streams)
+    for stream in selected:
+        if is_caption(stream):
+            validate_caption(stream)
+            if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+                raise RuntimeError("FFmpeg and ffprobe are required for embedded CC extraction.")
     hydrated = [_hydrate_stream(stream, headers=headers, no_probe=args.no_probe, base_url=args.base_url) for stream in selected]
     if (
         chapter_records
@@ -997,6 +1012,11 @@ def _download_impl(args: argparse.Namespace) -> int:
     if args.custom_range:
         for stream in hydrated:
             _apply_custom_range(stream, args.custom_range)
+    args._unidown_caption_jobs = {
+        (stream.url, stream.original_url): (stream, offset)
+        for offset, stream in enumerate(hydrated, 1)
+        if stream.media_type == "video" and stream.extra.get(_PRESERVE_CAPTIONS)
+    }
     prepare_dvr_sequence_windows(
         hydrated,
         headers=headers,
@@ -2078,6 +2098,8 @@ _COMPLETED_TRACK_CACHE_VERSION = 1
 
 def _completed_track_cache_identity(stream, filename: str | None, args: argparse.Namespace) -> dict:
     return {
+        **({"embedded_caption": stream.extra["hls_instream_id"], "carrier": stream.extra["hls_caption_source"]} if is_caption(stream) else {}),
+        **({"preserve_captions": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
         **({"muxed_source": stream.extra["_unidl_muxed_source"],
             "demux_media": stream.extra["_unidl_demux_media"]} if is_demux_stream(stream) else {}),
         "stream_key": _stream_resume_key(stream),
@@ -2267,6 +2289,18 @@ def _download_selected_stream(
     workers: int | None = None,
 ) -> _DownloadedTrack:
     _checkpoint_embedding(args)
+    if stream.media_type == "video" and stream.extra.get(_PRESERVE_CAPTIONS) and not getattr(args, "_unidown_inside_caption_source", False):
+        local = copy.copy(args)
+        local._unidown_inside_caption_source = True
+        return args._unidown_muxed_cache.get(
+            MuxedSourceCache.key(stream),
+            lambda: _download_selected_stream(
+                stream, offset, total, all_streams, local, headers, keys, hls_crypto,
+                max_speed, output_dir, default_save_base, show_progress,
+                progress_callback, status_printer, status_callback, workers,
+            ),
+            lambda: _checkpoint_embedding(args),
+        )
     hls_crypto = _hls_crypto_for_stream(stream, hls_crypto)
     colors = _colors(args)
     name = _track_save_name(args.save_name or default_save_base, args.save_pattern, stream, offset, total)
@@ -2343,7 +2377,50 @@ def _download_selected_stream(
         label = "Downloading:" if show_progress else "Queued:"
         emit(f"\n{paint(label, Palette.blue, colors)} {_format_numbered_line(original_index - 1, stream, checked=True, colors=colors)}")
     try:
-        if is_demux_stream(stream) and not checkpoint.reached("decrypted"):
+        if is_caption(stream) and not checkpoint.reached("decrypted"):
+            source = caption_source(stream)
+            job = getattr(args, "_unidown_caption_jobs", {}).get((source.url, source.original_url))
+            if job:
+                source, source_offset = job
+            else:
+                source_offset = offset
+            source.extra[_PRESERVE_CAPTIONS] = True
+            if source.encrypted and args.no_decrypt:
+                raise ValueError("Encrypted caption carriers must be decrypted before extraction.")
+            local = copy.copy(args)
+            local._unidown_inside_caption_source = True
+            local.repack = False
+            local.audio_format = None
+            local.audio_metadata_file = None
+            if not job:
+                local.save_name = "caption-source-" + MuxedSourceCache.key(source)
+                local.save_pattern = None
+            hooks = getattr(local, "embedding_hooks", None)
+            if hooks is not None and not job:
+                local.embedding_hooks = replace(hooks, progress=None)
+            forward = (lambda update: progress(replace(update, stream=stream))) if progress and not job else None
+            with status.spinning("Waiting for caption carrier {spinner}"):
+                physical = args._unidown_muxed_cache.get(
+                    MuxedSourceCache.key(source),
+                    lambda: _download_selected_stream(
+                        source, source_offset, total, all_streams if job else [source],
+                        local, headers, keys, hls_crypto, max_speed,
+                        output_dir if job else output_dir / ".captions", default_save_base, False,
+                        progress_callback=forward, status_printer=emit, workers=workers,
+                    ),
+                    lambda: _checkpoint_embedding(args),
+                )
+            _checkpoint_embedding(args)
+            with status.spinning("Downloaded ✓", "Extracting CC {spinner}"):
+                extracted = extract_caption(physical.path, _output_path(stream, output_dir, name), stream,
+                                            raw=getattr(args, "sub_format", "srt") == "raw")
+            projection_result = DownloadResult(stream, extracted)
+            projection_cleanup = [physical.path, *physical.cleanup_paths]
+            checkpoint.save("decrypted", extracted, projection_result)
+            if progress:
+                progress(ProgressUpdate(stream, stream.segments_count, stream.segments_count,
+                                        extracted.stat().st_size, extracted.stat().st_size, 0.001, done=True))
+        elif is_demux_stream(stream) and not checkpoint.reached("decrypted"):
             projection_result, projection_cleanup = _prepare_muxed_projection(
                 stream, name, args, headers, keys, hls_crypto, max_speed,
                 output_dir, status, progress, emit, workers,
@@ -2507,6 +2584,7 @@ def _download_selected_stream(
                                 normalize_large_composition_offsets=restamp_sections and stream.media_type == "video",
                                 event_callback=decrypt_event,
                                 section_expected_kids=_stream_section_key_ids(stream),
+                                **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
                             )
                     else:
                         current_path = decrypt_file(
@@ -2549,7 +2627,7 @@ def _download_selected_stream(
         if args.repack:
             previous_path = current_path
             with status.spinning("Downloaded ✓", "Decrypted ✓", "Repacking {spinner}"):
-                current_path = repackage_ffmpeg(current_path)
+                current_path = repackage_ffmpeg(current_path, **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}))
             _cleanup_replaced_intermediate(previous_path, current_path, args, colors)
             if current_path not in cleanup_paths:
                 cleanup_paths.append(current_path)
@@ -2920,6 +2998,7 @@ def _finalize_clear_hls_sections(stream, result, current_path: Path) -> Path:
         section_durations=[sum(durations) for durations in section_fragment_durations] if section_fragment_durations else None,
         section_fragment_durations=section_fragment_durations,
         normalize_large_composition_offsets=getattr(stream, "media_type", None) == "video",
+        **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
     )
     temp_output = unique_path(
         bounded_path(
@@ -2928,7 +3007,7 @@ def _finalize_clear_hls_sections(stream, result, current_path: Path) -> Path:
         )
     )
     try:
-        concat_media_files(finalized_sections, temp_output)
+        concat_media_files(finalized_sections, temp_output, **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}))
         temp_output.replace(current_path)
     finally:
         try:
@@ -9396,6 +9475,7 @@ def _mux_input_for_track(
         delay_ms=delay_ms,
         trim_start_ms=trim_start_ms,
         media_type=getattr(stream, "media_type", None),
+        exclude_subtitles=bool(stream.media_type == "video" and stream.extra.get(_PRESERVE_CAPTIONS)),
         track_type_filter=iqiyi_separate_audio_mux_media_type(stream, selected_streams),
         codecs=getattr(stream, "codecs", None),
         kind=(
@@ -9823,6 +9903,11 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
     from ..core.manifest_sources import source_request_headers
 
     headers = source_request_headers(stream.extra, headers) or {}
+    if is_caption(stream):
+        source = _hydrate_stream(caption_source(stream), headers, no_probe, base_url)
+        update_caption_source(stream, source)
+        validate_caption(stream)
+        return stream
     if stream.segments:
         _filter_hls_segments_for_requested_asset(stream)
         return stream

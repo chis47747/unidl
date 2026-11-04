@@ -301,6 +301,7 @@ def _apply_track_metadata(stream, record):
         "audio_id", "video_id", "subtitle_id", "group_ids", "audio_ids",
         "default", "autoselect", "channels_raw", "forced", "sdh", "cc",
         "closed_captions", "characteristics", "actual_bitrate", "dash_full_base_url_mode",
+        "hls_instream_id", "hls_caption_source", "closed_caption_ids",
     ):
         if field in record:
             stream.extra[field] = record[field]
@@ -1367,6 +1368,11 @@ def _extra(title_meta: dict[str, Any], item: dict[str, Any], *, dvr_sequence: di
     for key in (
         "audio_atmos",
         "muxed_audio",
+        "hls_instream_id",
+        "hls_caption_source",
+        "closed_caption_ids",
+        "closed_captions",
+        "subtitle_kind",
         "dash_full_base_url_mode",
         "media_sequence",
         "target_duration",

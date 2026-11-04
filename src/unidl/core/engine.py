@@ -2465,11 +2465,23 @@ class Engine:
         if tracks is None:
             return None
         streams = list(tracks.selected if selected_only else tracks.streams)
+        from ..downloader.captions import bind_caption_sources, is_caption
+
+        dependencies = bind_caption_sources(streams, tracks.streams)
+        origin_ids = {id(stream): id(stream) for stream in streams}
+        expanded = [stream for stream in streams if not is_caption(stream)]
+        for stream in streams:
+            source = dependencies.get(id(stream)) if is_caption(stream) else None
+            if source is not None:
+                origin_ids.setdefault(id(source), id(stream))
+                if not any(existing is source or (existing.url == source.url and existing.media_type == source.media_type) for existing in expanded):
+                    expanded.append(source)
+        streams = expanded
         encrypted = [stream for stream in streams if stream.encrypted]
         origins = {
-            id(stream): tracks.origins[id(stream)]
+            id(stream): tracks.origins[origin_ids[id(stream)]]
             for stream in streams
-            if id(stream) in tracks.origins
+            if origin_ids[id(stream)] in tracks.origins
         }
         visible_ids = {id(stream) for stream in tracks.selectable_streams}
         return TrackSet(
@@ -2985,6 +2997,9 @@ class Engine:
         selected = list(tracks.selected)
         if not selected:
             return
+        from ..downloader.captions import bind_caption_sources
+
+        bind_caption_sources(selected, tracks.streams)
         request = (
             tracks.manifest.request
             if tracks.manifest is not None

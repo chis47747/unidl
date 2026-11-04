@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.5.9] - 2026-11-04
+
+### Embedded HLS closed captions
+
+- Recognized HLS CLOSED-CAPTIONS declarations without a subtitle URI and exposed them as CC · Embedded tracks with their declared language and channel, using the shared subtitle selector without probing video segments while listing tracks.
+- Bound selected captions to a video from the same master/caption group, reusing the selected video or a lowest-bandwidth temporary carrier and keeping carrier licensing scoped to that dependency rather than the entire ladder.
+- Added FFmpeg/ffprobe-based extraction for VOD MP4 c608 CC1 and CC3, with explicit unsupported errors for other channels, CEA-708 services, live recording and captions carried only in video SEI/TS.
+
+### Caption delivery and exports
+
+- Preserved caption tracks and their timescales through section finalization, decryption and repacking, using caption-only temporary containers and normalized empty c608 placeholders without decoding video or allocating a video-sized conversion buffer.
+- Applied normal subtitle format/default selection, kept subtitle-only downloads free of temporary video outputs and avoided duplicate embedded subtitles in the final mux; No mux retained original captions in a caption-only MOV rather than decoded single-channel text.
+- Retained caption declarations and carrier relationships in reference/media-playlist exports without expanded segment lists, and included channel/carrier identity in resume checkpoints to prevent incorrect output reuse.
+
 ## [2.5.8] - 2026-11-04
 
 ### Dynamic-range tags and naming

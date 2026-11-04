@@ -85,6 +85,7 @@ def _parse_master(
     pending_variant: dict[str, str] | None = None
     session_key = _session_key_info(uri, lines)
     media_hints = _master_media_hints(lines)
+    captions = []
 
     for line in lines[1:]:
         if line.startswith("#EXT-X-SESSION-KEY:"):
@@ -93,6 +94,10 @@ def _parse_master(
             attrs = parse_attribute_list(line.split(":", 1)[1])
             media_type = _hls_media_type(attrs.get("TYPE"))
             child_uri = attrs.get("URI")
+            if attrs.get("TYPE", "").upper() == "CLOSED-CAPTIONS" and not child_uri:
+                attrs["LANGUAGE"] = _hls_language(attrs.get("LANGUAGE"))
+                captions.append(attrs)
+                continue
             if not child_uri:
                 continue
             child_url = join_uri(uri, child_uri)
@@ -147,7 +152,9 @@ def _parse_master(
             streams.append(_stream_from_variant(uri, line, pending_variant, headers, fetch_child_playlists, session_key))
             pending_variant = None
 
-    return _dedupe_master_streams(streams)
+    from ..captions import add_caption_rows
+
+    return add_caption_rows(_dedupe_master_streams(streams), captions)
 
 
 def _master_media_hints(lines: list[str]) -> dict[tuple[str, str], dict[str, str]]:
@@ -244,6 +251,9 @@ def _merge_duplicate_master_stream(target: StreamInfo, duplicate: StreamInfo) ->
     ]
     if audio_ids:
         target.extra["audio_ids"] = list(dict.fromkeys(audio_ids))
+    caption_ids = [*(target.extra.get("closed_caption_ids") or []), *(duplicate.extra.get("closed_caption_ids") or [])]
+    if caption_ids:
+        target.extra["closed_caption_ids"] = list(dict.fromkeys(caption_ids))
 
 
 def _video_codec_token(codecs: str | None) -> str | None:
@@ -364,6 +374,7 @@ def _stream_from_variant(
             "audio_id": attrs.get("AUDIO"),
             "video_id": attrs.get("VIDEO"),
             "subtitle_id": attrs.get("SUBTITLES"),
+            "closed_caption_ids": [attrs["CLOSED-CAPTIONS"]] if attrs.get("CLOSED-CAPTIONS", "NONE") != "NONE" else [],
             "muxed_audio": _variant_has_muxed_audio(attrs, media_type),
             "media_sequence": summary.media_sequence if summary else None,
             "target_duration": summary.target_duration if summary else None,

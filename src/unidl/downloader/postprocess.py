@@ -202,6 +202,7 @@ class MuxInput:
     codecs: str | None = None
     kind: str | None = None
     original: bool = False
+    exclude_subtitles: bool = False
 
 
 def parse_keys(values: list[str] | None) -> list[RawKey]:
@@ -332,6 +333,7 @@ def decrypt_sections(
     normalize_large_composition_offsets: bool = False,
     event_callback: DecryptEventCallback | None = None,
     section_expected_kids: list[list[str]] | None = None,
+    preserve_subtitles: bool = False,
 ) -> Path:
     if not section_paths:
         raise ValueError("No sections to decrypt.")
@@ -368,12 +370,13 @@ def decrypt_sections(
             section_durations=section_durations,
             section_fragment_durations=section_fragment_durations,
             normalize_large_composition_offsets=normalize_large_composition_offsets,
+            **({"preserve_subtitles": True} if preserve_subtitles else {}),
         )
     if len(decrypted_sections) == 1:
         if decrypted_sections[0] != output:
             shutil.copyfile(decrypted_sections[0], output)
         return output
-    return concat_media_files(decrypted_sections, output)
+    return concat_media_files(decrypted_sections, output, **({"preserve_subtitles": True} if preserve_subtitles else {}))
 
 
 def restamp_fragmented_mp4_sequence(
@@ -382,6 +385,7 @@ def restamp_fragmented_mp4_sequence(
     section_durations: list[float] | None = None,
     section_fragment_durations: list[list[float]] | None = None,
     normalize_large_composition_offsets: bool = False,
+    preserve_subtitles: bool = False,
 ) -> list[Path]:
     restamped_sections: list[Path] = []
     next_decode_time = start_decode_time
@@ -402,6 +406,17 @@ def restamp_fragmented_mp4_sequence(
             if section_fragment_durations and index < len(section_fragment_durations)
             else None
         )
+        if preserve_subtitles:
+            from .captions import restamp_caption_carrier
+
+            restamped, next_decode_time = restamp_caption_carrier(
+                section, output,
+                start_decode_time if local_section_timestamps else next_decode_time,
+                fallback_duration,
+                normalize_composition_offsets=normalize_large_composition_offsets,
+            )
+            restamped_sections.append(restamped)
+            continue
         # An HLS ``EXTINF`` duration describes one playlist segment, but a
         # CMAF segment may contain several moof/tfdt fragments. Applying the
         # playlist durations positionally in that case stretches the section
@@ -1015,7 +1030,10 @@ def mux_files(
                 chapter_input = len(prepared_inputs)
                 args.extend(["-f", "ffmetadata", "-i", str(chapter_path)])
             for index, item in enumerate(prepared_inputs):
-                args.extend(["-map", _ffmpeg_mux_map_spec(index, item)])
+                if item.exclude_subtitles and not item.track_type_filter:
+                    args.extend(["-map", f"{index}:v?", "-map", f"{index}:a?"])
+                else:
+                    args.extend(["-map", _ffmpeg_mux_map_spec(index, item)])
             subtitle_layout, chosen_subtitle = (
                 _mux_subtitle_layout(prepared_inputs, selected, executable, default_subtitle)
                 if default_subtitle is not None else ([], None)
@@ -1159,6 +1177,8 @@ def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, prefe
     for input_index, item in enumerate(inputs):
         for track in _probe_mux_tracks(item, muxer, executable):
             media_type = track.get("type")
+            if item.exclude_subtitles and media_type in {"subtitle", "subtitles"}:
+                continue
             if item.track_type_filter and media_type != item.track_type_filter:
                 continue
             mapped.append((input_index, media_type))
@@ -1192,6 +1212,8 @@ def _mux_subtitle_layout(inputs: list[MuxInput], muxer: str, executable: str, pr
 
     layout = []
     for input_index, item in enumerate(inputs):
+        if item.exclude_subtitles:
+            continue
         for track in _probe_mux_tracks(item, muxer, executable):
             media_type = track.get("type")
             if media_type not in {"subtitle", "subtitles", "text"}:
@@ -1394,7 +1416,7 @@ def _trim_mux_input(input_path: Path, output_path: Path, trim_start_ms: int) -> 
     )
 
 
-def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = None) -> Path:
+def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = None, *, preserve_subtitles: bool = False) -> Path:
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("ffmpeg not found.")
@@ -1403,11 +1425,12 @@ def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = No
         input_path.with_name(f"{input_path.stem}.repack{input_path.suffix}"),
         max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
     )
-    _run_external([executable, "-hide_banner", "-y", "-i", str(input_path), "-c", "copy", str(output)], "repackaging")
+    maps = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-f", "mov"] if preserve_subtitles else []
+    _run_external([executable, "-hide_banner", "-y", "-i", str(input_path), "-c", "copy", *maps, str(output)], "repackaging")
     return output
 
 
-def concat_media_files(inputs: list[str | Path], output_path: str | Path) -> Path:
+def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, preserve_subtitles: bool = False) -> Path:
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("ffmpeg not found.")
@@ -1436,6 +1459,7 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path) -> Pat
                 "0",
                 "-i",
                 str(list_path),
+                *(["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-f", "mov"] if preserve_subtitles else []),
                 "-c",
                 "copy",
                 "-avoid_negative_ts",
@@ -1513,6 +1537,8 @@ def _bool_option(value: str | None) -> bool | None:
 
 def _mkvmerge_import_args(item: MuxInput) -> list[str]:
     args: list[str] = []
+    if item.exclude_subtitles and not item.track_type_filter:
+        args.append("--no-subtitles")
     if item.track_type_filter == "video":
         args.extend(["--no-audio", "--no-subtitles", "--no-buttons"])
     elif item.track_type_filter == "audio":
