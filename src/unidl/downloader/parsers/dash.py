@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from ..live_rules import join_dash_base_uri, should_skip_dash_period
 from ..models import SegmentInfo, StreamInfo
 from ..utils import ceil_div_duration, join_uri, parse_frame_rate, parse_iso8601_duration, pretty_codec
-from ..video_range import combine_dolby_vision_range
+from ..video_range import HDR_VIVID, combine_dolby_vision_range, has_hdr_vivid_signal, is_hdr_vivid
 
 
 def parse_dash(uri: str, text: str) -> list[StreamInfo]:
@@ -31,11 +31,11 @@ def parse_dash(uri: str, text: str) -> list[StreamInfo]:
     streams: list[StreamInfo] = []
 
     periods = _children(root, "Period") or [root]
-    period_starts = [parse_iso8601_duration(item.attrib.get("start")) for item in periods]
+    period_starts, period_durations = _period_timing(periods, mpd_duration, live=is_live)
     for period_index, period in enumerate(periods):
         period_id = period.attrib.get("id") or str(period_index)
         period_start = period_starts[period_index]
-        period_duration = parse_iso8601_duration(period.attrib.get("duration")) or _implied_period_duration(period_index, period_starts, mpd_duration)
+        period_duration = period_durations[period_index]
         period_base = _extend_base(mpd_base, period)
         if should_skip_dash_period(period_id, period_base, is_live):
             continue
@@ -75,6 +75,12 @@ def parse_dash(uri: str, text: str) -> list[StreamInfo]:
                 role = "Thumbnails" if trick_mode else _stream_role(media_type, representation, adaptation, adaptation_role)
                 audio_atmos = _dash_audio_is_atmos(media_type, codecs, representation, adaptation)
                 stream_extra = _stream_extra(period_id, period_start, adaptation, key_id)
+                descriptors = _period_track_descriptors(adaptation, representation)
+                if descriptors:
+                    stream_extra["dash_track_descriptors"] = descriptors
+                sampling_rate = _attr(representation, "audioSamplingRate") or _attr(adaptation, "audioSamplingRate")
+                if media_type == "audio" and sampling_rate:
+                    stream_extra["dash_audio_sampling_rate"] = sampling_rate
                 if trick_mode:
                     stream_extra["trick_mode"] = 1
                 stream_extra.update(_dash_template_extra(rep_base, adaptation, representation, bandwidth, _attr(representation, "id") or f"{period_id}-{len(streams)}", live_context))
@@ -124,6 +130,44 @@ def parse_dash(uri: str, text: str) -> list[StreamInfo]:
     return _merge_period_streams(streams, live=is_live) if len(periods) > 1 else streams
 
 
+def _period_timing(
+    periods: list[ET.Element], mpd_duration: float | None, *, live: bool,
+) -> tuple[list[float | None], list[float | None]]:
+    starts = [parse_iso8601_duration(item.attrib.get("start")) for item in periods]
+    durations = [parse_iso8601_duration(item.attrib.get("duration")) for item in periods]
+    if not live:
+        # Static Period@start is optional: each omitted start follows the
+        # previous period. Never interpret its PTO-relative time as episode zero.
+        if starts and starts[0] is None:
+            starts[0] = 0.0
+        for index in range(len(periods) - 2, 0, -1):
+            if starts[index] is None and durations[index] is not None and starts[index + 1] is not None:
+                starts[index] = starts[index + 1] - durations[index]
+        for index in range(len(periods)):
+            if index and starts[index] is None and starts[index - 1] is not None and durations[index - 1] is not None:
+                starts[index] = starts[index - 1] + durations[index - 1]
+            if durations[index] is None:
+                next_start = starts[index + 1] if index + 1 < len(starts) else mpd_duration
+                if starts[index] is not None and next_start is not None:
+                    durations[index] = max(0.0, next_start - starts[index])
+    else:
+        durations = [
+            duration if duration is not None else _implied_period_duration(index, starts, mpd_duration)
+            for index, duration in enumerate(durations)
+        ]
+    return starts, durations
+
+
+def _period_track_descriptors(*elements: ET.Element) -> list[str]:
+    """Semantic labels, not period-local adaptation/representation numbering."""
+    return sorted({
+        f"{_local(child.tag)}:{child.get('schemeIdUri', '')}:{child.get('value', '')}:{(child.text or '').strip()}"
+        for element in elements
+        for child in element
+        if _local(child.tag) in {"Role", "Accessibility", "Label"}
+    })
+
+
 def _implied_period_duration(index: int, starts: list[float | None], mpd_duration: float | None) -> float | None:
     start = starts[index]
     next_start = starts[index + 1] if index + 1 < len(starts) else None
@@ -138,23 +182,26 @@ def _merge_period_streams(streams: list[StreamInfo], live: bool = False) -> list
     merged: list[StreamInfo] = []
     by_key: dict[tuple[object, ...], StreamInfo] = {}
     merge_states: dict[tuple[object, ...], _PeriodSegmentMergeState] = {}
-    period_occurrences: dict[tuple[str | None, tuple[object, ...]], int] = {}
+    vod_keys = _vod_period_stream_keys(streams) if not live else {}
+    period_order = {
+        period_id: index
+        for index, period_id in enumerate(dict.fromkeys(stream.extra.get("period_id") for stream in streams))
+    }
+    last_period: dict[tuple[object, ...], int] = {}
     for stream in streams:
-        key = _period_stream_key(stream, live=live)
-        if not live:
-            # Representation IDs are not guaranteed to be stable across VOD
-            # periods. Some packagers generate a new UUID for every period,
-            # even though the representation continues the same track. Use
-            # its position among otherwise identical representations to keep
-            # genuine same-period duplicates separate without making the ID
-            # part of the cross-period identity.
-            period_id = stream.extra.get("period_id") if stream.extra else None
-            period_id = period_id if isinstance(period_id, str) else None
-            occurrence_key = (period_id, key)
-            occurrence = period_occurrences.get(occurrence_key, 0)
-            period_occurrences[occurrence_key] = occurrence + 1
-            key = (*key, occurrence)
+        key = _period_stream_key(stream, live=True) if live else vod_keys[id(stream)]
+        ordinal = period_order[stream.extra.get("period_id")]
         target = by_key.get(key)
+        if not live and last_period.get(key, ordinal - 1) != ordinal - 1:
+            # A missing/incompatible middle period is not a continuous track.
+            target = None
+        if target is not None and not live:
+            start = stream.extra.get("period_start")
+            first = target.extra.get("period_start")
+            if start is not None and first is not None and target.duration is not None:
+                if not math.isclose(start, first + target.duration, rel_tol=0, abs_tol=0.001):
+                    target = None
+        last_period[key] = ordinal
         if target is None:
             _remember_period(stream, stream)
             by_key[key] = stream
@@ -167,11 +214,33 @@ def _merge_period_streams(streams: list[StreamInfo], live: bool = False) -> list
     return merged
 
 
+def _vod_period_stream_keys(streams: list[StreamInfo]) -> dict[int, tuple[object, ...]]:
+    buckets: dict[tuple[object, ...], dict[object, list[StreamInfo]]] = {}
+    for stream in streams:
+        buckets.setdefault(_period_stream_key(stream), {}).setdefault(
+            stream.extra.get("period_id"), [],
+        ).append(stream)
+    keys = {}
+    for identity, periods in buckets.items():
+        for renditions in periods.values():
+            # Bandwidth may vary slightly per period, while both AS and rep IDs
+            # can be reassigned. Align the quality ladder, not XML enumeration.
+            # A changed ladder cardinality is deliberately kept separate.
+            ranked = sorted(renditions, key=lambda stream: stream.bandwidth or 0)
+            for rank, stream in enumerate(ranked):
+                keys[id(stream)] = (*identity, len(ranked), rank)
+    return keys
+
+
 def _period_stream_key(stream: StreamInfo, live: bool = False) -> tuple[object, ...]:
+    extra = stream.extra or {}
+    group = stream.group_id
+    if not live and group == extra.get("dash_adaptation_id") and not extra.get("audioTrackId"):
+        group = None
     return (
         stream.manifest_type,
         stream.media_type,
-        None if live else stream.group_id,
+        None if live else group,
         stream.language,
         stream.role,
         stream.name,
@@ -182,6 +251,10 @@ def _period_stream_key(stream: StreamInfo, live: bool = False) -> tuple[object, 
         stream.channels,
         stream.extension if not live else None,
         stream.video_range,
+        None if live else tuple(extra.get("dash_track_descriptors") or ()),
+        None if live else extra.get("dash_audio_sampling_rate"),
+        None if live else bool(extra.get("audio_atmos")),
+        None if live else extra.get("audioTrackSubtype"),
     )
 
 
@@ -250,6 +323,15 @@ def _remember_period(target: StreamInfo, source: StreamInfo) -> None:
     period_id = source.extra.get("period_id")
     if isinstance(period_id, str) and period_id and period_id not in ids:
         ids.append(period_id)
+    if not source.is_live:
+        members = target.extra.setdefault("dash_period_tracks", [])
+        member = {
+            "period_id": period_id,
+            "adaptation_id": source.extra.get("dash_adaptation_id") or "",
+            "representation_id": source.id or "",
+        }
+        if member not in members:
+            members.append(member)
 
 
 def _merge_key_ids(target: StreamInfo, source: StreamInfo) -> None:
@@ -871,6 +953,12 @@ def _video_range(element: ET.Element) -> str | None:
     explicit = element.attrib.get("videoRange")
     if explicit:
         return _normalize_video_range(explicit)
+    if any(
+        has_hdr_vivid_signal(" ".join(child.attrib.values()))
+        for child in element
+        if _local(child.tag) in {"SupplementalProperty", "EssentialProperty"}
+    ):
+        return HDR_VIVID
     # Several Cedexis/Paramount DASH manifests omit HDR metadata from the
     # adaptation and representation elements, but preserve the mastering
     # profile in the media BaseURL filename (for example ``HDR10plus``).  The
@@ -906,6 +994,8 @@ def _video_range(element: ET.Element) -> str | None:
 
 def _video_range_from_text(value: str) -> str | None:
     raw = str(value or "")
+    if has_hdr_vivid_signal(raw):
+        return HDR_VIVID
     if _is_hdr10_plus_signal(raw):
         return "HDR10+"
     normalized = raw.lower().replace("_", "-").replace(" ", "-")
@@ -937,6 +1027,8 @@ def _video_range_for_stream(
 
 
 def _normalize_video_range(value: str | None) -> str | None:
+    if is_hdr_vivid(value):
+        return HDR_VIVID
     if not value:
         return None
     normalized = value.strip().lower().replace("_", "-").replace(" ", "-")

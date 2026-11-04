@@ -1372,7 +1372,7 @@ TRACK_SETTINGS: list[Setting] = [
     _choice(
         "video_range",
         "Dynamic range",
-        [("any", "Any"), ("sdr", "SDR"), ("hdr10", "HDR10"), ("hdr10+", "HDR10+"), ("hlg", "HLG"), ("dv", "Dolby Vision")],
+        [("any", "Any"), ("sdr", "SDR"), ("hdr10", "HDR10"), ("hdr10+", "HDR10+"), ("hdrvivid", "HDR Vivid"), ("hlg", "HLG"), ("dv", "Dolby Vision")],
         "any",
     ),
     _choice(

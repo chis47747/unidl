@@ -2906,23 +2906,30 @@ class Engine:
 
     @staticmethod
     def _apply_video_range_hint(playback: Playback, streams: Sequence[StreamInfo]) -> None:
+        from unidl.downloader.video_range import HDR_VIVID, is_hdr_vivid
+
         hint = str(playback.video_range_hint or "").strip().upper()
-        if hint not in {"DV", "HDR10", "HDR10+", "HDR VIVID", "HLG"}:
-            return
+        if is_hdr_vivid(hint):
+            hint = HDR_VIVID.upper()
         for stream in streams:
+            if stream.media_type != "video":
+                continue
             current = str(stream.video_range or "").strip().upper()
-            if stream.media_type == "video" and hint == "HDR VIVID" and current in {
+            if is_hdr_vivid(current):
+                stream.video_range = HDR_VIVID
+                continue
+            if hint not in {"DV", "HDR10", "HDR10+", "HDR VIVID", "HLG", "EDR"}:
+                continue
+            if hint == "HDR VIVID" and current in {
                 "HDR",
                 "HDR10",
-                "HDRVIVID",
-                "HDR-VIVID",
                 "PQ",
                 "VIVID",
             }:
-                stream.video_range = "HDR Vivid"
+                stream.video_range = HDR_VIVID
                 continue
-            if stream.media_type == "video" and current in {"", "SDR", "UNKNOWN"}:
-                stream.video_range = hint
+            if current in {"", "SDR", "UNKNOWN"}:
+                stream.video_range = HDR_VIVID if hint == HDR_VIVID.upper() else hint
 
     def select_tracks(
         self,

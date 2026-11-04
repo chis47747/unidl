@@ -42,6 +42,8 @@ RELEASE_KINDS = (TitleKind.MOVIE, TitleKind.EPISODE)
 #: unusual about the picture, and "SDR" on the overwhelming majority of files is
 #: noise. Matches unshackle's DYNAMIC_RANGE_MAP.
 RANGE_TAGS = {
+    "EDR": "EDR",
+    "HDR VIVID": "HDRVivid",
     "DV": "DV",
     "HDR10+": "HDR10P",
     "HDR10": "HDR",
@@ -86,7 +88,7 @@ _AUDIO_CODEC_ORDER = {
 
 #: Strongest first. With several video tracks chosen, the file is named for the
 #: best thing in it, the same way it is named for the highest resolution.
-_RANGE_ORDER = ("DV", "HDR10+", "HDR10", "HDR", "HLG", "SDR")
+_RANGE_ORDER = ("DV", "HDR VIVID", "HDR10+", "HDR10", "HDR", "HLG", "EDR", "SDR")
 
 #: Frames that are named for their short edge: the everyday shapes, and the
 #: portrait flips of them. Anything else is scope, and gets the treatment below.
@@ -371,7 +373,7 @@ def quality_of(streams: object) -> str:
 
 
 def range_of(streams: object) -> str:
-    """``"DV"`` / ``"HDR"`` / ``"HDR10P"`` / ``"HLG"`` for the best video, or ``""``.
+    """Release tag for the selected video ranges, or an empty string.
 
     Empty for SDR, and empty when the manifest did not say - an absent tag reads
     as "nothing unusual", which is the right answer in both cases.
@@ -381,6 +383,10 @@ def range_of(streams: object) -> str:
         for stream in streams or ()
         if getattr(stream, "media_type", "") == "video"
     }
+    from ..downloader.video_range import is_hdr_vivid
+
+    if any(is_hdr_vivid(value) for value in found):
+        found.add("HDR VIVID")
     for name in _RANGE_ORDER:
         if name in found:
             return RANGE_TAGS.get(name, "")
@@ -412,9 +418,22 @@ def _audio_is_atmos(stream: object) -> bool:
 
 
 def _audio_codec(stream: object) -> str:
+    raw = str(getattr(stream, "codecs", "") or "").strip(" ,")
+    if getattr(stream, "media_type", "") == "video":
+        # A muxed flag proves audio exists, not what it is encoded as.
+        # Inspect individual declared codecs so a video codec or an unknown
+        # token cannot become the audio part of the release name.
+        for token in raw.split(","):
+            codec = _audio_codec_tag(token.strip())
+            if codec in _AUDIO_CODEC_ORDER or codec in {"ALAC", "VORBIS", "PCM", "AUDIO.VIVID"}:
+                return codec
+        return ""
+    return _audio_codec_tag(raw)
+
+
+def _audio_codec_tag(raw: str) -> str:
     from unidl.downloader.utils import pretty_codec
 
-    raw = str(getattr(stream, "codecs", "") or "")
     label = str(pretty_codec(raw, "audio") or raw.split(",", 1)[0] or "").strip()
     upper = label.upper()
     if "TRUEHD" in upper or upper.startswith(("MLP", "MLPA")):

@@ -1513,6 +1513,10 @@ def _video_range(item: dict[str, Any], codec: str | None) -> str | None:
 
 
 def _normalize_video_range(value: str | None) -> str | None:
+    from ..video_range import HDR_VIVID, is_hdr_vivid
+
+    if is_hdr_vivid(value):
+        return HDR_VIVID
     if not value:
         return None
     normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
@@ -1530,6 +1534,10 @@ def _normalize_video_range(value: str | None) -> str | None:
 
 
 def _infer_video_range_from_text(value: str) -> str | None:
+    from ..video_range import HDR_VIVID, has_hdr_vivid_signal
+
+    if has_hdr_vivid_signal(value):
+        return HDR_VIVID
     normalized = value.lower().replace("_", "-").replace(" ", "-")
     if any(token in normalized for token in ("hdr10+", "hdr10plus", "hdr10-plus", "hdr10p", "2094-40")):
         return "HDR10+"

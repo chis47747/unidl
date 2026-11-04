@@ -123,7 +123,11 @@ Video constraints are applied first:
 
 - `video_quality`: `best`, `worst`, or a target height such as `1080`;
 - `video_codec`: `h264`, `h265`, `h266`/VVC, `av1`, `vp9`, or `any`;
-- `video_range`: `sdr`, `hdr10`, `hdr10+`, `hlg`, `dv`, or `any`;
+- `video_range`: `sdr`, `hdr10`, `hdr10+`, `hdrvivid`, `hlg`, `dv`, or `any`;
+  HDR Vivid matches explicitly identified tracks and uses `HDRVivid` in release names;
+  explicitly labeled EDR video retains `EDR` in release names.
+  Embedded audio without a recognized codec is omitted from the audio part of
+  the name; a muxed-audio flag alone does not imply AAC.
 - `drop_video`: the boundary-aware pattern used to remove trick-play and
   thumbnail ladders.
 

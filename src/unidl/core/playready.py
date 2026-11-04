@@ -350,12 +350,27 @@ def dash_manifest_for_tracks(
         if str(getattr(track, "manifest_type", "")).lower() != "dash":
             continue
         extra = getattr(track, "extra", {}) or {}
+        members = extra.get("dash_period_tracks")
+        if isinstance(members, list) and members:
+            known = track_kids(track)
+            for member in members:
+                if not isinstance(member, dict) or member.get("period_id") is None:
+                    continue
+                inventory.append((
+                    {str(member["period_id"])},
+                    str(member.get("adaptation_id") or ""),
+                    str(member.get("representation_id") or ""),
+                    known,
+                    True,
+                ))
+            continue
         period_ids = extra.get("period_ids") or [extra.get("period_id")]
         inventory.append((
             {str(value) for value in period_ids if value is not None},
             str(extra.get("dash_adaptation_id") or ""),
             str(getattr(track, "id", "") or ""),
             track_kids(track),
+            False,
         ))
 
     periods = children(root, "Period") or [root]
@@ -372,14 +387,14 @@ def dash_manifest_for_tracks(
             kept = []
             for representation in representations or [adaptation]:
                 declared = protection_kids(representation) or protection_kids(adaptation)
-                for period_ids, adaptation_id, representation_id, known in inventory:
+                for period_ids, adaptation_id, representation_id, known, exact in inventory:
                     if period_ids and period_id not in period_ids:
                         continue
                     identified = (
                         (adaptation_id, representation_id) in representation_ids
                         if adaptation_id else representation_id in period_representation_ids
                     )
-                    if identified:
+                    if identified or (exact and (adaptation_id or representation_id)):
                         matches = (
                             (not adaptation_id or adaptation_id == adaptation.get("id"))
                             and bool(representation.get("id"))

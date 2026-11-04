@@ -84,6 +84,11 @@ vault coverage or cause extra requests. ISM may declare only one shared
 `ProtectionHeader`; without per-track ownership information Core preserves that
 shared scope rather than inventing a finer mapping.
 
+A merged multi-period DASH track retains the exact adaptation/representation
+identity for every period. After-selection Widevine and PlayReady extraction use
+those period-local identities, so renumbering cannot omit a later selected part
+or include a different rendition merely because it shares a KID.
+
 Widevine After performs independent exchanges for distinct required PSSH values,
 preserving original payloads. Vault-covered requests are skipped; a multi-key
 response can satisfy later objects without another request. Missing selected

@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.5.8] - 2026-11-04
+
+### Dynamic-range tags and naming
+
+- Added EDR and HDRVivid release-name tags and normalized explicit HDR Vivid/CUVA HDR labels across DASH, HLS, ISM and JSON manifests.
+- Added HDR Vivid to dynamic-range selection without treating it as ordinary HDR10, HLG or SDR, while retaining other explicitly identified HDR formats.
+- Stopped inferring AAC or another audio codec from a muxed-audio flag alone; embedded audio naming used only recognized declared codecs.
+
+### Multi-period DASH continuity
+
+- Matched compatible tracks across consecutive static DASH periods even when adaptation and representation IDs changed, while retaining language variants, roles, labels, accessibility, audio properties and video format distinctions.
+- Aligned same-format quality ladders by bitrate rank rather than XML order, preserved same-period duplicates and kept incompatible tracks, changed ladder sizes, missing middle periods and explicit timing gaps separate.
+- Inferred omitted static period timing and retained every included initialization segment, timeline, clear/encrypted transition and rotated KID without changing live identity or adding media probes.
+
+### Selected-track DRM scope
+
+- Retained each merged DASH track's period-local adaptation and representation identities for selected-track Widevine and PlayReady initialization-data extraction.
+- Kept later selected periods in scope without including unrelated renditions merely because they shared a KID, and preserved existing missing-key validation.
+
 ## [2.5.7] - 2026-11-01
 
 ### Redesigned Add keys

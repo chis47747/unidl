@@ -78,6 +78,24 @@ never decode and rebuild a signed query to fix a space. Raw control characters
 are rejected before URL parsing rather than silently stripped. This encoding
 belongs to the download transport and does not change service authentication.
 
+## Multi-period DASH tracks
+
+For static MPDs, compatible representations across consecutive Periods are
+shown as one continuous track. AdaptationSet and Representation IDs are local
+to their Period: renumbering them does not split an otherwise identical track.
+Language variants, roles, labels, accessibility descriptors, audio sampling
+rates/channels, codec, resolution and dynamic range still distinguish tracks.
+Same-resolution bitrate ladders are aligned by bitrate rank, not XML order;
+a changed ladder size or an incompatible/missing middle period remains separate
+instead of silently switching quality. Same-period duplicates are not collapsed.
+
+Omitted static period starts are inferred from declared durations/adjacent
+starts. Each period's initialization segment, segment timeline and KIDs are
+retained, including clear/encrypted transitions and rotated keys. Selected-track
+licensing uses the corresponding IDs for every included period rather than the
+first period's IDs or a shared KID alone. No additional media probe or licence
+request is introduced by matching. Live identity/refresh rules are unchanged.
+
 ## HTTP connection reuse and adaptive concurrency
 
 Native HTTP/1 connections apply each request's timeout to both the connection

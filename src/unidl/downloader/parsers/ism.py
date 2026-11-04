@@ -317,6 +317,10 @@ def _explicit_video_range(element: ET.Element) -> str | None:
 
 
 def _normalize_video_range(value: str | None) -> str | None:
+    from ..video_range import HDR_VIVID, is_hdr_vivid
+
+    if is_hdr_vivid(value):
+        return HDR_VIVID
     if not value:
         return None
     normalized = value.strip().lower().replace("_", "-").replace(" ", "-")

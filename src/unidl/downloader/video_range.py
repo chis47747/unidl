@@ -2,6 +2,17 @@ from __future__ import annotations
 
 import re
 
+HDR_VIVID = "HDR Vivid"
+_HDR_VIVID_RE = re.compile(r"(?<![a-z0-9])(?:hdr[ _-]*vivid|cuva[ _-]*hdr)(?![a-z0-9])", re.IGNORECASE)
+
+
+def is_hdr_vivid(value: str | None) -> bool:
+    return bool(_HDR_VIVID_RE.fullmatch((value or "").strip()))
+
+
+def has_hdr_vivid_signal(value: str | None) -> bool:
+    return bool(_HDR_VIVID_RE.search(value or ""))
+
 _DV_CODEC_RE = re.compile(r"(?:^|,)\s*(?:dvh1|dvhe|dva1|dvav)\.(\d{1,2})(?:\.|$)", re.IGNORECASE)
 _DV_CODEC_TOKEN_RE = re.compile(r"(?:^|,)\s*(?:dvh1|dvhe|dva1|dvav)(?:[.,]|$)", re.IGNORECASE)
 _BASE_VIDEO_CODEC_PREFIXES = (

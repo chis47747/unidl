@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .models import StreamInfo
 from .utils import pretty_codec
+from .video_range import has_hdr_vivid_signal, is_hdr_vivid
 
 
 @dataclass(slots=True)
@@ -502,7 +503,12 @@ def _language_tag(value: str | None) -> str:
 
 
 def _range_matches(stream: StreamInfo, value: str) -> bool:
+    vivid = has_hdr_vivid_signal(stream.video_range)
+    if is_hdr_vivid(value):
+        return vivid
     value = value.lower().replace("_", "").replace("-", "")
+    if vivid and value in {"hdr", "hdr10", "hdr10plus", "hdr10p", "hlg", "sdr"}:
+        return value == "hdr"
     text = " ".join(filter(None, [stream.video_range, stream.codecs, stream.name, stream.group_id])).lower()
     normalized_text = text.replace("hdr10+", "hdr10plus").replace("_", "").replace("-", "")
     if value == "hdr":

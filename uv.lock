@@ -1718,7 +1718,7 @@ wheels = [
 
 [[package]]
 name = "unidl"
-version = "2.5.7"
+version = "2.5.8"
 source = { editable = "." }
 dependencies = [
     { name = "arabic-reshaper" },
