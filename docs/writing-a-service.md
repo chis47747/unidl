@@ -113,6 +113,13 @@ service contract. Importing `registry` is only required for the optional
 code-level decorator; the user-level TUI registration path performs the same
 runtime registration automatically after restart.
 
+For an episode, set `Title.series_year` when the service knows the containing
+series' premiere/release year. `Title.year` may remain the episode's own
+publication year: filename templates keep using that value, while episode
+folder templates using `{year}` prefer `series_year` so a season that crosses a
+calendar year stays in one root folder. Services without a series-level year
+may leave it empty and Core will fall back to the episode year.
+
 That is a complete service. You did not write a menu, a login prompt, a track
 picker, a CDM call, a filename builder or a download command.
 

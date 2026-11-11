@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.6.0] - 2026-11-11
+
+### Live-recording audio
+
+- Fixed real-time MKV recording of HLS transport streams with embedded AAC, including extensionless media URLs, by allowing the audio configuration to update the container header.
+- Kept real-time pipe muxing, short clusters, packet flushing and stream-copy output without switching to a separate post-recording remux; preserved existing behavior for fragmented MP4 and other formats.
+
+### Episode folder naming
+
+- Added a series-level release year for episode folder templates so seasons spanning calendar years stayed under one series directory, with the episode year retained as a fallback.
+- Preserved the series year in exports and imports without changing episode filename year fields, and documented the service and folder-template contract.
+
+### BBTS decryption performance
+
+- Accelerated BBTS postprocessing with native byte searches, bounded 64 KiB counter-mask batches, batched AES/XOR and adjacent TS packet writes.
+- Preserved reference-compatible sparse cipher scheduling, final blocks, NAL boundaries, clear lead and per-PES key changes, including the cryptography-only fallback, without changing other decryption paths.
+
 ## [2.5.9] - 2026-11-04
 
 ### Embedded HLS closed captions

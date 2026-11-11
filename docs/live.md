@@ -94,6 +94,20 @@ when the answer is about to be used, and only when replay inspection is selected
 Anything under two minutes is treated as buffer rather than a window: BBC live radio
 publishes 32 seconds, and a broadcaster's catch-up window is measured in hours.
 
+## Real-time MKV and embedded AAC
+
+Real-time pipe muxing stays enabled for HLS TS inputs with embedded AAC, including
+media URLs without a file extension. For these inputs UniDL omits FFmpeg's
+Matroska `-live 1` container flag so the first audio packets can supply the AAC
+configuration and the muxer can update the output header. This does not switch
+to recording tracks first or remuxing the whole recording after it ends.
+
+The output remains a growing, visible file in the download directory, with
+one-second/64 KiB cluster limits and packet flushing. Normal stop closes the
+recording and writes its trailer/indexes. Audio/video are stream-copied without
+transcoding; fragmented MP4, other input types and Back/Quit behavior are
+unchanged.
+
 ## Checking it
 
 Use a local playlist with no `ENDLIST` or a deterministic fake refresh loop, then

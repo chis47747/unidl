@@ -283,6 +283,20 @@ media data. Compare allocated/unique-file space, not only the sum of file sizes.
 Debug/keep-temp mode may also retain earlier encrypted and clear generations;
 those are disk files, not a corresponding allocation of resident RAM.
 
+## BBTS post-download performance
+
+BBTS decryption uses native byte searches and emulation-byte removal, bounded
+64 KiB counter-mask batches, batched AES and native XOR. Installations using the
+cryptography fallback retain the same byte output without requiring another
+dependency. The sparse AES schedule, final-block rule, NAL boundaries and
+original tail handling are unchanged.
+
+Rebuilt adjacent TS packets are written in batches of at most 4096 packets;
+gaps containing audio or other PIDs are never overwritten. Clear lead and
+per-PES key changes retain their existing behavior. This only accelerates BBTS
+postprocessing: it does not add network/licence requests, change download
+worker counts or modify other decryption paths.
+
 ## Separately compressed MP4 initialization
 
 An origin can gzip its MP4 initialization resource independently of the media

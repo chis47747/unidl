@@ -45,6 +45,10 @@ class Title:
     kind: TitleKind
     name: str
     year: str | None = None
+    #: Premiere/release year of the containing series. ``year`` remains the
+    #: episode's own release year for filename templates; episode directory
+    #: templates prefer this stable series-level value.
+    series_year: str | None = None
     season: int | None = None
     episode: int | None = None
     episode_name: str | None = None

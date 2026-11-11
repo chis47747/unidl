@@ -3,7 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+try:
+    from Crypto.Util.strxor import strxor as _native_xor
+except (ImportError, OSError):
+    _native_xor = None
+
 TS_PACKET_SIZE = 188
+_SPARSE_BATCH_BLOCKS = 4096  # 64 KiB masks, never a file-sized keystream.
+_PACKET_WRITE_BATCH_BYTES = TS_PACKET_SIZE * 4096
 
 
 class BbtsError(RuntimeError):
@@ -201,51 +208,43 @@ def _track_is_video(track: dict) -> bool:
     return track.get("handler") == "vide" or any(value == "registration=DOVI" for value in track.get("descriptors", []))
 
 
-def _increment_counter(counter: bytearray) -> None:
-    carry = 1
-    for index in range(15, -1, -1):
-        value = counter[index] + carry
-        counter[index] = value & 0xFF
-        carry = value >> 8
-        if carry == 0:
-            break
-
-
 # Keep the sparse cipher schedule and NAL boundary rules compatible with
 # BBTSDecrypt 1.5 (ReiDoBrega, MIT); BBTS depends on its unusual tail handling.
 def _decrypt_sparse_payload(es: bytes, block_key: bytes, encrypt_block) -> bytes:
-    stripped = bytearray()
-    index = 0
-    while index < len(es):
-        if index + 2 < len(es) and es[index] == 0 and es[index + 1] == 0 and es[index + 2] == 3:
-            stripped.extend(b"\x00\x00")
-            index += 3
+    # Non-overlapping replacement matches the reference's left-to-right scan,
+    # including its deliberately nonstandard restoration of the original tail.
+    stripped = es.replace(b"\x00\x00\x03", b"\x00\x00")
+    size = len(stripped)
+    blocks = (size + 15) // 16
+    counter = int.from_bytes(block_key[:12].ljust(16, b"\x00"), "big")
+    output = bytearray(len(es))
+    for first in range(0, blocks, _SPARSE_BATCH_BLOCKS):
+        count = min(_SPARSE_BATCH_BLOCKS, blocks - first)
+        mask = bytearray(b"".join(
+            ((counter + first + index + 1) & ((1 << 128) - 1)).to_bytes(16, "big")
+            for index in range(count)
+        ))
+        encrypted_indexes = list(range((-first) % 10, count, 10))
+        # Every tenth block uses AES; the final block always does, even when
+        # it is a complete 16-byte block. Other blocks XOR the raw counter.
+        if first + count == blocks and (blocks - 1) % 10:
+            encrypted_indexes.append(count - 1)
+        encrypted = encrypt_block(b"".join(
+            mask[index * 16:index * 16 + 16] for index in encrypted_indexes
+        )) if encrypted_indexes else b""
+        for offset, index in enumerate(encrypted_indexes):
+            mask[index * 16:index * 16 + 16] = encrypted[offset * 16:offset * 16 + 16]
+        start, end = first * 16, min(size, (first + count) * 16)
+        left, right = stripped[start:end], mask[:end - start]
+        if _native_xor is not None:
+            output[start:end] = _native_xor(left, right)
         else:
-            stripped.append(es[index])
-            index += 1
-    counter = bytearray(16)
-    counter[: min(12, len(block_key))] = block_key[:12]
-    output = bytearray(stripped)
-    remaining = len(output)
-    position = 0
-    block_index = 0
-    while remaining > 0:
-        _increment_counter(counter)
-        temporary = bytes(counter)
-        if remaining <= 16 or block_index % 10 == 0:
-            temporary = encrypt_block(temporary)
-        decrypt_length = min(16, remaining)
-        for byte_index in range(decrypt_length):
-            output[position + byte_index] ^= temporary[byte_index]
-        remaining -= decrypt_length
-        position += 16
-        block_index += 1
-    if len(output) != len(es):
-        difference = len(es) - len(output)
-        if difference > 0:
-            output.extend(es[len(es) - difference :])
-        elif difference < 0:
-            output = output[: len(es)]
+            # Keep the cryptography-only backend fast too. Bounded big-int
+            # operations perform XOR in native code without another dependency.
+            output[start:end] = (
+                int.from_bytes(left, "big") ^ int.from_bytes(right, "big")
+            ).to_bytes(end - start, "big")
+    output[size:] = es[size:]
     return bytes(output)
 
 
@@ -253,40 +252,37 @@ def _decrypt_es(input_stream: bytes, block_key: bytes, encrypt_block, stream_typ
     output = bytearray()
     nal_header_length = 1 if stream_type == 0x1B else 2
     nal_start = 0
-    index = 0
-    while index < len(input_stream):
-        if index == len(input_stream) - 1:
-            payload_start = nal_start + 3 + nal_header_length
-            if len(input_stream) - 2 > payload_start:
-                output.extend(input_stream[nal_start:payload_start])
-                output.extend(
-                    _decrypt_sparse_payload(
-                        input_stream[payload_start : len(input_stream) - 2],
-                        block_key,
-                        encrypt_block,
-                    )
+    size = len(input_stream)
+    while True:
+        index = input_stream.find(b"\x00\x00\x01", nal_start + 1)
+        if index < 0:
+            break
+        payload_start = nal_start + 3 + nal_header_length
+        if index - 2 > payload_start:
+            output.extend(input_stream[nal_start:payload_start])
+            trailer_length = 3 if input_stream[index - 1] == 0 else 2
+            payload_end = index - trailer_length
+            output.extend(
+                _decrypt_sparse_payload(
+                    input_stream[payload_start:payload_end],
+                    block_key,
+                    encrypt_block,
                 )
-                output.extend(input_stream[len(input_stream) - 2 :])
-            else:
-                output.extend(input_stream[nal_start:])
-        elif input_stream[index : index + 3] == b"\x00\x00\x01" and index != nal_start:
-            payload_start = nal_start + 3 + nal_header_length
-            if index - 2 > payload_start:
-                output.extend(input_stream[nal_start:payload_start])
-                trailer_length = 3 if input_stream[index - 1] == 0 else 2
-                payload_end = index - trailer_length
-                output.extend(
-                    _decrypt_sparse_payload(
-                        input_stream[payload_start:payload_end],
-                        block_key,
-                        encrypt_block,
-                    )
-                )
-                output.extend(input_stream[payload_end:index])
-            else:
-                output.extend(input_stream[nal_start:index])
-            nal_start = index
-        index += 1
+            )
+            output.extend(input_stream[payload_end:index])
+        else:
+            output.extend(input_stream[nal_start:index])
+        nal_start = index
+    if size:
+        payload_start = nal_start + 3 + nal_header_length
+        if size - 2 > payload_start:
+            output.extend(input_stream[nal_start:payload_start])
+            output.extend(_decrypt_sparse_payload(
+                input_stream[payload_start:size - 2], block_key, encrypt_block,
+            ))
+            output.extend(input_stream[size - 2:])
+        else:
+            output.extend(input_stream[nal_start:])
 
     # The reference algorithm mutates a fixed-size PES buffer; preserve that
     # behavior even when malformed input causes the reconstructed length to vary.
@@ -392,12 +388,28 @@ def _patch_group(
     position = 0
     ended = False
     return_position = output_handle.tell()
+    pending = bytearray()
+    pending_offset = 0
+
+    def flush_packets() -> None:
+        if pending:
+            output_handle.seek(pending_offset)
+            output_handle.write(pending)
+            pending.clear()
+
+    def write_packet(offset: int, packet: bytes) -> None:
+        nonlocal pending_offset
+        if pending and (offset != pending_offset + len(pending) or len(pending) >= _PACKET_WRITE_BATCH_BYTES):
+            flush_packets()
+        if not pending:
+            pending_offset = offset
+        pending.extend(packet)
+
     for part in packet_parts:
         packet = part["packet"]
         if ended:
             rebuilt = _make_adaptation_only_packet_from_original(packet)
-            output_handle.seek(part["offset"])
-            output_handle.write(rebuilt)
+            write_packet(part["offset"], rebuilt)
             continue
         prefix = part["pes_header"] if part["payload_unit_start"] else b""
         if prefix:
@@ -409,18 +421,17 @@ def _patch_group(
         remaining = len(decrypted) - position
         if remaining <= 0:
             rebuilt = _make_payload_packet_from_original(packet, prefix) if prefix else _make_adaptation_only_packet_from_original(packet)
-            output_handle.seek(part["offset"])
-            output_handle.write(rebuilt)
+            write_packet(part["offset"], rebuilt)
             ended = True
             continue
         take = min(max(0, capacity), remaining)
         chunk = decrypted[position : position + take]
         position += take
         rebuilt = _make_payload_packet_from_original(packet, prefix + chunk)
-        output_handle.seek(part["offset"])
-        output_handle.write(rebuilt)
+        write_packet(part["offset"], rebuilt)
         if position >= len(decrypted):
             ended = True
+    flush_packets()
     output_handle.seek(return_position)
     return True
 

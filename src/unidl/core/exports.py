@@ -116,6 +116,7 @@ def _title_document(title: Title) -> dict[str, Any]:
     }
     for name in (
         "year",
+        "series_year",
         "season",
         "episode",
         "episode_name",
@@ -154,6 +155,7 @@ def _title_from(document: dict[str, Any]) -> Title:
     )
     for name in (
         "year",
+        "series_year",
         "episode_name",
         "language",
         "channel",

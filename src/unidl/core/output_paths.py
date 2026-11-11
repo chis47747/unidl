@@ -55,7 +55,12 @@ def episode_folder_fields(title: Title, service: str = "") -> dict[str, str]:
         "series": safe_folder_component(title.name, fallback="Unknown Series"),
         "season": safe_folder_component(season_label, fallback="Specials"),
         "season_number": season_number,
-        "year": safe_folder_component(title.year, fallback="") if title.year else "",
+        # A season can cross a calendar year. Prefer the containing series'
+        # premiere/release year so ``{series} ({year})`` remains one root
+        # folder; older/service titles fall back to the episode year.
+        "year": safe_folder_component(
+            title.series_year or title.year, fallback=""
+        ) if (title.series_year or title.year) else "",
         "season_episode": season_episode,
         "service": safe_folder_component(service, fallback="unknown"),
     }

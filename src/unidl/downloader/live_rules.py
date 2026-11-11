@@ -294,17 +294,19 @@ def live_pipe_mux_disabled_reason(stream) -> str | None:
 def live_pipe_matroska_options(streams, output_container: str | None) -> list[str]:
     """Return Matroska live-pipe options for continuous recording.
 
-    An independent HLS audio rendition can be a raw MPEG-TS stream whose
-    AAC AudioSpecificConfig is only available after the first packets reach
-    the FIFO.  Matroska's ``-live 1`` mode commits the output header before
-    that happens, making FFmpeg reject the stream with ``unable to determine
-    samplerate``.  Keep normal live mode for every other input, but let the
-    muxer probe this narrow transport before writing its header.
+    AAC in HLS TS may expose its AudioSpecificConfig only in the first audio
+    packets. Matroska's ``-live 1`` forbids updating the header afterwards,
+    even when the destination is an ordinary file. Omit that container flag
+    for affected inputs, not the recording pipe: short clusters and packet
+    flushing still make the growing output available during recording.
     """
     if output_container != "matroska":
         return []
     options: list[str] = []
-    if not any(_is_live_raw_audio_ts(stream) for stream in streams or []):
+    if not any(
+        _is_live_raw_audio_ts(stream) or _is_live_muxed_aac_ts(stream)
+        for stream in streams or []
+    ):
         options.extend(["-live", "1"])
     options.extend([
         "-cluster_time_limit",
@@ -313,6 +315,35 @@ def live_pipe_matroska_options(streams, output_container: str | None) -> list[st
         str(64 * 1024),
     ])
     return options
+
+
+def _is_live_muxed_aac_ts(stream) -> bool:
+    """Match live HLS video inputs carrying AAC in TS, including opaque URLs."""
+    if (
+        getattr(stream, "manifest_type", None) != "hls"
+        or not getattr(stream, "is_live", False)
+        or getattr(stream, "media_type", None) != "video"
+    ):
+        return False
+    if pretty_codec(getattr(stream, "codecs", None), "audio") not in {"AAC", "HE-AAC"}:
+        return False
+    extra = getattr(stream, "extra", {}) or {}
+    if extra.get("audio_id") and not extra.get("muxed_audio"):
+        return False
+    segments = getattr(stream, "segments", []) or []
+    if any(getattr(segment, "index", None) == -1 for segment in segments):
+        return False  # An HLS MAP/init denotes fragmented media, not this TS path.
+    extension = (getattr(stream, "extension", None) or "").lower().lstrip(".")
+    ts_extensions = {"ts", "m2ts", "mts", "bbts"}
+    if extension:
+        return extension in ts_extensions
+    suffixes = {
+        Path(urlparse(getattr(segment, "url", "")).path).suffix.lower().lstrip(".")
+        for segment in segments
+    }
+    # Amagi-style signed paths may have no extension at all. With no init and
+    # declared embedded AAC, Core feeds this HLS video input to the TS demuxer.
+    return bool(suffixes) and suffixes <= ts_extensions | {""}
 
 
 def _is_live_raw_audio_ts(stream) -> bool:

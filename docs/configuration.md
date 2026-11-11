@@ -103,7 +103,9 @@ episode titles only; movies, live programs and audio titles stay directly in
 the service folder. For example, `{series}/{season}` produces
 `downloads/<service>/<series>/Season 01/<file>`. Available fields are
 `{series}`, `{season}`, `{season_number}`, `{year}`, `{season_episode}` and
-`{service}`. The template is validated as a relative path and cannot escape
+`{service}`. For episodes, `{year}` uses the series premiere/release year when
+the service provides it, and otherwise falls back to the episode's year. The
+template is validated as a relative path and cannot escape
 the service directory. An empty value preserves the flat service layout.
 
 During a download, track files, sidecar subtitles and the file being muxed are
