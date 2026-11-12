@@ -3832,7 +3832,7 @@ class Engine:
             live_record_limit = value or None
 
         muxer = str(settings.get("muxer", "auto") or "auto")
-        if muxer not in {"auto", "ffmpeg", "mkvmerge", "none"}:
+        if muxer not in {"auto", "ffmpeg", "mkvmerge", "mp4box", "none"}:
             muxer = "auto"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:
@@ -4060,7 +4060,7 @@ class Engine:
         separate_output = original_tracks or output_types != {"video", "audio", "subtitle"}
         mux_format = None if playback.audio_only or separate_output else str(settings.get("mux_format", "mkv"))
         muxer = str(settings.get("muxer", "auto") or "auto")
-        if muxer not in {"auto", "ffmpeg", "mkvmerge", "none"}:
+        if muxer not in {"auto", "ffmpeg", "mkvmerge", "mp4box", "none"}:
             muxer = "auto"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:

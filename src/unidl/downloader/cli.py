@@ -432,7 +432,7 @@ def _build_parser(
     g_mux.add_argument("--no-mux", "--skip-merge", dest="no_mux", action="store_true", help="Do not mux automatically when multiple tracks are selected.")
     g_mux.add_argument("--mux-import", action="append", help='Import external media during mux, e.g. --mux-import "path=sub.srt:lang=eng:name=English".')
     g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final audio or video container.")
-    g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge", "none"], default="auto", help="Mux tool; none saves joined, decrypted original tracks without extra conversions.")
+    g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge", "mp4box", "none"], default="auto", help="Mux tool; mp4box writes MP4 (automatic for 3D VOD); none saves joined, decrypted original tracks without extra conversions.")
     g_mux.add_argument("--default-audio", type=normalize_default_audio, default="auto", help="Default muxed audio: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--default-subtitle", type=normalize_default_subtitle, default="auto", help="Default muxed subtitle: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
@@ -920,6 +920,7 @@ def _download_impl(args: argparse.Namespace) -> int:
             if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
                 raise RuntimeError("FFmpeg and ffprobe are required for embedded CC extraction.")
     hydrated = [_hydrate_stream(stream, headers=headers, no_probe=args.no_probe, base_url=args.base_url) for stream in selected]
+    _preflight_mp4box(hydrated, args)
     if (
         chapter_records
         and not getattr(args, "no_mux", False)
@@ -1142,7 +1143,7 @@ def _download_impl(args: argparse.Namespace) -> int:
                     muxed = mux_files(
                         [],
                         mux_output,
-                        muxer=args.muxer,
+                        muxer="ffmpeg" if args.muxer == "mp4box" else args.muxer,
                         imports=mux_imports,
                         chapters_file=getattr(args, "chapters_file", None),
                         default_subtitle=getattr(args, "default_subtitle", "auto"),
@@ -1279,7 +1280,7 @@ def _download_impl(args: argparse.Namespace) -> int:
             args.save_name,
             default_save_base,
             mux_format,
-            force_suffix=vvc_vod,
+            force_suffix=vvc_vod or _muxer_for_tracks(downloaded_tracks, args, live=False) == "mp4box",
         )
         mux_output = _stage_artifact_path(task_workspace, mux_destination)
         args._unidown_commit_targets[mux_output] = mux_destination
@@ -9259,8 +9260,12 @@ def _should_mux_after_download(args: argparse.Namespace, mux_imports: list, down
         return False
     if _has_detected_audio_vivid(selected_streams) and not shutil.which("mkvmerge"):
         return False
-    if getattr(args, "no_mux", False):
+    if getattr(args, "no_mux", False) or getattr(args, "muxer", "auto") == "none":
         return False
+    if getattr(args, "muxer", "auto") == "mp4box" or any(
+        stream.media_type == "video" and getattr(stream, "is_3d", False) for stream in selected_streams
+    ):
+        return not _only_subtitle_streams(selected_streams)
     if getattr(args, "mux", False) or mux_imports:
         return True
     if getattr(args, "chapters_file", None):
@@ -9288,6 +9293,18 @@ def _has_detected_audio_vivid(streams) -> bool:
     )
 
 
+def _preflight_mp4box(streams, args) -> None:
+    live = any(stream.is_live for stream in streams) and not getattr(args, "live_perform_as_vod", False)
+    if live or getattr(args, "no_mux", False) or getattr(args, "muxer", "auto") == "none":
+        return
+    if getattr(args, "muxer", "auto") == "mp4box" or any(
+        stream.media_type == "video" and getattr(stream, "is_3d", False) for stream in streams
+    ):
+        from .mp4box import require_mp4box
+
+        require_mp4box()
+
+
 def _muxer_for_tracks(
     tracks: list[_DownloadedTrack],
     args: argparse.Namespace,
@@ -9295,6 +9312,13 @@ def _muxer_for_tracks(
     live: bool = False,
 ) -> str:
     streams = [track.stream for track in tracks]
+    if getattr(args, "no_mux", False) or getattr(args, "muxer", "auto") == "none":
+        return "none"
+    if not live and any(stream.media_type == "video" and getattr(stream, "is_3d", False) for stream in streams):
+        return "mp4box"
+    if getattr(args, "muxer", "auto") == "mp4box":
+        # The live FIFO path remains FFmpeg; completed VOD uses MP4Box.
+        return "ffmpeg" if live else "mp4box"
     if not live and _tracks_include_vvc(tracks):
         # Current mkvmerge versions can identify Tencent VVC as V_QUICKTIME.
         # FFmpeg's MP4 muxer writes the ISO VVC sample entry (vvc1), which is
@@ -9315,6 +9339,8 @@ def _mux_format_for_tracks(
     *,
     live: bool,
 ) -> str:
+    if _muxer_for_tracks(tracks, args, live=live) == "mp4box":
+        return "mp4"
     if not live and _tracks_include_vvc(tracks):
         return "mp4"
     if _muxer_for_tracks(tracks, args, live=live) == "mkvmerge":
@@ -9476,6 +9502,7 @@ def _mux_input_for_track(
         delay_ms=delay_ms,
         trim_start_ms=trim_start_ms,
         media_type=getattr(stream, "media_type", None),
+        is_3d=bool(getattr(stream, "is_3d", False)),
         exclude_subtitles=bool(stream.media_type == "video" and stream.extra.get(_PRESERVE_CAPTIONS)),
         track_type_filter=iqiyi_separate_audio_mux_media_type(stream, selected_streams),
         codecs=getattr(stream, "codecs", None),

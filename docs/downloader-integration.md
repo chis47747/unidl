@@ -407,6 +407,39 @@ cross-filesystem copies can need more. Check free space on the temporary
 filesystem as well as the final destination; the mux is staged before it is
 committed to the downloads directory.
 
+## MP4Box and 3D output
+
+Download behavior → Muxer includes `MP4Box (MP4)`; the equivalent CLI option
+is `--muxer mp4box`. It also muxes ordinary video/audio/subtitle inputs, always
+using an MP4 suffix/container. Install GPAC/MP4Box and put `MP4Box` (or
+`mp4box`) on PATH; FFprobe identifies the local input tracks. The dependency
+screen lists a missing MP4Box as an optional capability, with installation
+guidance. A VOD task that needs it fails before media download if it is missing,
+without silently falling back to FFmpeg or mkvmerge.
+Standalone VTT/ASS/TTML subtitles are prepared as SRT and imported as tx3g for
+MP4 playback compatibility; source files and No mux output remain unchanged.
+
+Selected 3D VOD automatically uses MP4 + MP4Box, overriding the usual container
+and muxer. No mux still takes precedence. Live FIFO recording remains on
+FFmpeg. This preserves native MV-HEVC, not a conversion to side-by-side video;
+playback requires a compatible stereo/MV-HEVC player and device.
+
+For multi-init fragmented MP4 stereo, Core keeps each section's original
+sample description, including mono insertions, in one init and explicitly
+remaps fragment description indexes and relative data offsets. Payload bytes
+are streamed unchanged after the existing decryption/timeline corrections.
+Unsupported layouts fail explicitly, rather than losing an eye or creating
+additional video tracks. The final MP4Box ISO import uses `-new -flat`:
+GPAC 2.x's streaming `-newfs` importer can discard unknown stereo boxes,
+and `-cat` can split mixed sample descriptions into extra tracks.
+
+The final mux validates associated `hvcC/lhvC/vexu/dvcC/dvvC` configuration
+against the stereo source entries before publishing the output. Missing stereo
+metadata in an old completed-track checkpoint requires rebuilding that track;
+changing the output extension cannot restore it. The original inputs are not
+modified. Flat writing avoids a full-sized interleaving temporary file, but
+places metadata after the media rather than creating a fast-start MP4.
+
 ## Migration gates
 
 1. One UniDL distribution contains the service layer and download engine; no

@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.6.2] - 2026-11-12
+
+### MP4Box muxer
+
+- Added MP4Box (MP4) to the muxer setting and command-line choices for ordinary video, audio and subtitle delivery, with optional dependency guidance and an early missing-tool check.
+- Preserved selected tracks, language/name metadata, default audio/subtitle choices, forced subtitles and chapters; converted standalone VTT/ASS/TTML subtitles to MP4-compatible text without modifying source files.
+
+### Correct 3D output
+
+- Routed selected 3D VOD to MP4Box and MP4 to retain native MV-HEVC stereo metadata, while keeping No mux authoritative and live pipe recording on FFmpeg.
+- Joined fragmented stereo sections with their original mono/stereo sample descriptions, remapped fragment indexes and relative offsets, and streamed media payloads unchanged after existing decryption and timing corrections.
+- Validated associated stereo and Dolby Vision configurations before publishing the final output and reported unsupported layouts or incomplete old track checkpoints explicitly instead of silently falling back to 2D.
+
+### Safe output handling
+
+- Used MP4Box's preserving flat ISO import and same-filesystem temporary outputs to avoid a full-sized interleaving copy, keep source tracks intact and preserve existing outputs on failure.
+- Documented GPAC/MP4Box and FFprobe requirements, compatible 3D playback and flat MP4's non-fast-start layout.
+
 ## [2.6.1] - 2026-11-12
 
 ### 3D track recognition

@@ -922,12 +922,23 @@ class NativeDownloaderBackend:
             and _contains_vvc_video(selected)
         )
         output = policy.output
-        if vvc_vod and muxer != "none":
+        stereo_vod = not live.enabled and policy.mux is not False and any(
+            stream.media_type == "video" and stream.is_3d for stream in selected
+        )
+        if stereo_vod and muxer != "none":
+            mux_format, muxer = "mp4", "mp4box"
+            if output is not None and output.suffix:
+                output = output.with_suffix(".mp4")
+        elif vvc_vod and muxer not in {"none", "mp4box"}:
             # Keep command export and in-process execution on the same known-good
             # VVC path. The native FFmpeg MP4 muxer writes vvc1; mkvmerge may
             # serialize the same track as V_QUICKTIME.
             mux_format = "mp4"
             muxer = "ffmpeg"
+            if output is not None and output.suffix:
+                output = output.with_suffix(".mp4")
+        elif muxer == "mp4box" and policy.mux is not False and not live.enabled:
+            mux_format = "mp4"
             if output is not None and output.suffix:
                 output = output.with_suffix(".mp4")
         extra_args: list[str] = []

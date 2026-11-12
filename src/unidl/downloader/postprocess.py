@@ -17,6 +17,7 @@ from pathlib import Path
 from .cenc_fragment import CencInitMetadata, CencProgressCallback, decrypt_cenc_fragment, load_cenc_init_metadata
 from .embedding import DownloadRuntime, current_download_runtime, managed_popen, managed_run
 from .mp4_metadata import box_ranges, normalize_empty_c608_samples
+from .mp4box import join_stereo_sections, require_mp4box, stereo_configurations, validate_stereo
 from .subtitles import SubtitleConversionError, convert_subtitle_file
 from .utils import (
     WINDOWS_INTERMEDIATE_PATH_LIMIT,
@@ -203,6 +204,7 @@ class MuxInput:
     kind: str | None = None
     original: bool = False
     exclude_subtitles: bool = False
+    is_3d: bool = False
 
 
 def parse_keys(values: list[str] | None) -> list[RawKey]:
@@ -919,14 +921,22 @@ def mux_files(
     if not all_inputs:
         raise ValueError("No input files to mux.")
     output = Path(output_path)
+    stereo_inputs = [item.path for item in all_inputs if stereo_configurations(item.path)]
+    if stereo_inputs or any(item.is_3d for item in all_inputs):
+        muxer = "mp4box"
+    if muxer == "mp4box":
+        require_mp4box()
+        output = output.with_suffix(".mp4")
     if chapters_file and output.suffix.casefold() in {".ts", ".m2ts"}:
         raise ValueError(
             "Chapters cannot be embedded in an MPEG-TS output; choose MKV/MP4 or use --no-mux."
         )
     output.parent.mkdir(parents=True, exist_ok=True)
-    prepared_inputs, temp_dir = _prepare_mux_inputs(all_inputs, output)
+    prepared_inputs, temp_dir = _prepare_mux_inputs(all_inputs, output, muxer=muxer)
     chapter_temp_dir: Path | None = None
     try:
+        if any(item.is_3d for item in prepared_inputs) and not any(stereo_configurations(item.path) for item in prepared_inputs):
+            raise RuntimeError("Selected 3D video has no stereo configuration; discard the old 2D track checkpoint and retry.")
         _ensure_mux_free_space([item.path for item in prepared_inputs], output)
         selected = _select_muxer(muxer, output)
         vvc_video = _mux_inputs_include_vvc(prepared_inputs)
@@ -960,7 +970,7 @@ def mux_files(
                 chapter_root = safe_temp_root(output.parent, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
                 chapter_root.mkdir(parents=True, exist_ok=True)
                 chapter_temp_dir = Path(tempfile.mkdtemp(prefix="unidl_chapters_", dir=str(chapter_root)))
-                if selected == "mkvmerge":
+                if selected in {"mkvmerge", "mp4box"}:
                     chapter_path = write_ogm_chapters(
                         chapters, chapter_temp_dir / "chapters.txt"
                     )
@@ -968,6 +978,8 @@ def mux_files(
                     chapter_path = write_ffmetadata(
                         chapters, chapter_temp_dir / "chapters.ffmeta"
                     )
+        if selected == "mp4box":
+            return _mux_mp4box(prepared_inputs, output, chapter_path, default_audio, default_subtitle)
         if selected == "mkvmerge":
             executable = shutil.which("mkvmerge")
             if not executable:
@@ -1092,6 +1104,117 @@ def mux_files(
             shutil.rmtree(chapter_temp_dir, ignore_errors=True)
 
 
+def _mux_mp4box(inputs, output, chapters, default_audio, default_subtitle) -> Path:
+    executable = require_mp4box()
+    catalog = [_probe_mux_tracks(item, "mp4box", executable) for item in inputs]
+    catalog = [
+        [
+            track for track in tracks
+            if (not item.track_type_filter or track.get("type") == item.track_type_filter)
+            and not (item.exclude_subtitles and track.get("type") in {"subtitle", "subtitles", "text"})
+        ]
+        for item, tracks in zip(inputs, catalog, strict=True)
+    ]
+    audio, chosen_audio, _ = _mux_audio_layout(
+        inputs, "mp4box", executable, default_audio or "auto", catalog=catalog,
+    )
+    subtitles, chosen_subtitle = _mux_subtitle_layout(
+        inputs, "mp4box", executable, default_subtitle or "auto", catalog=catalog,
+    )
+    audio_flags = {(i, t): s is chosen_audio for i, t, s in audio}
+    subtitle_flags = {(i, t): (s is chosen_subtitle, bool(s.extra.get("forced"))) for i, t, s in subtitles}
+    # Stay on the output filesystem: publishing the finished MP4 must be a
+    # rename, not another whole-file cross-volume copy. GPAC uses relative
+    # short names below so long release names never enter its import syntax.
+    root = output.parent
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="unidl_mp4box_", dir=root) as work:
+        work = Path(work)
+        target = work / "output.mp4"
+        # -newfs's streaming importer drops unknown MV-HEVC boxes in GPAC 2.x.
+        # -flat uses the preserving ISO importer without a full-sized temp copy.
+        args = [executable, "-p", "0", "-noprog", "-new", "-flat", "-tmp", "."]
+        metadata = []
+        output_id = 0
+        for index, item in enumerate(inputs):
+            alias = work / f"input-{index:04d}{item.path.suffix}"
+            reference = alias.name
+            try:
+                os.link(item.path, alias)
+            except OSError:
+                try:
+                    alias.symlink_to(item.path.resolve())
+                except OSError as exc:
+                    # FAT/network volumes may support neither. Ordinary paths
+                    # can be imported directly without copying the media.
+                    original = str(item.path.resolve())
+                    if any(char in original for char in "+#@\r\n") or ":" in original[2:]:
+                        raise RuntimeError("MP4Box cannot safely import this special-character path without link support; move the input to a local filesystem.") from exc
+                    reference = original
+            source_tracks = catalog[index]
+            for track in source_tracks:
+                kind, track_id = track.get("type"), int(track["id"])
+                if kind not in {"video", "audio", "subtitle", "subtitles", "text"}:
+                    continue
+                if item.exclude_subtitles and kind in {"subtitle", "subtitles", "text"}:
+                    continue
+                if item.track_type_filter and kind != item.track_type_filter:
+                    continue
+                output_id += 1
+                identifier = track.get("mp4box_id")
+                if identifier is not None:
+                    identifier = int(str(identifier), 0)
+                    selector = f"#trackID={identifier}"
+                else:
+                    # A raw audio/text import has no MP4 track ID. Never use
+                    # an FFprobe zero-based stream index as an MP4 track ID.
+                    if sum(t.get("type") == kind for t in source_tracks) != 1:
+                        raise RuntimeError("MP4Box input has ambiguous track IDs; remux the source first.")
+                    selector = "#" + kind if kind in {"audio", "video"} else ""
+                options = f":ID={output_id}"
+                if item.trim_start_ms:
+                    options += f":start={item.trim_start_ms / 1000:.6f}"
+                if item.delay_ms:
+                    options += f":delay={item.delay_ms}"
+                properties = track.get("properties") or {}
+                language = item.language or properties.get("language")
+                name = item.name or properties.get("track_name")
+                if language:
+                    options += f":lang={normalize_mux_language(language)}"
+                default = item.default
+                if kind == "audio":
+                    if default_audio is not None:
+                        default = audio_flags.get((index, track_id), False)
+                    options += ":group=1"
+                elif kind in {"subtitle", "subtitles", "text"}:
+                    chosen, forced = subtitle_flags.get((index, track_id), (False, bool(item.forced)))
+                    if default_subtitle is not None:
+                        default = chosen
+                    options += ":group=2"
+                    if forced and item.path.suffix.lower() in {".srt", ".sub", ".ttxt"}:
+                        options += ":txtflags=0xC0000000"
+                    if forced:
+                        metadata += ["-kind", f"{output_id}=urn:mpeg:dash:role:2011=forced-subtitle"]
+                if default is not None:
+                    options += ":disable=no" if default else ":disable"
+                args += ["-add", reference + selector + options]
+                if name:
+                    metadata += ["-name", f"{output_id}={name}"]
+        if not output_id:
+            raise RuntimeError("No supported video, audio or subtitle tracks for MP4Box.")
+        args += metadata
+        if chapters is not None:
+            shutil.copyfile(chapters, work / "chapters.txt")
+            args += ["-chap", "chapters.txt"]
+        args += [target.name]
+        _run_external(args, "MP4Box muxing", cwd=work)
+        if not target.is_file() or not target.stat().st_size:
+            raise RuntimeError("MP4Box produced an empty output.")
+        validate_stereo([item.path for item in inputs], target)
+        target.replace(output)
+    return output
+
+
 def _run_mkvmerge_mux(args: list[str]) -> None:
     # A syntactically valid tag can still be rejected by this mkvmerge
     # version's IANA registry (e.g. an unknown variant/script). Only recover
@@ -1129,10 +1252,12 @@ def _probe_mux_tracks(item: MuxInput, muxer: str, executable: str) -> list[dict]
     elif probe := shutil.which("ffprobe"):
         command = [
             probe, "-v", "error", "-show_entries",
-            "stream=index,codec_type,codec_name,channels,bit_rate:stream_tags=language,title:stream_disposition=default",
+            "stream=index,id,codec_type,codec_name,channels,bit_rate:stream_tags=language,title:stream_disposition=default,forced",
             "-of", "json", str(item.path),
         ]
     else:
+        if muxer == "mp4box":
+            raise RuntimeError("ffprobe not found; install FFmpeg/ffprobe to identify MP4Box input tracks.")
         # ffprobe normally accompanies ffmpeg, but it is not a new requirement.
         result = managed_run([executable, "-hide_banner", "-i", str(item.path)], capture_output=True, timeout=15)
         text = result.stderr.decode("utf-8", errors="replace")
@@ -1154,6 +1279,7 @@ def _probe_mux_tracks(item: MuxInput, muxer: str, executable: str) -> list[dict]
     return [
         {
             "id": track["index"], "type": track.get("codec_type"), "codec": track.get("codec_name"),
+            "mp4box_id": track.get("id"),
             "properties": {
                 "language": (track.get("tags") or {}).get("language"),
                 "track_name": (track.get("tags") or {}).get("title"),
@@ -1166,7 +1292,7 @@ def _probe_mux_tracks(item: MuxInput, muxer: str, executable: str) -> list[dict]
     ]
 
 
-def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, preference: str):
+def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, preference: str, *, catalog=None):
     """Resolve one actual output audio, including audio embedded in video inputs."""
     from .models import StreamInfo
     from .mux_audio import resolve_default_audio
@@ -1175,7 +1301,7 @@ def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, prefe
     preferred = []
     mapped = []
     for input_index, item in enumerate(inputs):
-        for track in _probe_mux_tracks(item, muxer, executable):
+        for track in catalog[input_index] if catalog is not None else _probe_mux_tracks(item, muxer, executable):
             media_type = track.get("type")
             if item.exclude_subtitles and media_type in {"subtitle", "subtitles"}:
                 continue
@@ -1205,7 +1331,7 @@ def _mux_audio_layout(inputs: list[MuxInput], muxer: str, executable: str, prefe
     return layout, choice.stream, mapped
 
 
-def _mux_subtitle_layout(inputs: list[MuxInput], muxer: str, executable: str, preference: str):
+def _mux_subtitle_layout(inputs: list[MuxInput], muxer: str, executable: str, preference: str, *, catalog=None):
     """Resolve one default subtitle from the subtitle tracks in mux inputs."""
     from .models import StreamInfo
     from .mux_subtitle import resolve_default_subtitle
@@ -1214,7 +1340,7 @@ def _mux_subtitle_layout(inputs: list[MuxInput], muxer: str, executable: str, pr
     for input_index, item in enumerate(inputs):
         if item.exclude_subtitles:
             continue
-        for track in _probe_mux_tracks(item, muxer, executable):
+        for track in catalog[input_index] if catalog is not None else _probe_mux_tracks(item, muxer, executable):
             media_type = track.get("type")
             if media_type not in {"subtitle", "subtitles", "text"}:
                 continue
@@ -1279,10 +1405,14 @@ def _coerce_mux_input(item: str | Path | MuxInput) -> MuxInput:
     return MuxInput(path=Path(item))
 
 
-def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxInput], Path | None]:
+def _prepare_mux_inputs(inputs: list[MuxInput], output: Path, *, muxer="auto") -> tuple[list[MuxInput], Path | None]:
     # External service subtitles bypass the downloaded-track conversion stage.
     # FFmpeg/mkvmerge cannot read standalone TTML/EBU-TT XML as mux inputs.
     xml_subtitles = {".xml", ".ttml", ".dfxp"}
+    if muxer == "mp4box":
+        # Use broadly playable tx3g, rather than WVTT which some demuxers
+        # expose as data. MP4Box cannot import standalone ASS/SSA either.
+        xml_subtitles |= {".ass", ".ssa", ".vtt"}
     # Older completed-track checkpoints may contain a compressed MP4 init
     # followed by ordinary media bytes. Repair only a verified init member,
     # never ask a muxer to skip the bytes and guess the elementary stream.
@@ -1293,7 +1423,7 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
         if (prefix := _gzip_mp4_init_prefix(item.path)) is not None
     }
     if not any(
-        (item.trim_start_ms and item.trim_start_ms > 0)
+        (muxer != "mp4box" and item.trim_start_ms and item.trim_start_ms > 0)
         or item.path.suffix.lower() in xml_subtitles
         for item in inputs
     ) and not compressed_inits:
@@ -1322,7 +1452,7 @@ def _prepare_mux_inputs(inputs: list[MuxInput], output: Path) -> tuple[list[MuxI
                         f"Could not prepare subtitle {item.path.name} for muxing: {exc}"
                     ) from exc
                 item = replace(item, path=converted, media_type="subtitles", codecs=subtitle_format)
-            if item.trim_start_ms and item.trim_start_ms > 0:
+            if muxer != "mp4box" and item.trim_start_ms and item.trim_start_ms > 0:
                 suffix = item.path.suffix or ".mp4"
                 trimmed = temp_dir / f"{index:02d}.trim{suffix}"
                 _trim_mux_input(item.path, trimmed, item.trim_start_ms)
@@ -1417,6 +1547,9 @@ def _trim_mux_input(input_path: Path, output_path: Path, trim_start_ms: int) -> 
 
 
 def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = None, *, preserve_subtitles: bool = False) -> Path:
+    if stereo_configurations(Path(input_path)):
+        output = Path(output_path) if output_path else Path(input_path).with_suffix(".repack.mp4")
+        return mux_files([MuxInput(Path(input_path), is_3d=True)], output, muxer="mp4box")
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("ffmpeg not found.")
@@ -1431,6 +1564,10 @@ def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = No
 
 
 def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, preserve_subtitles: bool = False) -> Path:
+    if any(stereo_configurations(Path(path)) for path in inputs):
+        output = Path(output_path)
+        _ensure_output_free_space(_paths_total_size([Path(path) for path in inputs]), output, "3D section concat output")
+        return join_stereo_sections([Path(path) for path in inputs], output)
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("ffmpeg not found.")
@@ -2603,8 +2740,8 @@ def _run_ffmpeg_progress(
                 runtime.unregister_process(process)
 
 
-def _run_external(args: list[str], action: str, *, reject_demux_errors: bool = False) -> None:
-    result = managed_run(args, capture_output=True)
+def _run_external(args: list[str], action: str, *, reject_demux_errors: bool = False, cwd=None) -> None:
+    result = managed_run(args, capture_output=True, **({"cwd": cwd} if cwd is not None else {}))
     raw = result.stderr or result.stdout
     text = raw.decode("utf-8", errors="replace") if raw else ""
     fatal_demux = reject_demux_errors and "error during demuxing" in text.casefold()

@@ -1090,9 +1090,9 @@ GLOBAL_SETTINGS: list[Setting] = [
     _choice(
         "muxer",
         "Muxer",
-        [("auto", "Auto"), ("ffmpeg", "FFmpeg"), ("mkvmerge", "mkvmerge"), ("none", "No mux (original tracks)")],
+        [("auto", "Auto"), ("ffmpeg", "FFmpeg"), ("mkvmerge", "mkvmerge"), ("mp4box", "MP4Box (MP4)"), ("none", "No mux (original tracks)")],
         "auto",
-        "Which tool writes the final container. Auto prefers mkvmerge for MKV. No mux saves joined, decrypted original tracks separately, without audio/subtitle conversion or Hybrid processing. Container is ignored in No mux mode.",
+        "Which tool writes the final container. Auto prefers mkvmerge for MKV. MP4Box writes MP4 for ordinary video/audio too; 3D VOD automatically uses MP4Box and MP4 to preserve stereo metadata. Install GPAC/MP4Box to use it. No mux saves joined, decrypted original tracks separately, without audio/subtitle conversion or Hybrid processing. Container is ignored in No mux mode.",
         visible=False,
     ),
     _choice(

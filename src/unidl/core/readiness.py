@@ -326,6 +326,18 @@ def _hybrid_items() -> list[Item]:
     return items
 
 
+def _mp4box_items() -> list[Item]:
+    from ..downloader.mp4box import INSTALL_HINT, find_mp4box
+
+    found = find_mp4box()
+    return [Item(
+        group="tools", label="MP4Box", ok=bool(found),
+        detail=found or "not found", hint=INSTALL_HINT,
+        without="MP4Box muxing and lossless MV-HEVC 3D output",
+        level=ENHANCEMENT,
+    )]
+
+
 def _folder_items(config) -> list[Item]:
     paths = config.paths
     wanted = [
@@ -449,6 +461,7 @@ def survey(config, registry=None, *, fresh: bool = False) -> Report:
         + _cdm_items(config)
         + _helper_items(config, registry, resolver)
         + _hybrid_items()
+        + _mp4box_items()
         + _compiled_service_items()
         + _folder_items(config)
     )
