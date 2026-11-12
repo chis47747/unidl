@@ -267,6 +267,7 @@ class NativeDownloaderBackend:
                     str(stream.codecs or ""),
                     float(stream.frame_rate or 0),
                     str(stream.video_range or ""),
+                    stream.is_3d,
                     str(stream.channels or ""),
                     int(stream.bandwidth or 0),
                     str(stream.extension or ""),
@@ -505,6 +506,7 @@ class NativeDownloaderBackend:
             str(stream.channels or ""),
             str(stream.extension or ""),
             str(stream.video_range or ""),
+            stream.is_3d,
             bool(stream.extra.get("muxed_audio")),
             bool(stream.encrypted),
             str(stream.encryption_scheme or ""),
@@ -614,6 +616,7 @@ class NativeDownloaderBackend:
             "channels": stream.channels,
             "extension": stream.extension,
             "video_range": stream.video_range,
+            "is_3d": stream.is_3d,
             "duration": stream.total_duration,
             "size_bytes": stream.estimated_size_bytes,
             "encrypted": stream.encrypted,
@@ -645,6 +648,7 @@ class NativeDownloaderBackend:
             "default",
             "autoselect",
             "channels_raw",
+            "video_layout",
             "forced",
             "sdh",
             "cc",
@@ -1051,6 +1055,7 @@ class NativeDownloaderBackend:
             encryption_scheme=str(stream.encryption_scheme or ""),
             is_live=bool(stream.is_live),
             key_ids=tuple(api.stream_key_ids(stream)),
+            is_3d=stream.is_3d,
         )
 
     @staticmethod

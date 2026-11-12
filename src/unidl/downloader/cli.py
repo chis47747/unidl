@@ -6409,6 +6409,7 @@ def _progress_title(stream) -> str:
         body = compact_join(
             [
                 _short_resolution(stream.resolution),
+                "3D" if getattr(stream, "is_3d", False) else None,
                 stream.video_range if stream.video_range and stream.video_range != "SDR" else None,
                 pretty_codec(stream.codecs, stream.media_type),
             ],

@@ -58,6 +58,7 @@ class Palette:
     hdr_vivid: str
     atmos: str
     audio_vivid: str
+    stereo: str  # 3D video, separate from dynamic range and audio badges
 
     # source-language badge, deliberately separate from stream-format colours
     original: str
@@ -115,6 +116,7 @@ DARK = Palette(
     hdr_vivid="#2ac3de",
     atmos="#9ece6a",
     audio_vivid="#d386b7",
+    stereo="#91b9c5",
     original="#8eaaa4",
     search_services="#9baec2",
     search_exports="#b9aa92",
@@ -170,6 +172,7 @@ LIGHT = Palette(
     hdr_vivid="#08727f",
     atmos="#2f6b21",
     audio_vivid="#8a2b72",
+    stereo="#386477",
     original="#42665e",
     search_services="#4a6078",
     search_exports="#6b593f",
@@ -234,6 +237,7 @@ def textual_theme(palette: Palette) -> Theme:
             "hdr-vivid": palette.hdr_vivid,
             "atmos": palette.atmos,
             "audio-vivid": palette.audio_vivid,
+            "stereo": palette.stereo,
             "original": palette.original,
             "search-services": palette.search_services,
             "search-exports": palette.search_exports,

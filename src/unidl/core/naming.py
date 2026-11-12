@@ -175,7 +175,7 @@ TITLE_TEMPLATES = {
 #: and the whole reason this is a setting is that the order is a preference:
 #: put ``{range?}`` before ``{platform}`` here and every later name follows.
 RELEASE_TEMPLATE = (
-    "{quality?}.{platform?}.{source}.{audio_full?}.{atmos?}.{video?}.{range?}-{tag?}"
+    "{quality?}.{platform?}.{source}.{audio_full?}.{atmos?}.{video?}.{range?}.{three_d?}-{tag?}"
 )
 
 # Common filename layouts. The templates remain editable, but these presets make
@@ -241,6 +241,7 @@ RELEASE_FIELDS = frozenset(
         "atmos",
         "video",
         "range",
+        "three_d",
         "tag",
     }
 )
@@ -575,6 +576,7 @@ def release_suffix(
     atmos: str = "",
     video: str = "",
     dynamic_range: str = "",
+    three_d: str = "",
     tag: str = "",
     layout: str = "",
     style: str = DEFAULT_NAME_STYLE,
@@ -596,9 +598,14 @@ def release_suffix(
         "atmos": clean_part(atmos),
         "video": clean_part(video),
         "range": clean_part(dynamic_range),
+        "three_d": clean_part(three_d),
         "tag": clean_tag(tag),
     }
     style_fields = _name_style(style)
+    # Persisted copies of the former default should gain new standard badges.
+    # Other custom templates retain their layout and can opt in with {three_d?}.
+    if layout == RELEASE_TEMPLATE.replace(".{three_d?}", ""):
+        layout = RELEASE_TEMPLATE
     body = template.render(
         _styled_template(layout or RELEASE_TEMPLATE, style_fields["release_separator"]),
         fields,
@@ -661,6 +668,10 @@ def with_release(
         **audio_fields_of(streams),
         video=video_of(streams),
         dynamic_range=range_of(streams),
+        three_d="3D" if any(
+            getattr(stream, "media_type", "") == "video" and getattr(stream, "is_3d", False)
+            for stream in streams or ()
+        ) else "",
         tag=tag,
         layout=layout,
         style=style,

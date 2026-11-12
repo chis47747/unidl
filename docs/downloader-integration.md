@@ -121,6 +121,22 @@ signed segment paths, query strings, request headers, raw error messages or keys
 They do not add network probes or console/TUI messages. This is generic transport
 behavior, not a per-service speed override or a guarantee of CDN throughput.
 
+## Stereoscopic video labels
+
+`StreamInfo.is_3d` and the corresponding `TrackDescriptor` flag describe explicitly
+identified stereoscopic video independently of `video_range`. HLS variants use
+`CH-STEREO` in `REQ-VIDEO-LAYOUT`/`VIDEO-LAYOUT`, or Dolby Vision Profile 20 in
+`CODECS`/`SUPPLEMENTAL-CODECS`. Mixed `CH-MONO,CH-STEREO` layouts retain the `3D`
+badge. Audio channel layouts, titles, URLs, dimensions and frame rates are not
+used to infer it. Services and JSON video tracks may supply `is_3d` explicitly.
+
+The picker, track list, actual-video line and progress labels show `3D` alongside
+the codec/range. Native media exports retain `is_3d` and `video_layout` even when
+the master is replaced by original media-playlist snapshots. No segment tables
+or extra media probes are added. The default release template appends `3D` after
+the range; custom layouts can use `{three_d?}`. This metadata does not change
+codec selection, licensing, decryption, stereo packing or mux parameters.
+
 ## HLS initialization-section key scope
 
 For whole-segment HLS encryption (such as AES-128), an `EXT-X-MAP`

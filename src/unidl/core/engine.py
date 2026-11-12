@@ -261,7 +261,10 @@ def _progress_label(stream) -> str:
         "text": "Sub",
     }.get(media_type, media_type[:3].title() or "Trk")
     if media_type == "video":
-        details = [getattr(stream, "resolution", None), getattr(stream, "codecs", None)]
+        details = [
+            getattr(stream, "resolution", None), getattr(stream, "codecs", None),
+            "3D" if getattr(stream, "is_3d", False) else None,
+        ]
     elif media_type == "audio":
         details = [
             getattr(stream, "language", None),

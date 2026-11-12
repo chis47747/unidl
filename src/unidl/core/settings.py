@@ -1226,7 +1226,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "text",
         default=naming.RELEASE_TEMPLATE,
         help="{quality} {platform} {source} {audio} {audio_channels} {audio_full} "
-        "{atmos} {video} {range} {tag}. Audio and video fields come from the tracks "
+        "{atmos} {video} {range} {three_d} {tag}. Audio and video fields come from the tracks "
         "finally selected for download: for example AAC2.0, DDP5.1.Atmos or H.265. This is where the order "
         "lives; {source} is always WEB-DL. Only films and episodes get this half.",
         visible=False,

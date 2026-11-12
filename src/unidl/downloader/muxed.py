@@ -30,6 +30,7 @@ _SOURCE_FIELDS = (
     "channels",
     "extension",
     "video_range",
+    "is_3d",
     "size_bytes",
 )
 _AUDIO_CODECS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "Opus", "FLAC", "DTS", "DTS-HD", "DTS:X"}
@@ -90,6 +91,7 @@ def split_muxed_stream(stream: StreamInfo) -> list[StreamInfo]:
         resolution=None,
         frame_rate=None,
         video_range=None,
+        is_3d=False,
         size_bytes=None,
         extension=audio_extension,
         segments=list(stream.segments),

@@ -347,7 +347,11 @@ separate path/template rows. Its tabs are:
   The choice changes separators only; the templates still control which title,
   quality, audio, video and tag fields are present.
   The release template can use `audio`, `audio_channels`, `audio_full`, `atmos`
-  and `video`. Its default produces names such as `AAC2.0`, `DDP5.1.Atmos` and
+  and `video`. `{three_d?}` adds `3D` for an explicitly identified stereoscopic
+  video track; the default places it after the picture-range tag, for example
+  `H.265.DV.3D`. It is independent of DV/HDR and uses only the final selected
+  video tracks. Custom templates can place or omit it. The other default fields
+  produce names such as `AAC2.0`, `DDP5.1.Atmos` and
   `H.265`. These values are calculated only after the output picker is
   confirmed, from the tracks the user actually leaves selected—not from its
   automatic initial checkmarks or from the complete manifest inventory.

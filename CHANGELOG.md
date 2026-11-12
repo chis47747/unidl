@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.6.1] - 2026-11-12
+
+### 3D track recognition
+
+- Recognized explicit HLS stereoscopic layouts and Dolby Vision Profile 20 declarations, and accepted an explicit 3D flag from services and JSON video tracks without guessing from titles, URLs, frame rates or stereo audio.
+- Kept 3D independent from HDR and Dolby Vision, retained distinct 2D/3D presentations during track merging and selection, and prevented audio projections from inheriting the video badge.
+
+### Track display and exports
+
+- Added a separately colored 3D badge to the track picker and download details, and included it in actual-video and progress labels across light and dark themes.
+- Preserved the 3D flag and video layout through exports, imports and media-playlist snapshots without expanding segment tables or adding media probes.
+
+### Release naming
+
+- Added the optional three_d release-template field and appended 3D after the picture-range tag in the default layout, including saved copies of the previous default.
+- Based the tag on the final selected video tracks while preserving custom template placement or omission, and documented the metadata and naming behavior.
+
 ## [2.6.0] - 2026-11-11
 
 ### Live-recording audio

@@ -294,6 +294,8 @@ def _apply_track_metadata(stream, record):
     ):
         if record.get(field) is not None:
             setattr(stream, field, record[field])
+    if "is_3d" in record and stream.media_type == "video":
+        stream.is_3d = _bool(record["is_3d"])
     for field in (
         "source_metadata", "subtitle_kind", "subtitle_original",
         "audio_atmos", "muxed_audio", "is_original", "is_default",
@@ -302,6 +304,7 @@ def _apply_track_metadata(stream, record):
         "default", "autoselect", "channels_raw", "forced", "sdh", "cc",
         "closed_captions", "characteristics", "actual_bitrate", "dash_full_base_url_mode",
         "hls_instream_id", "hls_caption_source", "closed_caption_ids",
+        "video_layout",
     ):
         if field in record:
             stream.extra[field] = record[field]
@@ -457,6 +460,8 @@ def _nested_hls_streams(
         if not stream.id:
             stream.id = _track_id(item)
         if media_type == "video":
+            if "is_3d" in item:
+                stream.is_3d = _bool(item["is_3d"])
             stream.codecs = stream.codecs or _str_or_none(item.get("codec") or item.get("codecs"))
             explicit_range = _video_range(item, stream.codecs)
             if explicit_range:
@@ -525,6 +530,7 @@ def _video_stream(uri: str, title: dict[str, Any], item: dict[str, Any], title_m
         frame_rate=_float_or_none(item.get("fps") or item.get("frame_rate") or item.get("frameRate")),
         extension=_extension(item, url, "video"),
         video_range=_video_range(item, codec),
+        is_3d=_bool(item.get("is_3d")),
         duration=duration,
         size_bytes=size_bytes,
         encrypted=encrypted,
@@ -655,6 +661,7 @@ def _parse_generic_url_tracks(uri: str, data: Any) -> list[StreamInfo]:
                 channels=_str_or_none(item.get("channels")),
                 extension=_extension(item, full_url, media_type),
                 video_range=_video_range(item, codec) if media_type == "video" else None,
+                is_3d=media_type == "video" and _bool(item.get("is_3d")),
                 duration=_item_duration({}, item, full_url) or _segments_duration(segments),
                 size_bytes=size_bytes,
                 encrypted=encrypted,
@@ -1367,6 +1374,7 @@ def _extra(title_meta: dict[str, Any], item: dict[str, Any], *, dvr_sequence: di
         extra.setdefault("key_ids", [key_id])
     for key in (
         "audio_atmos",
+        "video_layout",
         "muxed_audio",
         "hls_instream_id",
         "hls_caption_source",

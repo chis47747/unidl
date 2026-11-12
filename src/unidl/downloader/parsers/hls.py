@@ -200,6 +200,7 @@ def _master_stream_key(stream: StreamInfo) -> tuple:
             stream.resolution,
             stream.frame_rate,
             stream.video_range,
+            stream.is_3d,
             _video_codec_token(stream.codecs),
         )
     if stream.url:
@@ -363,6 +364,7 @@ def _stream_from_variant(
         resolution=attrs.get("RESOLUTION"),
         frame_rate=_float_or_none(attrs.get("FRAME-RATE")),
         video_range=_variant_video_range(attrs, child_reference) if media_type == "video" else None,
+        is_3d=media_type == "video" and _variant_is_3d(attrs),
         role=_variant_role(child_url, media_type),
         duration=summary.duration if summary else None,
         extension=summary.extension if summary else None,
@@ -373,6 +375,7 @@ def _stream_from_variant(
         extra={
             "audio_id": attrs.get("AUDIO"),
             "video_id": attrs.get("VIDEO"),
+            "video_layout": attrs.get("REQ-VIDEO-LAYOUT") or attrs.get("VIDEO-LAYOUT"),
             "subtitle_id": attrs.get("SUBTITLES"),
             "closed_caption_ids": [attrs["CLOSED-CAPTIONS"]] if attrs.get("CLOSED-CAPTIONS", "NONE") != "NONE" else [],
             "muxed_audio": _variant_has_muxed_audio(attrs, media_type),
@@ -389,6 +392,19 @@ def _stream_from_variant(
     if media_type == "audio" and not stream.codecs:
         stream.codecs = codecs
     return stream
+
+
+def _variant_is_3d(attrs: dict[str, str]) -> bool:
+    # CH-MONO can coexist with CH-STEREO when a presentation contains both.
+    # Neither frame rate, audio stereo nor a resource name proves 3D video.
+    for name in ("REQ-VIDEO-LAYOUT", "VIDEO-LAYOUT"):
+        if "CH-STEREO" in re.split(r"[,/\s]+", str(attrs.get(name) or "").upper()):
+            return True
+    # Dolby Vision Profile 20 is MV-HEVC stereo, also when layout is omitted.
+    return any(
+        re.search(r"(?:^|,)\s*(?:dvh1|dvhe)\.20(?:[./]|$)", str(attrs.get(name) or ""), re.IGNORECASE)
+        for name in ("CODECS", "SUPPLEMENTAL-CODECS")
+    )
 
 
 def _variant_role(child_url: str, media_type: str) -> str | None:

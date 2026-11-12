@@ -69,6 +69,8 @@ class StreamInfo:
     is_live: bool = False
     segments: list[SegmentInfo] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Explicit stereoscopic video metadata, independent of HDR/Dolby Vision.
+    is_3d: bool = False
 
     @property
     def segments_count(self) -> int:
@@ -190,6 +192,7 @@ class StreamInfo:
                 actual_bitrate_text,
                 format_frame_rate(self.frame_rate),
                 pretty_codec(self.codecs, self.media_type),
+                "3D" if self.media_type == "video" and self.is_3d else None,
                 "Muxed Audio" if self.extra.get("muxed_audio") else None,
                 *common_tail,
             ]
@@ -234,6 +237,7 @@ class StreamInfo:
             "channels": self.channels,
             "extension": self.extension,
             "video_range": self.video_range,
+            "is_3d": self.is_3d,
             "duration": self.total_duration,
             "size_bytes": self.estimated_size_bytes,
             "encrypted": self.encrypted,

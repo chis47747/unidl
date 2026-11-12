@@ -131,6 +131,8 @@ def _track_highlights(stream: object) -> tuple[tuple[str, str], ...]:
         add("HDR10", "hdr10")
     if "HLG" in upper:
         add("HLG", "hlg")
+    if getattr(stream, "media_type", None) == "video" and getattr(stream, "is_3d", False):
+        add("3D", "stereo")
 
     extra = getattr(stream, "extra", None)
     extra = extra if isinstance(extra, dict) else {}
@@ -202,7 +204,7 @@ def _track_identity(stream: object) -> tuple[str, ...]:
         str(getattr(stream, name, "") or "")
         for name in (
             "media_type", "id", "group_id", "language", "resolution", "codecs",
-            "bandwidth", "role", "channels", "video_range", "frame_rate",
+            "bandwidth", "role", "channels", "video_range", "frame_rate", "is_3d",
         )
     )
 
@@ -218,7 +220,7 @@ def _track_match_keys(stream: object) -> tuple[tuple[str, ...], ...]:
     bandwidth = str(getattr(stream, "bandwidth", "") or "")
     variant = tuple(
         str(getattr(stream, name, "") or "")
-        for name in ("role", "channels", "video_range", "frame_rate")
+        for name in ("role", "channels", "video_range", "frame_rate", "is_3d")
     )
     identity = _track_identity(stream)
     keys = [("identity", *identity)]
@@ -498,7 +500,8 @@ def _actual_video_line(tracks: TrackSet) -> str:
     resolution = f"{width}x{height}" if width and height else str(best.resolution or "").strip()
     codec = str(pretty_codec(best.codecs, "video") or best.codecs or "").strip()
     dynamic_range = str(best.video_range or "").strip()
-    return " · ".join(value for value in (resolution, codec, dynamic_range) if value)
+    stereo = "3D" if getattr(best, "is_3d", False) else ""
+    return " · ".join(value for value in (resolution, codec, dynamic_range, stereo) if value)
 
 
 #: how long to let something the user opened sit in front of a screen we want to

@@ -127,6 +127,7 @@ class TrackDescriptor:
     encryption_scheme: str = ""
     is_live: bool = False
     key_ids: tuple[str, ...] = ()
+    is_3d: bool = False
 
 
 @dataclass(frozen=True, slots=True)
