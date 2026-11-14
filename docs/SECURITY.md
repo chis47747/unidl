@@ -35,6 +35,10 @@ codebase. There is not yet a separately maintained long-term-support release.
   challenge/response bodies are recorded only after a failed license request.
   Review a log before sharing it because signed manifests and content keys are
   still sensitive and may grant access to media.
+- The TUI's **Share log** action keeps complete signed manifest links and
+  content keys. It masks other recognized credentials, but its output is not
+  safe to post publicly without review. Remove the signed links and keys first,
+  or share only with a trusted recipient.
 - A `PartnerAuthorization` URL is a single-use bearer secret. Transfer it only
   through core's in-memory handoff, consume it immediately, and never render,
   log, serialize, queue or persist it. See

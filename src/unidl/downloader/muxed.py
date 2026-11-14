@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import StreamInfo
-from .utils import pretty_codec
+from .utils import normalize_mux_language, pretty_codec
 
 SOURCE = "_unidl_muxed_source"
 MEDIA = "_unidl_demux_media"
@@ -34,6 +34,23 @@ _SOURCE_FIELDS = (
     "size_bytes",
 )
 _AUDIO_CODECS = {"AAC", "HE-AAC", "AC-3", "E-AC-3", "E-AC-3 Atmos", "AC-4", "Opus", "FLAC", "DTS", "DTS-HD", "DTS:X"}
+
+
+def _container_audio_language(language: str | None, suffix: str) -> str:
+    """Return the language spelling accepted by the output container."""
+    normalized = normalize_mux_language(language)
+    if suffix.casefold() not in {".m4a", ".mp4", ".m4v", ".mov"}:
+        return normalized
+    primary = normalized.split("-", 1)[0]
+    if len(primary) != 2:
+        return primary
+    try:
+        import pycountry
+
+        entry = pycountry.languages.get(alpha_2=primary)
+    except (ImportError, LookupError):
+        entry = None
+    return str(getattr(entry, "alpha_3", None) or "und")
 
 
 def is_demux_stream(stream: StreamInfo) -> bool:
@@ -144,12 +161,27 @@ def demux_file(source: Path, output: Path, stream: StreamInfo) -> Path:
         "-1",
         "-map_chapters",
         "-1",
+    ]
+    if media == "audio":
+        # The source container's metadata is intentionally discarded above:
+        # it may describe the muxed parent rather than this projection. Write
+        # the Core-selected language/name back onto the standalone audio file.
+        # Missing or provider-specific labels normalize to ``und``; never
+        # infer a language from a codec, URL or title.
+        command.extend([
+            "-metadata:s:a:0",
+            f"language={_container_audio_language(stream.language, temporary.suffix)}",
+        ])
+        if stream.name:
+            metadata_key = "handler_name" if temporary.suffix.casefold() in {".m4a", ".mp4", ".m4v", ".mov"} else "title"
+            command.extend(["-metadata:s:a:0", f"{metadata_key}={stream.name}"])
+    command.extend([
         "-c",
         "copy",
         "-avoid_negative_ts",
         "disabled",
         str(temporary),
-    ]
+    ])
     try:
         _run_external(command, f"separating muxed {media}")
         if not temporary.is_file() or temporary.stat().st_size == 0:

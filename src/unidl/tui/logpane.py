@@ -49,6 +49,9 @@ class SelectableLog(RichLog):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        #: Rows of a manifest URL can join the next row without a newline.
+        #: Other rows keep their visible breaks when copied.
+        self._logical_breaks: list[bool] = []
         self._drag_anchor: Offset | None = None
         self._drag_pointer: Offset | None = None
         self._drag_moved = False
@@ -74,7 +77,7 @@ class SelectableLog(RichLog):
         return self.text_selection is not None
 
     # ------------------------------------------------------------- last line
-    def write_counted(self, renderable: object) -> int:
+    def write_counted(self, renderable: object, *, join_wrapped: bool = False) -> int:
         """Write at the pane's own width, and say how many rows it took.
 
         The width is stated rather than left to be worked out. ``RichLog`` measures
@@ -90,15 +93,25 @@ class SelectableLog(RichLog):
         """
         room = self.scrollable_content_region.width
         before = len(self.lines)
+        start_line = self._start_line
         follow_tail = self.auto_scroll and not self._follow_paused and not self.has_selection
         # RichLog normally queues a scroll-to-end without checking again when it
         # runs. A mouse selection can begin in between, and that stale callback is
         # what made the viewport snap back to the newest line on mouse-up. Queue
         # our own guarded follow instead.
         self.write(renderable, width=room if room > 0 else None, scroll_end=False)
+        after = len(self.lines)
+        remaining = max(0, before - (self._start_line - start_line))
+        new_rows = after - remaining
+        if len(self._logical_breaks) != before:
+            self._logical_breaks = [True] * before
+        if remaining < before:
+            del self._logical_breaks[:before - remaining]
+        if new_rows:
+            self._logical_breaks.extend([not join_wrapped] * (new_rows - 1) + [True])
         if follow_tail:
             self.call_after_refresh(self._follow_tail)
-        self._last_rows = max(0, len(self.lines) - before)
+        self._last_rows = new_rows
         return self._last_rows
 
     def _follow_tail(self) -> None:
@@ -111,7 +124,7 @@ class SelectableLog(RichLog):
         if self.auto_scroll and not self._follow_paused and not self.has_selection:
             self.scroll_end(animate=False, immediate=True, x_axis=False)
 
-    def redraw_last(self, renderable: object) -> bool:
+    def redraw_last(self, renderable: object, *, join_wrapped: bool = False) -> bool:
         """Draw ``renderable`` over the last line, in place.
 
         For the one line whose state can still change: the newest one, while the
@@ -124,28 +137,57 @@ class SelectableLog(RichLog):
         if rows <= 0 or rows > len(self.lines):
             return False
         del self.lines[-rows:]
+        if rows <= len(self._logical_breaks):
+            del self._logical_breaks[-rows:]
+        else:
+            self._logical_breaks = []
         # The cache is keyed by row, and the rows from here down have just changed
         # meaning. Cheaper than it looks: the pane re-renders what is visible.
         self._line_cache.clear()
-        self.write_counted(renderable)
+        self.write_counted(renderable, join_wrapped=join_wrapped)
         return True
 
     # ---------------------------------------------------------------- copying
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The text under the selection.
 
-        Read off the strips rather than from the source renderables: what a person
-        dragged over is what is on screen, including the wrapping, and the source
-        objects no longer know where the line breaks ended up.
+        Read off the selected cells, removing only the layout introduced by
+        visual URL wrapping and preserving the boundaries between log entries.
         """
         if not self.lines:
             return None
         # Right-trimmed: a line is laid out in columns so that a wrapped one hangs
         # under its own text, and a column pads its cell to the full width. Those
-        # spaces are layout, not content, and copying them means a pasted manifest
-        # URL arrives with a tail of blanks.
-        text = "\n".join(strip.text.rstrip() for strip in self.lines)
-        return selection.extract(text), "\n"
+        # spaces are layout, not content. A wrapped row is also not a logical
+        # newline: joining it here keeps a pasted manifest URL continuous.
+        breaks = self._logical_breaks
+        if len(breaks) != len(self.lines):
+            breaks = [True] * len(self.lines)
+        pieces: list[str] = []
+        previous_row: int | None = None
+        for row, strip in enumerate(self.lines):
+            span = selection.get_span(row)
+            if span is None:
+                continue
+            start, end = span
+            line_length = strip.cell_length
+            if end == -1:
+                end = line_length
+            start = min(max(start, 0), line_length)
+            end = min(max(end, start), line_length)
+            if previous_row is not None:
+                if row != previous_row + 1 or breaks[previous_row]:
+                    pieces.append("\n")
+            piece = strip.crop(start, end).text.rstrip()
+            if row and not breaks[row - 1]:
+                piece = piece.lstrip(" ")
+            pieces.append(piece)
+            previous_row = row
+        return "".join(pieces), "\n"
+
+    def clear(self, *args, **kwargs):
+        self._logical_breaks = []
+        return super().clear(*args, **kwargs)
 
     def selection_updated(self, selection: Selection | None) -> None:
         # The strips are cached per line, and a cached line has no idea part of it

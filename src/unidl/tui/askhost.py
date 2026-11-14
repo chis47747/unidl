@@ -28,7 +28,7 @@ from ..core import drm as drm_registry
 from ..core.credentials import mask_in
 from ..core.flow import SCOPE_ROOT, TextAsk
 from ..core.i18n import tr
-from ..core.redact import redact_lines
+from ..core.redact import redact
 from .asks import BACK, AskWidget, ManualStep, PanelWidget, widget_for
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
@@ -41,6 +41,15 @@ if TYPE_CHECKING:
 
     from ..core.flow import Ask, Panel
     from .session import SessionController
+
+
+def _is_manifest_field(line: object) -> bool:
+    return (
+        isinstance(line, LogLine)
+        and line.label.casefold() == "manifest"
+        and line.body.lower().startswith(("http://", "https://"))
+    )
+
 
 #: what happens once a title is picked, spelled out rather than abbreviated
 MODE_LABEL = {
@@ -533,7 +542,7 @@ class AskHost(Screen):
             return
         widget = log.first(SelectableLog)
         for line in lines:
-            widget.write_counted(self._drawn(line))
+            widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
         self._last_line = lines[-1]
         self._log_lines = len(lines)
         self._reveal_log()
@@ -548,7 +557,7 @@ class AskHost(Screen):
         # The line that was newest is not any more, so whatever it was doing has
         # been overtaken: settle it before the new one goes under it.
         self._settle_last(widget)
-        widget.write_counted(self._drawn(renderable))
+        widget.write_counted(self._drawn(renderable), join_wrapped=_is_manifest_field(renderable))
         self._last_line = renderable
         self._log_lines += 1
         self._reveal_log()
@@ -610,7 +619,7 @@ class AskHost(Screen):
             return
         widget.clear()
         for line in lines:
-            widget.write_counted(self._drawn(line))
+            widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
         self._last_line = lines[-1]
         self._log_lines = len(lines)
         self._render_log_header()
@@ -623,7 +632,7 @@ class AskHost(Screen):
             return
         self._pulse_dim = False
         if not widget.has_selection:
-            widget.redraw_last(self._drawn(last))
+            widget.redraw_last(self._drawn(last), join_wrapped=_is_manifest_field(last))
 
     def _pulsing(self) -> bool:
         """Whether anything on this screen is still reporting work in progress."""
@@ -667,7 +676,7 @@ class AskHost(Screen):
         widget = log.first(SelectableLog)
         if widget.has_selection:
             return
-        widget.redraw_last(self._drawn(last))
+        widget.redraw_last(self._drawn(last), join_wrapped=_is_manifest_field(last))
 
     def _reveal_log(self) -> None:
         pane = self.query("#log-pane")
@@ -720,7 +729,9 @@ class AskHost(Screen):
         nobody has to guess before pasting it into an issue.
         """
         lines = getattr(self.controller, "log_lines", None) or ()
-        text = redact_lines(str(line) for line in lines)
+        text = "\n".join(
+            redact(line, preserve_manifest_urls=_is_manifest_field(line)) for line in lines
+        )
         if not text.strip():
             self.notify("The log is empty", timeout=3)
             return
@@ -731,8 +742,9 @@ class AskHost(Screen):
             self.notify("This terminal would not take the clipboard", timeout=4)
             return
         self.notify(
-            f"Copied {len(text.splitlines())} lines. Passwords, tokens, signed URLs "
-            "and your home path are masked; content keys and titles are not.",
+            f"Copied {len(text.splitlines())} lines. Non-manifest credentials and your "
+            "home path are masked; signed manifest URLs, content keys and titles are retained. "
+            "Share only with trusted recipients.",
             title="Log copied",
             timeout=6,
         )

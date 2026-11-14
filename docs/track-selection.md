@@ -134,6 +134,14 @@ segments, so it does not necessarily reduce transfer bandwidth. Different
 renditions are not assumed to contain identical audio. The policy is
 service-controlled, off by default, and retained in commands and exports.
 
+When a service supplies `extra["audio_language"]` (preferred) or the source
+`language`, Core carries that value into the projected audio row and into the
+standalone extracted file. MP4/M4A outputs use the container's ISO-639-2 form
+(for example `jpn` for `ja`); MKA keeps the normalized BCP-47 form. A missing
+or unrecognized value is written as `und`, never guessed from a codec, title or
+URL. The service remains responsible for supplying a reliable language before
+the Core projection.
+
 For live streams, cross-track pipe muxing is disabled, but per-track real-time
 segment joining remains available. Back still finalizes the recording and saves
 the independent tracks; Quit retains the existing immediate-exit behavior.

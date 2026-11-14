@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.6.3] - 2026-11-14
+
+### Audio metadata
+
+- Carried the selected audio language and name into standalone files created from muxed A/V sources.
+- Used ISO-639-2 language codes for MP4/M4A-family outputs and normalized BCP-47 tags for other containers, falling back to und when the source does not provide a recognized language.
+- Kept source-container metadata out of projected audio files so the extracted track receives the selected Core metadata rather than the parent video metadata.
+
+### Shared manifest logs
+
+- Preserved complete signed manifest URLs when copying a diagnostic log, including URLs wrapped across terminal rows, while continuing to mask credentials on non-manifest lines.
+- Joined visual line wraps back into one logical log entry during selection so copied manifests do not contain inserted newlines or trailing layout spaces.
+- Updated the share notification and documentation to describe the retained manifest URL and masked credential behavior.
+
 ## [2.6.2] - 2026-11-12
 
 ### MP4Box muxer
