@@ -726,6 +726,7 @@ class JustWatchTvApi:
                     episodeNumber
                     seasonNumber
                     shortDescription
+                    posterUrl
                   }
                   offers(country: $country, platform: ANDROID_TV) {
                     id
@@ -745,6 +746,7 @@ class JustWatchTvApi:
                 episodeNumber
                 seasonNumber
                 shortDescription
+                posterUrl
               }
               offers(country: $country, platform: ANDROID_TV) {
                 id
@@ -841,6 +843,11 @@ class JustWatchTvApi:
                         episode_number=int(ep_content.get("episodeNumber") or len(episodes) + 1),
                         title=str(ep_content.get("title") or f"Episode {len(episodes) + 1}"),
                         description=str(ep_content.get("shortDescription") or ""),
+                        thumbnail_url=self._format_image_url(
+                            str(ep_content.get("posterUrl") or ""),
+                            profile="s718",
+                            fmt="jpg",
+                        ),
                         offers=ep_offers,
                     )
                 )

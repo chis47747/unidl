@@ -65,14 +65,16 @@ SEARCH_FEATURES = [
 ]
 
 PROGRAMME_QUERY = """
-query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: TitleLegacyId!, $withTitlesToRedirect: Boolean!) {
+query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: TitleLegacyId!, $withTitlesToRedirect: Boolean!, $withImages: Boolean!) {
   brands(filter: $brandFilter) {
     ccid title numberOfAvailableSeries legacyId synopses { epg ninety } genres { id name }
+    imageUrl(imageType: ITVX) @include(if: $withImages)
     series(sortBy: SEQUENCE_ASC) {
       ccid seriesNumber legacyId seriesType numberOfAvailableEpisodes
       titles(sortBy: SEQUENCE_ASC) {
         __typename ccid titleType legacyId brandLegacyId title broadcastDateTime
-        brand { title legacyId genres { id name } }
+        imageUrl(imageType: ITVX) @include(if: $withImages)
+        brand { title legacyId genres { id name } imageUrl(imageType: ITVX) @include(if: $withImages) }
         series { seriesNumber seriesType }
         synopses { ninety epg }
         latestAvailableVersion {
@@ -87,7 +89,8 @@ query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: 
   }
   titles(filter: $titleFilter) {
     __typename ccid titleType legacyId brandLegacyId title broadcastDateTime
-    brand { title legacyId genres { id name } }
+    imageUrl(imageType: ITVX) @include(if: $withImages)
+    brand { title legacyId genres { id name } imageUrl(imageType: ITVX) @include(if: $withImages) }
     series { seriesNumber seriesType }
     synopses { ninety epg }
     latestAvailableVersion {
@@ -103,12 +106,16 @@ query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: 
 """
 
 SHORTFORM_QUERY = """
-query GetClipByCcid($ccid: ID!, $isNews: Boolean!, $isSport: Boolean!) {
+query GetClipByCcid($ccid: ID!, $isNews: Boolean!, $isSport: Boolean!, $withImages: Boolean! = true) {
   clip(ccid: $ccid) @include(if: $isNews) {
     ccid title description dateTime duration playlistLink subtitles
+    image @include(if: $withImages)
+    posterImage @include(if: $withImages)
   }
   sportsClip(ccid: $ccid) @include(if: $isSport) {
     ccid title description dateTime duration playlistLink subtitles
+    image @include(if: $withImages)
+    posterImage @include(if: $withImages)
   }
 }
 """
@@ -192,6 +199,9 @@ class Episode:
     film: bool = False
     features: tuple[str, ...] = ()
     shortform: bool = False
+    image_url: str = ""
+    programme_image_url: str = ""
+    poster_url: str = ""
 
     @property
     def label(self) -> str:
@@ -229,6 +239,7 @@ class Channel:
     next: str = ""
     synopsis: str = ""
     starts_at: str = ""
+    logo_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -368,7 +379,7 @@ class ItvApi:
         data = self._json("GET", f"{TEXT_SEARCH}?{urlencode(params).replace('%2C', ',')}", headers=self._headers())
         return [_search_hit(raw) for raw in data.get("results") or [] if isinstance(raw, dict)]
 
-    def show(self, content_id: str, *, shortform_category: str = "") -> Show:
+    def show(self, content_id: str, *, shortform_category: str = "", with_images: bool = True) -> Show:
         last_error: ItvError | None = None
         for candidate in _content_id_candidates(_content_id(content_id)):
             try:
@@ -376,6 +387,7 @@ class ItvApi:
                     candidate,
                     shortform_category=shortform_category,
                     allow_redirect=True,
+                    with_images=with_images,
                 )
             except ItvError as exc:
                 if not str(exc).startswith("ITVX returned no playable programme"):
@@ -389,8 +401,9 @@ class ItvApi:
         *,
         shortform_category: str,
         allow_redirect: bool,
+        with_images: bool,
     ) -> Show:
-        data = self._programme(content_id)
+        data = self._programme(content_id, with_images=with_images)
         content = data.get("data") or {}
         brands = content.get("brands") or []
         titles = content.get("titles") or []
@@ -410,7 +423,9 @@ class ItvApi:
                     item
                     for raw in raw_series.get("titles") or []
                     if isinstance(raw, dict)
-                    and (item := _episode(raw, show_title, number, self.discovery_features)) is not None
+                    and (item := _episode(
+                        raw, show_title, number, self.discovery_features, brand.get("imageUrl")
+                    )) is not None
                 ]
                 if items and all(item.film for item in items):
                     films.extend(items)
@@ -423,7 +438,9 @@ class ItvApi:
                     item
                     for raw in titles
                     if isinstance(raw, dict)
-                    and (item := _episode(raw, show_title, None, self.discovery_features)) is not None
+                    and (item := _episode(
+                        raw, show_title, None, self.discovery_features, brand.get("imageUrl")
+                    )) is not None
                 ]
                 films = [item for item in fallback if item.film]
                 episodic = [item for item in fallback if not item.film]
@@ -455,12 +472,13 @@ class ItvApi:
                 _content_id(redirect),
                 shortform_category=shortform_category,
                 allow_redirect=False,
+                with_images=with_images,
             )
         if _is_shortform_id(content_id):
-            return self._shortform_show(content_id, shortform_category)
+            return self._shortform_show(content_id, shortform_category, with_images=with_images)
         raise ItvError(f"ITVX returned no playable programme {content_id}")
 
-    def _shortform_show(self, content_id: str, category: str = "") -> Show:
+    def _shortform_show(self, content_id: str, category: str = "", *, with_images: bool = True) -> Show:
         routes = {"NEWS": "clip", "SPORT": "sportsClip"}
         requested = category.upper()
         if requested and requested not in routes:
@@ -478,6 +496,7 @@ class ItvApi:
                         "ccid": content_id,
                         "isNews": candidate == "NEWS",
                         "isSport": candidate == "SPORT",
+                        **({"withImages": False} if not with_images else {}),
                     },
                 },
             )
@@ -508,6 +527,8 @@ class ItvApi:
                 synopsis=synopsis,
                 genre=genre,
                 shortform=True,
+                image_url=clip.get("image") or "",
+                poster_url=clip.get("posterImage") or "",
             )
             return Show(
                 content_id,
@@ -517,8 +538,9 @@ class ItvApi:
             )
         raise ItvError(f"ITVX returned no playable programme {content_id}")
 
-    def _programme(self, content_id: str) -> dict[str, Any]:
+    def _programme(self, content_id: str, *, with_images: bool = True) -> dict[str, Any]:
         variables = _programme_variables(content_id, self.discovery_features)
+        variables["withImages"] = with_images
         params = {
             "query": _compact_graphql(PROGRAMME_QUERY),
             "variables": json.dumps(variables, separators=(",", ":")),
@@ -547,6 +569,7 @@ class ItvApi:
                     next=str(nxt.get("title") or nxt.get("programmeTitle") or ""),
                     synopsis=str(now.get("synopsis") or now.get("description") or ""),
                     starts_at=str(now.get("start") or now.get("broadcastAt") or ""),
+                    logo_url=(raw.get("images") or {}).get("logo") or "",
                 )
             )
         return channels
@@ -767,6 +790,7 @@ def _episode(
     show_title: str,
     series_number: int | None,
     discovery_features: list[str],
+    programme_image_url: str = "",
 ) -> Episode | None:
     version = raw.get("latestAvailableVersion") or {}
     playlist = str(version.get("playlistUrl") or "")
@@ -795,6 +819,8 @@ def _episode(
         genre=genre,
         film=film,
         features=tuple(features),
+        image_url=raw.get("imageUrl") or "",
+        programme_image_url=programme_image_url or brand.get("imageUrl") or "",
     )
 
 

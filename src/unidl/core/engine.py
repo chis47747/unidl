@@ -3834,6 +3834,17 @@ class Engine:
         muxer = str(settings.get("muxer", "auto") or "auto")
         if muxer not in {"auto", "ffmpeg", "mkvmerge", "mp4box", "none"}:
             muxer = "auto"
+        subtitle_output = str(
+            playback.subtitle_output
+            or (
+                settings.inherited("subtitle_output", "muxed")
+                if hasattr(settings, "inherited")
+                else settings.get("subtitle_output", "muxed")
+            )
+            or "muxed"
+        )
+        if subtitle_output not in {"muxed", "external", "none"}:
+            subtitle_output = "muxed"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:
             downloader = "python"
@@ -3854,6 +3865,7 @@ class Engine:
             mux=mux,
             mux_format=mux_format,
             muxer=muxer,
+            subtitle_output=subtitle_output,
             default_audio=self.default_audio_preference(playback, settings),
             default_subtitle=self.default_subtitle_preference(playback, settings),
             mux_imports=tuple(
@@ -4062,6 +4074,17 @@ class Engine:
         muxer = str(settings.get("muxer", "auto") or "auto")
         if muxer not in {"auto", "ffmpeg", "mkvmerge", "mp4box", "none"}:
             muxer = "auto"
+        subtitle_output = str(
+            playback.subtitle_output
+            or (
+                settings.inherited("subtitle_output", "muxed")
+                if hasattr(settings, "inherited")
+                else settings.get("subtitle_output", "muxed")
+            )
+            or "muxed"
+        )
+        if subtitle_output not in {"muxed", "external", "none"}:
+            subtitle_output = "muxed"
         downloader = str(settings.get("segment_downloader", "python") or "python")
         if downloader not in {"python", "aria2c", "auto"}:
             downloader = "python"
@@ -4096,6 +4119,7 @@ class Engine:
             no_probe=direct_audio_no_probe,
             mux_format=mux_format,
             muxer=muxer,
+            subtitle_output=subtitle_output,
             default_audio=self.default_audio_preference(playback, settings),
             default_subtitle=self.default_subtitle_preference(playback, settings),
             sub_format="raw" if original_tracks else str(settings.get("sub_format", "srt")),
@@ -4568,6 +4592,15 @@ class Engine:
                         "audio_selection": str((settings or {}).get("audio_selection", "best") or "best"),
                         "default_audio": self.default_audio_preference(playback, settings or {}),
                         "default_subtitle": self.default_subtitle_preference(playback, settings or {}),
+                        "subtitle_output": str(
+                            playback.subtitle_output
+                            or (
+                                settings.inherited("subtitle_output", "muxed")
+                                if hasattr(settings, "inherited")
+                                else (settings or {}).get("subtitle_output", "muxed")
+                            )
+                            or "muxed"
+                        ),
                         "subtitle_selection": str((settings or {}).get("subtitle_selection", "all") or "all"),
                     }
                     if settings is not None
@@ -4576,6 +4609,7 @@ class Engine:
                         for key, value in (
                             ("default_audio", playback.default_audio),
                             ("default_subtitle", playback.default_subtitle),
+                            ("subtitle_output", playback.subtitle_output),
                         )
                         if value
                     }

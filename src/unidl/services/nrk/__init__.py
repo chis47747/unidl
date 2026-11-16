@@ -9,7 +9,7 @@ from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
 from ...core.playback import DrmInfo, Playback
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
-from . import api
+from . import api, metadata
 
 
 @registry.register
@@ -61,46 +61,48 @@ class NRK(Service):
 
     def login(self, ctx: FlowContext) -> Iterator[Ask]:
         client = self._new_client()
-        try:
-            selection = yield ctx.pick(
-                "NRK TV sign-in",
-                [
-                    Choice("TV code", "tv", detail="Activate this device from another device"),
-                    Choice("Continue anonymously", "anonymous", detail="Use public catalogue and playback"),
-                ],
-            )
-        except Back:
-            return
-        if selection == "anonymous":
-            client.use_anonymous()
-            self._api = client
-            ctx.log("NRK TV anonymous mode enabled", "ok")
-            return
-        if selection != "tv":
-            return
-
-        try:
-            ctx.status("Requesting an NRK TV activation code")
-            challenge = client.start_device_login()
-            confirmed = yield ctx.wait_for(
-                "Sign in to NRK TV",
-                [
-                    ("Code", challenge.user_code),
-                    ("Open", challenge.verification_url_complete or challenge.verification_url),
-                    "Approve this device on the activation page; this screen checks automatically.",
-                ],
-                poll=lambda: client.poll_device_login(challenge),
-                timeout=float(challenge.expires_in),
-                interval=float(challenge.interval),
-            )
-        except api.NrkError as exc:
-            ctx.error(str(exc))
-            return
-        if not isinstance(confirmed, api.SessionState) or not confirmed.signed_in:
-            ctx.error("NRK TV activation completed without a usable session")
-            return
-        self._api = client
-        ctx.log(f"NRK TV sign-in completed · {confirmed.account_name or 'account'}", "ok")
+        page = ctx.pick(
+            "NRK TV sign-in",
+            [
+                Choice("TV code", "tv", detail="Activate this device from another device"),
+                Choice("Continue anonymously", "anonymous", detail="Use public catalogue and playback"),
+            ],
+        )
+        while True:
+            selection = yield page
+            try:
+                if selection == "anonymous":
+                    client.use_anonymous()
+                    self._api = client
+                    ctx.log("NRK TV anonymous mode enabled", "ok")
+                    return
+                if selection != "tv":
+                    return
+                ctx.status("Requesting an NRK TV activation code")
+                challenge = client.start_device_login()
+                confirmed = yield ctx.wait_for(
+                    "Sign in to NRK TV",
+                    [
+                        ("Code", challenge.user_code),
+                        ("Open", challenge.verification_url_complete or challenge.verification_url),
+                        "Approve this device on the activation page; this screen checks automatically.",
+                    ],
+                    poll=lambda challenge=challenge: client.poll_device_login(challenge),
+                    timeout=float(challenge.expires_in),
+                    interval=float(challenge.interval),
+                )
+                if not isinstance(confirmed, api.SessionState) or not confirmed.signed_in:
+                    raise api.NrkError("NRK TV activation completed without a usable session")
+                self._api = client
+                ctx.log(f"NRK TV sign-in completed · {confirmed.account_name or 'account'}", "ok")
+                return
+            except Back:
+                if not ctx.interactive:
+                    return
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+                if not ctx.interactive:
+                    return
 
     def logout(self) -> None:
         client = self._api or self._new_client()
@@ -121,20 +123,16 @@ class NRK(Service):
 
     # --------------------------------------------------------------- top menu
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
+        cursor = 0
         while True:
             status = self._auth_status_quietly()
-            choices: list[Choice] = []
-            if not status.usable:
-                choices.append(Choice("Sign in", "login", detail=status.label))
-            choices.extend(
-                [
-                    Choice("Browse NRK TV", "browse"),
-                    Choice("VOD - open a URL or content ID", "url"),
-                    Choice("Live TV", "live"),
-                    Choice("Search", "search"),
-                    Choice("Settings", "settings"),
-                ]
-            )
+            choices = [
+                Choice("Browse NRK TV", "browse"),
+                Choice("VOD - open a URL or content ID", "url"),
+                Choice("Live TV", "live"),
+                Choice("Search", "search"),
+                Choice("Settings", "settings"),
+            ]
             if status.logged_in:
                 choices.append(Choice("Sign in", "login", detail="Switch account"))
             else:
@@ -142,30 +140,17 @@ class NRK(Service):
             if status.logged_in:
                 choices.append(Choice("Sign out", "logout", detail=status.label))
 
-            action = yield ctx.pick("", choices, scope=SCOPE_ROOT)
+            action = yield ctx.pick("", choices, scope=SCOPE_ROOT, cursor=cursor)
+            cursor = next((index for index, choice in enumerate(choices) if choice.value == action), cursor)
             try:
                 if action == "browse":
                     yield from self.library(ctx)
                 elif action == "url":
-                    while True:
-                        target = yield ctx.text("Enter an NRK TV URL or content ID")
-                        wanted = str(target or "").strip()
-                        if not wanted:
-                            break
-                        yield from self.open_url(ctx, wanted)
-                        if not ctx.interactive:
-                            break
+                    yield from self._url_prompt(ctx)
                 elif action == "live":
                     yield from self.live(ctx)
                 elif action == "search":
-                    while True:
-                        query = yield ctx.text("Search NRK TV")
-                        wanted = str(query or "").strip()
-                        if not wanted:
-                            break
-                        yield from self.search(ctx, wanted)
-                        if not ctx.interactive:
-                            break
+                    yield from self._search_prompt(ctx)
                 elif action == "login":
                     yield from self.login(ctx)
                 elif action == "logout":
@@ -175,9 +160,7 @@ class NRK(Service):
                     yield ctx.settings_request()
             except Back:
                 continue
-            except api.AuthenticationRequired as exc:
-                ctx.error(str(exc))
-            except api.NrkError as exc:
+            except (RuntimeError, OSError) as exc:
                 ctx.error(str(exc))
 
     # -------------------------------------------------------------- catalogue
@@ -192,24 +175,50 @@ class NRK(Service):
         if not sections:
             ctx.warn("NRK TV returned no recommendation sections")
             return
+        page = ctx.pick(
+            "NRK TV · Home",
+            [Choice(item.title, item, detail=item.display_contract) for item in sections],
+        )
+        item_cache: dict[int, list[api.CatalogItem]] = {}
         while True:
-            try:
-                section = yield ctx.pick(
-                    "NRK TV · Home",
-                    [Choice(item.title, item, detail=item.display_contract) for item in sections],
-                )
-            except Back:
-                return
+            section = yield page
+            page.cursor = sections.index(section)
             try:
                 ctx.status(f"Loading {section.title}")
-                items = client.section_items(section)
+                if page.cursor not in item_cache:
+                    item_cache[page.cursor] = client.section_items(section)
+                items = item_cache[page.cursor]
                 yield from self._items_flow(ctx, client, items, section.title)
             except Back:
-                continue
-            except api.NrkError as exc:
+                pass
+            except (RuntimeError, OSError) as exc:
                 ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        yield from self._url_prompt(ctx, target)
+
+    def _url_prompt(self, ctx: FlowContext, target: str | None = None) -> Iterator[Ask]:
+        page = ctx.text("Enter an NRK TV URL or content ID")
+        if target is None:
+            target = yield page
+        while True:
+            wanted = str(target or "").strip()
+            if not wanted:
+                return
+            page.default = wanted
+            try:
+                yield from self._open_target(ctx, wanted)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            target = yield page
+
+    def _open_target(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)
         if parsed is None:
             ctx.error(f"That is not an NRK TV URL or content ID: {target}")
@@ -237,6 +246,28 @@ class NRK(Service):
             ctx.error(str(exc))
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        yield from self._search_prompt(ctx, query)
+
+    def _search_prompt(self, ctx: FlowContext, query: str | None = None) -> Iterator[Ask]:
+        page = ctx.text("Search NRK TV")
+        if query is None:
+            query = yield page
+        while True:
+            wanted = str(query or "").strip()
+            if not wanted:
+                return
+            page.default = wanted
+            try:
+                yield from self._search_results(ctx, wanted)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            query = yield page
+
+    def _search_results(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
         wanted = str(query or "").strip()
         if not wanted:
             return
@@ -266,20 +297,21 @@ class NRK(Service):
         if not unique:
             ctx.warn(f"{heading}: no results")
             return
+        page = ctx.pick(
+            heading,
+            [Choice(item.title, item, detail=item.detail, tags=(item.type_label,)) for item in unique],
+        )
         while True:
-            try:
-                selected = yield ctx.pick(
-                    heading,
-                    [Choice(item.title, item, detail=item.detail, tags=(item.type_label,)) for item in unique],
-                )
-            except Back:
-                return
+            selected = yield page
+            page.cursor = unique.index(selected)
             try:
                 yield from self._dispatch_item(ctx, client, selected)
             except Back:
-                continue
-            except api.NrkError as exc:
+                pass
+            except (RuntimeError, OSError) as exc:
                 ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def _dispatch_item(self, ctx: FlowContext, client: api.NrkApi, item: api.CatalogItem) -> Iterator[Ask]:
         if item.kind == "series":
@@ -305,28 +337,43 @@ class NRK(Service):
                 seasons = [api.Season(season_id, f"Season {season_id}")]
         else:
             seasons = list(series.seasons)
-        if series.latest_episodes:
+        if series.latest_episodes and not season_id:
             seasons.insert(0, api.Season("__latest__", "Latest episodes"))
         if not seasons:
             ctx.warn(f"NRK TV returned no seasons for {series.title}")
             return
+        page = ctx.pick(
+            f"{series.title} · Seasons",
+            [Choice(season.title, season) for season in seasons],
+        )
+        episode_cache: dict[str, list[api.CatalogItem]] = {}
+        selections: dict[str, list[int]] = {}
         while True:
             if len(seasons) == 1:
                 selected_season = seasons[0]
             else:
-                try:
-                    selected_season = yield ctx.pick(
-                        f"{series.title} · Seasons",
-                        [Choice(season.title, season) for season in seasons],
-                    )
-                except Back:
-                    return
-            if selected_season.id == "__latest__":
-                episodes = series.latest_episodes
-            else:
-                ctx.status(f"Loading {series.title} · {selected_season.title}")
-                episodes = client.season(series.id, selected_season.id)
-            yield from self._episodes_flow(ctx, client, series, selected_season, episodes)
+                selected_season = yield page
+                page.cursor = seasons.index(selected_season)
+            try:
+                if selected_season.id not in episode_cache:
+                    if selected_season.id == "__latest__":
+                        episode_cache[selected_season.id] = series.latest_episodes
+                    else:
+                        ctx.status(f"Loading {series.title} · {selected_season.title}")
+                        episode_cache[selected_season.id] = client.season(series.id, selected_season.id)
+                episodes = episode_cache[selected_season.id]
+                yield from self._episodes_flow(
+                    ctx,
+                    client,
+                    series,
+                    selected_season,
+                    episodes,
+                    selected_indexes=selections.setdefault(selected_season.id, []),
+                )
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
             if len(seasons) == 1 or not ctx.interactive:
                 return
 
@@ -337,6 +384,8 @@ class NRK(Service):
         series: api.Series,
         season: api.Season,
         episodes: list[api.CatalogItem],
+        *,
+        selected_indexes: list[int] | None = None,
     ) -> Iterator[Ask]:
         if not episodes:
             ctx.warn(f"NRK TV returned no episodes for {series.title} · {season.title}")
@@ -347,36 +396,35 @@ class NRK(Service):
             if not episode.subtitle:
                 episode.subtitle = series.title
             episode.raw.setdefault("episode_number", index)
+        selected_indexes = selected_indexes if selected_indexes is not None else []
+        page = ctx.pick(
+            f"{series.title} · {season.title}",
+            [Choice(episode.title, episode, detail=episode.detail, tags=("episode",)) for episode in episodes],
+            multi=True,
+            hint="space to tick, enter to confirm",
+            preselected=selected_indexes,
+            cursor=selected_indexes[0] if selected_indexes else 0,
+        )
         while True:
-            try:
-                selected = yield ctx.pick(
-                    f"{series.title} · {season.title}",
-                    [
-                        Choice(
-                            episode.title,
-                            episode,
-                            detail=episode.detail,
-                            tags=("episode",),
-                        )
-                        for episode in episodes
-                    ],
-                    multi=True,
-                    hint="space to tick, enter to confirm",
-                )
-            except Back:
-                return
+            selected = yield page
             chosen = list(selected or [])
             if not chosen:
                 if not ctx.interactive:
                     return
                 continue
+            selected_indexes[:] = [episodes.index(item) for item in chosen]
+            page.preselected = list(selected_indexes)
+            page.cursor = selected_indexes[0]
             try:
                 if len(chosen) > 1:
                     ctx.batch(len(chosen))
                 for item in chosen:
-                    yield from self._emit_item(ctx, client, item, series_title=series.title)
+                    try:
+                        yield from self._emit_item(ctx, client, item, series_title=series.title)
+                    except (RuntimeError, OSError) as exc:
+                        ctx.error(f"{item.title}: {exc}")
             except Back:
-                continue
+                pass
             if not ctx.interactive:
                 return
 
@@ -396,7 +444,7 @@ class NRK(Service):
             ctx.error(f"{item.title}: {exc}")
             return
         title = self._title_for_item(item, series_title=series_title)
-        yield ctx.emit(self._playback(title, source))
+        yield ctx.emit(self._playback(title, source, artwork=item.raw))
 
     def _emit_channel(self, ctx: FlowContext, client: api.NrkApi, channel: api.Channel) -> Iterator[Ask]:
         try:
@@ -415,7 +463,7 @@ class NRK(Service):
             service=self.ID,
             data={"geo_blocked": channel.geo_blocked},
         )
-        yield ctx.emit(self._playback(title, source))
+        yield ctx.emit(self._playback(title, source, artwork=channel.raw))
 
     @staticmethod
     def _title_for_item(item: api.CatalogItem, *, series_title: str = "") -> Title:
@@ -434,7 +482,13 @@ class NRK(Service):
             service="nrk",
         )
 
-    def _playback(self, title: Title, source: api.PlaybackSource) -> Playback:
+    def _playback(
+        self,
+        title: Title,
+        source: api.PlaybackSource,
+        *,
+        artwork: dict | None = None,
+    ) -> Playback:
         if source.encrypted and source.encryption_scheme not in {"clearkey", "widevine"}:
             raise api.NrkError(f"NRK returned unsupported encryption scheme {source.encryption_scheme}")
         drm = DrmInfo(clear=True)
@@ -460,6 +514,10 @@ class NRK(Service):
             drm=drm,
             keys=list(source.keys),
             note=source.note,
+            chapters=metadata.chapters(source.metadata) if self.fetch_chapters_enabled() and not source.is_live else [],
+            attachments=(
+                metadata.attachments(artwork or {}, source.metadata) if self.fetch_attachments_enabled() else []
+            ),
         )
 
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
@@ -481,29 +539,27 @@ class NRK(Service):
         if not channels:
             ctx.warn("NRK TV returned no live channels")
             return
+        page = ctx.table(
+            f"NRK TV · Live · {len(channels)} channels",
+            ["Channel", "Type", "Availability"],
+            [
+                [channel.title, channel.channel_type, "Norway only" if channel.geo_blocked else "Available"]
+                for channel in channels
+            ],
+            channels,
+        )
         while True:
-            try:
-                selected = yield ctx.table(
-                    f"NRK TV · Live · {len(channels)} channels",
-                    ["Channel", "Type", "Availability"],
-                    [
-                        [
-                            channel.title,
-                            channel.channel_type,
-                            "Norway only" if channel.geo_blocked else "Available",
-                        ]
-                        for channel in channels
-                    ],
-                    channels,
-                )
-            except Back:
-                return
+            selected = yield page
             if selected is None:
                 return
             try:
                 yield from self._emit_channel(ctx, client, selected)
             except Back:
-                continue
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
 
 __all__ = ["NRK", "api"]

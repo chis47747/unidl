@@ -219,10 +219,14 @@ class TF1(Service):
                     title=route["id"],
                 )
             elif kind == "VideoSlug":
-                item = client.video_by_slug(route.get("programSlug") or "", route["id"])
+                item = client.video_by_slug(
+                    route.get("programSlug") or "",
+                    route["id"],
+                    route.get("channel", ""),
+                )
                 yield from self._play_item(ctx, client, item)
             elif kind == "ProgramSlug":
-                program = client.program_by_slug(route["id"])
+                program = client.program_by_slug(route["id"], route.get("channel", ""))
                 yield from self._program(ctx, client, program)
             else:
                 ctx.error(f"Unsupported TF1 route: {kind}")
@@ -244,6 +248,7 @@ class TF1(Service):
         if not hits:
             ctx.warn(f"TF1+ found nothing for {wanted}")
             return
+        cursor = 0
         while True:
             try:
                 hit = yield ctx.pick(
@@ -257,18 +262,19 @@ class TF1(Service):
                         )
                         for item in hits
                     ],
+                    cursor=cursor,
                 )
             except Back:
                 return
             if not isinstance(hit, api.CatalogItem):
                 return
-            try:
-                if hit.kind == "Program":
-                    yield from self._program(ctx, client, hit)
-                else:
-                    yield from self._play_item(ctx, client, hit)
-            except Back:
-                continue
+            cursor = hits.index(hit)
+            if hit.kind == "Program":
+                yield from self._program(ctx, client, hit)
+            else:
+                yield from self._play_item(ctx, client, hit)
+            if not ctx.interactive:
+                return
 
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
         try:
@@ -277,20 +283,22 @@ class TF1(Service):
         except api.Tf1Error as exc:
             ctx.error(str(exc))
             return
+        cursor = 0
         while True:
             try:
                 channel = yield ctx.pick(
                     f"TF1+ Live  ·  {len(channels)}",
                     [Choice(item.label, item, detail=item.id) for item in channels],
+                    cursor=cursor,
                 )
             except Back:
                 return
             if not isinstance(channel, api.CatalogItem):
                 return
-            try:
-                yield from self._play_item(ctx, client, channel)
-            except Back:
-                continue
+            cursor = channels.index(channel)
+            yield from self._play_item(ctx, client, channel)
+            if not ctx.interactive:
+                return
 
     def _program(
         self, ctx: FlowContext, client: api.Tf1Api, program: api.CatalogItem
@@ -301,13 +309,14 @@ class TF1(Service):
             return
         try:
             ctx.status(f"Loading {program.label}")
-            videos = client.program_videos(slug)
+            videos = client.program_videos(slug, program=program)
         except api.Tf1Error as exc:
             ctx.error(str(exc))
             return
         if not videos:
             ctx.warn(f"{program.label}: no replay videos")
             return
+        cursor = 0
         while True:
             try:
                 picked = yield ctx.pick(
@@ -318,20 +327,24 @@ class TF1(Service):
                     ],
                     multi=True,
                     hint="space to tick, enter to confirm",
+                    cursor=cursor,
                 )
             except Back:
                 return
             chosen = list(picked or [])
             if not chosen:
                 return
-            if len(chosen) > 1:
-                ctx.batch(len(chosen))
+            cursor = videos.index(chosen[0])
+            try:
+                if len(chosen) > 1:
+                    ctx.batch(len(chosen))
+            except Back:
+                if not ctx.interactive:
+                    return
+                continue
             for item in chosen:
-                try:
-                    yield from self._play_item(ctx, client, item)
-                except api.Tf1Error as exc:
-                    ctx.error(f"{item.label}: {exc}")
-            if len(videos) == 1:
+                yield from self._play_item(ctx, client, item)
+            if not ctx.interactive:
                 return
 
     def _detail(self, item: api.CatalogItem) -> str:
@@ -359,12 +372,13 @@ class TF1(Service):
             ctx,
             client,
             media_id,
-            title=item.title,
-            series_title=item.program_name,
-            season=item.season,
-            episode=item.episode,
+            title=item.program_name if item.is_movie and item.program_name else item.title,
+            series_title="" if item.is_movie else item.program_name,
+            season=None if item.is_movie else item.season,
+            episode=None if item.is_movie else item.episode,
             year=item.year,
             is_live=item.is_live or item.kind == "Live",
+            item=item,
         )
 
     def _play_media(
@@ -379,6 +393,7 @@ class TF1(Service):
         episode: int | None = None,
         year: str = "",
         is_live: bool = False,
+        item: api.CatalogItem | None = None,
     ) -> Iterator[Ask]:
         try:
             ctx.status(f"Resolving {title or media_id}")
@@ -390,6 +405,10 @@ class TF1(Service):
                 episode=episode,
                 year=year,
                 is_live=is_live,
+                item=item,
+                fetch_chapters=self.fetch_chapters_enabled(),
+                fetch_attachments=self.fetch_attachments_enabled(),
+                prefer_title=bool(item and item.is_movie),
             )
         except api.Tf1Error as exc:
             ctx.error(str(exc))
@@ -410,8 +429,8 @@ class TF1(Service):
             )
         else:
             drm = DrmInfo(clear=True)
-        yield ctx.emit(
-            Playback(
+        try:
+            yield ctx.emit(Playback(
                 title=title_obj,
                 save_name=self.save_name(title_obj),
                 manifest_url=source.manifest,
@@ -420,8 +439,13 @@ class TF1(Service):
                 is_live=source.is_live,
                 note=note,
                 drm=drm,
-            )
-        )
+                chapters=list(source.chapters),
+                attachments=list(source.attachments),
+            ))
+        except Back:
+            # Delivery sends the same Back after success, failure, or dismissal.
+            # Let the immediate caller restore the picker or URL prompt.
+            return
 
     def _title(self, source: api.Source) -> Title:
         if source.is_live:

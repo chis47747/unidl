@@ -9,14 +9,14 @@ from collections.abc import Iterator
 
 from ...core.cdm import CdmError
 from ...core.credentials import CredentialSlot
-from ...core.flow import Ask, Choice, FlowContext
+from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
 from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.secureio import atomic_write_bytes, private_directory
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
 from ...downloader.models import StreamInfo
 from ...downloader.subtitles import SubtitleConversionError, convert_subtitle_file
-from . import api
+from . import api, metadata
 
 _PLAYREADY_SOAP_ACTION = (
     '"http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense"'
@@ -59,13 +59,20 @@ class ITV(Service):
 
     def login(self, ctx: FlowContext) -> Iterator[Ask]:
         cred = self.ctx.credential("default")
-        username = cred.username or str(
-            (yield ctx.text("ITVX email", placeholder="name@example.com")) or ""
-        ).strip()
-        if not username:
-            ctx.warn("no email entered")
-            return
-        password = cred.password or str((yield ctx.text("ITVX password", password=True)) or "")
+        email_page = ctx.text("ITVX email", placeholder="name@example.com")
+        while True:
+            username = cred.username or str((yield email_page) or "").strip()
+            if not username:
+                ctx.warn("no email entered")
+                return
+            email_page.default = username
+            try:
+                password = cred.password or str((yield ctx.text("ITVX password", password=True)) or "")
+            except Back:
+                if cred.username or not ctx.interactive:
+                    raise
+                continue
+            break
         if not password:
             ctx.warn("no password entered")
             return
@@ -109,7 +116,73 @@ class ITV(Service):
         return client
 
     # ---------------------------------------------------------------- browsing
+    def home(self, ctx: FlowContext) -> Iterator[Ask]:
+        cursor = 0
+        while True:
+            status = self._auth_status_quietly()
+            choices = []
+            if not status.usable:
+                choices.append(Choice("Sign in", "login", detail=status.label))
+            choices.extend([
+                Choice("VOD - open a URL or content ID", "url"),
+                Choice("Live TV", "live"),
+                Choice("Search", "search"),
+                Choice("Settings", "settings"),
+            ])
+            if status.usable:
+                choices.append(Choice("Sign in again" if status.logged_in else "Sign in", "login", detail=status.label))
+            if status.logged_in or status.logout_available:
+                choices.append(Choice("Sign out", "logout", detail=status.label))
+            if self.saved_login() is not None:
+                choices.append(Choice("Delete saved credentials", "forget"))
+            action = yield ctx.pick("", choices, cursor=cursor, scope=SCOPE_ROOT)
+            cursor = next((index for index, choice in enumerate(choices) if choice.value == action), cursor)
+            try:
+                if action == "url":
+                    yield from self._url_prompt(ctx)
+                elif action == "search":
+                    yield from self._search_prompt(ctx)
+                elif action == "live":
+                    yield from self.live(ctx)
+                elif action == "settings":
+                    yield ctx.settings_request()
+                elif action == "login":
+                    yield from self.begin_login(ctx)
+                elif action == "logout":
+                    self.logout()
+                    ctx.log("ITVX signed out", "ok")
+                elif action == "forget":
+                    yield from self.forget_login(ctx)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        yield from self._url_prompt(ctx, target)
+
+    def _url_prompt(self, ctx: FlowContext, target: str | None = None) -> Iterator[Ask]:
+        page = ctx.text("Enter URL or content ID")
+        if target is None:
+            target = yield page
+        while True:
+            wanted = str(target or "").strip()
+            if not wanted:
+                return
+            page.default = wanted
+            try:
+                yield from self._open_target(ctx, wanted)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            target = yield page
+
+    def _open_target(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)
         if parsed is None:
             ctx.error(
@@ -128,12 +201,35 @@ class ITV(Service):
                     client.show(
                         parsed.value,
                         shortform_category=parsed.shortform_category,
+                        with_images=self.fetch_attachments_enabled(),
                     ),
                 )
         except api.ItvError as exc:
             ctx.error(str(exc))
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        yield from self._search_prompt(ctx, query)
+
+    def _search_prompt(self, ctx: FlowContext, query: str | None = None) -> Iterator[Ask]:
+        page = ctx.text("Search")
+        if query is None:
+            query = yield page
+        while True:
+            wanted = str(query or "").strip()
+            if not wanted:
+                return
+            page.default = wanted
+            try:
+                yield from self._search_results(ctx, wanted)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            query = yield page
+
+    def _search_results(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
         try:
             client = self.client(ctx)
             ctx.status(f"Searching ITVX for {query}")
@@ -144,7 +240,7 @@ class ITV(Service):
         if not hits:
             ctx.warn(f"ITVX found nothing for {query}")
             return
-        chosen = yield ctx.pick(
+        page = ctx.pick(
             f"ITVX  ·  {query}",
             [
                 Choice(
@@ -164,45 +260,91 @@ class ITV(Service):
                 for hit in hits
             ],
         )
-        if chosen is None:
-            return
-        try:
-            if chosen.route == "live":
-                yield from self._emit_live(ctx, client, client.channel(chosen.channel_id))
-            else:
-                yield from self._show(ctx, client, client.show(chosen.content_id))
-        except api.ItvError as exc:
-            ctx.error(str(exc))
+        shows: dict[tuple[str, bool], api.Show] = {}
+        channels: dict[str, api.Channel] = {}
+        while True:
+            chosen = yield page
+            if chosen is None:
+                return
+            page.cursor = hits.index(chosen)
+            try:
+                if chosen.route == "live":
+                    if chosen.channel_id not in channels:
+                        channels[chosen.channel_id] = client.channel(chosen.channel_id)
+                    yield from self._emit_live(ctx, client, channels[chosen.channel_id])
+                else:
+                    key = (chosen.content_id, self.fetch_attachments_enabled())
+                    if key not in shows:
+                        shows[key] = client.show(key[0], with_images=key[1])
+                    yield from self._show(ctx, client, shows[key])
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def _show(self, ctx: FlowContext, client: api.ItvApi, show: api.Show) -> Iterator[Ask]:
         if show.films:
-            picked = show.films if len(show.films) == 1 else (
-                yield ctx.pick(
-                    show.title,
-                    [Choice(item.label, item, detail=item.synopsis[:90]) for item in show.films],
-                    multi=True,
-                )
-            )
-            yield from self._emit_many(ctx, client, list(picked or []))
+            if len(show.films) == 1:
+                yield from self._emit(ctx, client, show.films[0])
+            else:
+                yield from self._items_page(ctx, client, self._item_picker(ctx, show.title, show.films))
             return
         if not show.seasons:
             ctx.warn(f"ITVX returned no episodes for {show.title}")
             return
-        season = show.seasons[0] if len(show.seasons) == 1 else (
-            yield ctx.pick(
-                f"{show.title}  ·  series",
-                [Choice(entry.label, entry) for entry in show.seasons],
-            )
-        )
-        if season is None:
+        if len(show.seasons) == 1:
+            season = show.seasons[0]
+            page = self._item_picker(ctx, f"{show.title}  ·  {season.label}", season.episodes)
+            yield from self._items_page(ctx, client, page)
             return
-        picked = yield ctx.pick(
-            f"{show.title}  ·  {season.label}",
-            [Choice(item.label, item, detail=item.synopsis[:90]) for item in season.episodes],
+        page = ctx.pick(
+            f"{show.title}  ·  series",
+            [Choice(entry.label, entry) for entry in show.seasons],
+        )
+        episode_pages: dict[int, Pick] = {}
+        while True:
+            season = yield page
+            if season is None:
+                return
+            page.cursor = show.seasons.index(season)
+            if page.cursor not in episode_pages:
+                episode_pages[page.cursor] = self._item_picker(ctx, f"{show.title}  ·  {season.label}", season.episodes)
+            try:
+                yield from self._items_page(ctx, client, episode_pages[page.cursor])
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+
+    def _item_picker(self, ctx: FlowContext, title: str, items: list[api.Episode]) -> Pick:
+        return ctx.pick(
+            title,
+            [Choice(item.label, item, detail=item.synopsis[:90]) for item in items],
             multi=True,
             hint="space to tick, enter to confirm",
         )
-        yield from self._emit_many(ctx, client, list(picked or []))
+
+    def _items_page(
+        self, ctx: FlowContext, client: api.ItvApi, page: Pick,
+    ) -> Iterator[Ask]:
+        while True:
+            picked = yield page
+            if not picked:
+                return
+            page.preselected = [index for index, choice in enumerate(page.choices) if choice.value in picked]
+            page.cursor = page.preselected[0]
+            try:
+                yield from self._emit_many(ctx, client, list(picked))
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def _emit_many(self, ctx: FlowContext, client: api.ItvApi, items: list[api.Episode]) -> Iterator[Ask]:
         if len(items) > 1:
@@ -219,14 +361,24 @@ class ITV(Service):
         except api.ItvError as exc:
             ctx.error(str(exc))
             return
-        chosen = yield ctx.table(
+        page = ctx.table(
             f"ITVX  ·  {len(channels)} live channels",
             ["Channel", "Now", "Next"],
             [(channel.name, channel.now, channel.next) for channel in channels],
             channels,
         )
-        if chosen is not None:
-            yield from self._emit_live(ctx, client, chosen)
+        while True:
+            chosen = yield page
+            if chosen is None:
+                return
+            try:
+                yield from self._emit_live(ctx, client, chosen)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def _emit_live(self, ctx: FlowContext, client: api.ItvApi, channel: api.Channel) -> Iterator[Ask]:
         try:
@@ -245,30 +397,54 @@ class ITV(Service):
             synopsis=channel.synopsis or None,
             service=self.ID,
         )
+        page = None
         if source.start_again:
-            mode = yield ctx.pick(
+            page = ctx.pick(
                 f"{channel.name}  ·  {channel.now or 'Live'}",
                 [Choice("Watch live", "live"), Choice("Restart current programme", "restart")],
             )
-            if mode is None:
-                return
-            restart = mode == "restart"
+        refresh_source = False
+        while True:
+            if page is not None:
+                mode = yield page
+                if mode is None:
+                    return
+                restart = mode == "restart"
+                page.cursor = int(restart)
+                if refresh_source:
+                    try:
+                        source = client.live_source(channel, self.drm_system())
+                    except api.ItvError as exc:
+                        ctx.error(str(exc))
+                        if not ctx.interactive:
+                            return
+                        continue
+                if restart and not source.start_again:
+                    ctx.warn("ITVX no longer offers restart for this programme")
+                    if not ctx.interactive:
+                        return
+                    continue
+            selected_source = source
             if restart:
-                source = api.Source(
-                    manifest=source.start_again,
-                    license_url=source.license_url,
-                    encrypted=source.encrypted,
-                    protocol=source.protocol,
-                    subtitles=source.subtitles,
+                selected_source = api.Source(
+                    manifest=source.start_again, license_url=source.license_url, encrypted=source.encrypted,
+                    protocol=source.protocol, subtitles=source.subtitles,
                 )
-        yield ctx.emit(
-            self._playback(
-                title,
-                source,
-                is_live=True,
-                restart=restart,
-            )
-        )
+            playback = self._playback(title, selected_source, is_live=True, restart=restart)
+            if self.fetch_attachments_enabled():
+                playback.attachments = metadata.attachments((channel.logo_url, "Channel logo", "image"))
+            if page is None:
+                yield ctx.emit(playback)
+                return
+            try:
+                yield ctx.emit(playback)
+            except Back:
+                pass
+            except (RuntimeError, OSError) as exc:
+                ctx.error(str(exc))
+            refresh_source = True
+            if not ctx.interactive:
+                return
 
     # --------------------------------------------------------------- playback
     def _emit(self, ctx: FlowContext, client: api.ItvApi, item: api.Episode) -> Iterator[Ask]:
@@ -294,7 +470,14 @@ class ITV(Service):
             synopsis=item.synopsis or None,
             service=self.ID,
         )
-        yield ctx.emit(self._playback(title, source))
+        playback = self._playback(title, source)
+        if self.fetch_attachments_enabled():
+            playback.attachments = metadata.attachments(
+                (item.image_url, "Title artwork", "artwork"),
+                (item.programme_image_url, "Programme artwork", "artwork"),
+                (item.poster_url, "Poster", "poster"),
+            )
+        yield ctx.emit(playback)
 
     def augment_tracks(self, playback: Playback, tracks, log):
         del tracks, log

@@ -1,5 +1,4 @@
-"""NRK TV Android TV API client.
-"""
+"""NRK TV Android TV API client."""
 
 from __future__ import annotations
 
@@ -228,6 +227,7 @@ class PlaybackSource:
     license_url: str = ""
     keys: list[str] = field(default_factory=list)
     subtitles: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def note(self) -> str:
@@ -860,6 +860,7 @@ class NrkApi:
                 for subtitle in manifest.get("playable", {}).get("subtitles", [])
                 if isinstance(subtitle, dict) and clean_text(subtitle.get("webVtt"))
             ],
+            metadata=metadata,
         )
         if encrypted:
             self._enrich_encrypted_source(source)

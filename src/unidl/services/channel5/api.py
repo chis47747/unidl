@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -99,6 +100,7 @@ class Episode:
     synopsis: str = ""
     genre: str = ""
     duration: int = 0
+    artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def film(self) -> bool:
@@ -138,6 +140,7 @@ class Channel:
     slug: str
     now: str = ""
     next: str = ""
+    artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,7 @@ class Channel5Api:
                     slug=str(raw.get("f_name") or _slug(name)),
                     now=now,
                     next=nxt,
+                    artwork=raw,
                 )
             )
         return channels
@@ -424,6 +428,7 @@ class Channel5Api:
             synopsis=str(raw.get("m_desc") or raw.get("s_desc") or ""),
             genre=str(raw.get("genre") or ""),
             duration=round(duration_ms / 1000) if duration_ms else 0,
+            artwork=raw,
         )
 
     # -------------------------------------------------------------- licensing
@@ -454,17 +459,21 @@ class Channel5Api:
 def _int(value: Any) -> int | None:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _credits_chapters(asset: dict[str, Any], *, duration: int) -> tuple[Chapter, ...]:
     """Build the optional end-credits marker from Cassie's playback metadata."""
-    raw_credits_duration = asset.get("creditsduration")
-    if isinstance(raw_credits_duration, bool):
+    raw_duration = asset.get("duration")
+    raw_credits = asset.get("creditsduration")
+    if isinstance(raw_duration, bool) or isinstance(raw_credits, bool):
         return ()
-    credits_duration = _int(raw_credits_duration)
-    if credits_duration is None or credits_duration <= 0 or duration <= credits_duration:
+    try:
+        credits_duration = float(raw_credits)
+    except (TypeError, ValueError, OverflowError):
+        return ()
+    if not math.isfinite(credits_duration) or not 0 < credits_duration < duration:
         return ()
     try:
         return (

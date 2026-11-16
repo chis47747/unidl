@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from ...core.flow import Ask, Choice, FlowContext
+from ...core.attachments import Attachment
+from ...core.flow import Ask, Back, Choice, FlowContext
 from ...core.playback import DrmInfo, Playback
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
@@ -132,20 +133,28 @@ class U(Service):
             ctx.warn(f"{heading}: no episodes returned")
             return
         ctx.log(heading, "ok")
-        picked = yield ctx.pick(
-            heading,
-            [
-                Choice(item.label, item, detail=item.synopsis[:90])
-                for item in episodes
-            ],
-            multi=True,
-            hint="space to tick, enter to confirm",
-        )
-        selected_episodes = list(picked or [])
-        if len(selected_episodes) > 1:
-            ctx.batch(len(selected_episodes))
-        for episode in selected_episodes:
-            yield from self._emit(ctx, client, episode)
+        while True:
+            picked = yield ctx.pick(
+                heading,
+                [
+                    Choice(item.label, item, detail=item.synopsis[:90])
+                    for item in episodes
+                ],
+                multi=True,
+                hint="space to tick, enter to confirm",
+            )
+            selected_episodes = list(picked or [])
+            if not selected_episodes:
+                return
+            if len(selected_episodes) > 1:
+                try:
+                    ctx.batch(len(selected_episodes))
+                except Back:
+                    continue
+            for episode in selected_episodes:
+                yield from self._emit(ctx, client, episode)
+            if not ctx.interactive:
+                return
 
     # --------------------------------------------------------------- playback
     def _emit(self, ctx: FlowContext, client: api.UApi, item: api.Episode) -> Iterator[Ask]:
@@ -176,13 +185,29 @@ class U(Service):
             manifest_url=source.manifest,
             proxy=self.ctx.proxy,
             note=source.line(),
+            chapters=list(source.chapters) if self.fetch_chapters_enabled() else [],
+            attachments=(
+                [
+                    Attachment(
+                        url,
+                        name="Poster" if index == 0 else "Artwork",
+                        kind="poster" if index == 0 else "artwork",
+                    )
+                    for index, url in enumerate(source.attachment_urls)
+                ]
+                if self.fetch_attachments_enabled()
+                else []
+            ),
         )
         playback.drm = (
             DrmInfo(system="widevine", license_url=source.license_url)
             if source.encrypted
             else DrmInfo(clear=True)
         )
-        yield ctx.emit(playback)
+        try:
+            yield ctx.emit(playback)
+        except Back:
+            return
 
     # -------------------------------------------------------------- licensing
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:

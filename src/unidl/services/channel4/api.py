@@ -17,6 +17,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
 from ...core.chapters import Chapter, normalize_chapters
+from . import metadata
 
 WWW = "https://www.channel4.com"
 API = "https://api.channel4.com/online/v1"
@@ -159,6 +160,7 @@ class Episode:
     film: bool = False
     chapters: tuple[Chapter, ...] = ()
     duration: float | None = None
+    artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def url(self) -> str:
@@ -199,6 +201,7 @@ class Channel:
     next: str = ""
     synopsis: str = ""
     restart: bool = False
+    artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def url(self) -> str:
@@ -217,6 +220,7 @@ class Source:
     restart: bool = False
     chapters: tuple[Chapter, ...] = ()
     duration: float | None = None
+    artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     def line(self) -> str:
         bits = [self.protocol, "Widevine"]
@@ -366,7 +370,7 @@ class Channel4Api:
             for raw in _list(brand.get("episodes"))
             if isinstance(raw, dict)
             and (not episode_id or str(raw.get("programmeId")) == episode_id)
-            and (item := self._episode(raw, slug, str(brand["title"]), film)) is not None
+            and (item := self._episode(raw, slug, str(brand["title"]), film, brand=brand)) is not None
         ]
         if episode_id and not episodes:
             raise Channel4Error("Channel 4 could not find the requested episode")
@@ -382,7 +386,9 @@ class Channel4Api:
         return Show(slug, str(brand["title"]), seasons=seasons)
 
     @staticmethod
-    def _episode(raw: dict[str, Any], slug: str, title: str, film: bool) -> Episode | None:
+    def _episode(
+        raw: dict[str, Any], slug: str, title: str, film: bool, *, brand: dict[str, Any] | None = None,
+    ) -> Episode | None:
         asset = _dict(raw.get("assetInfo"))
         stream = _dict(asset.get("streaming")) or _dict(asset.get("download"))
         item_id = str(raw.get("programmeId") or "")
@@ -401,6 +407,7 @@ class Channel4Api:
             film=film,
             chapters=extract_chapters(raw, duration=stream.get("duration")),
             duration=_number(stream.get("duration")),
+            artwork={"episode": metadata.image_fields(raw), "brand": metadata.image_fields(brand)},
         )
 
     # --------------------------------------------------------------- VOD source
@@ -433,6 +440,7 @@ class Channel4Api:
             subtitle=subtitle,
             chapters=chapters,
             duration=duration,
+            artwork={"episode": metadata.image_fields(data)},
         )
 
     # ------------------------------------------------------------------- live
@@ -479,6 +487,10 @@ class Channel4Api:
                     next=str(next_item.get("title") or next_item.get("episodeTitle") or ""),
                     synopsis=str(slot.get("summary") or item.get("summary") or ""),
                     restart=str(slot.get("startAgainRights") or "").lower() == "true",
+                    artwork={
+                        "episode": metadata.image_fields(item),
+                        "brand": metadata.image_fields(item.get("brand")),
+                    },
                 )
             )
         return channels
@@ -516,6 +528,7 @@ class Channel4Api:
             manifest,
             service_certificate=certificate,
             restart=restart,
+            artwork={"episode": metadata.image_fields(slot), "channel": metadata.image_fields(info)},
         )
 
     # ---------------------------------------------------------------- licence

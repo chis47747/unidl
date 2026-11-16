@@ -983,6 +983,7 @@ class NativeDownloaderBackend:
             mux=policy.mux,
             mux_format=mux_format,
             muxer=muxer,
+            subtitle_output=policy.subtitle_output,
             default_audio=policy.default_audio,
             default_subtitle=policy.default_subtitle,
             mux_imports=list(policy.mux_imports),

@@ -19,6 +19,9 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
+
 APP_VERSION = "11.41.2"
 APP_PACKAGE = "fr.tf1.mytf1"
 GRAPHQL_STREAM = "smarttv"
@@ -173,6 +176,7 @@ class CatalogItem:
     episode: int | None = None
     year: str = ""
     is_live: bool = False
+    is_movie: bool = False
     detail: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
@@ -196,6 +200,8 @@ class Source:
     license_headers: dict[str, str] = field(default_factory=dict)
     format: str = ""
     note: str = ""
+    chapters: tuple[Chapter, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
 
 
 @dataclass
@@ -225,6 +231,85 @@ def _text(value: Any, default: str = "") -> str:
     return str(value if value is not None else default).strip()
 
 
+def _chapters(media: dict[str, Any]) -> tuple[Chapter, ...]:
+    # MediaInfo's in/out markers are in milliseconds, unlike media.duration.
+    # mediametrie.chapters is an analytics classification, not a timeline.
+    markers = media.get("markers")
+    if not isinstance(markers, dict):
+        return ()
+    chapters: list[Chapter] = []
+    for suffix, title, kind in (
+        ("Resume", "Recap", "recap"),
+        ("GD", "Intro", "intro"),
+        ("GF", "Credits", "credits"),
+    ):
+        start = markers.get(f"in{suffix}")
+        end = markers.get(f"out{suffix}")
+        if start is None:
+            continue
+        try:
+            chapters.append(Chapter(start_ms=start, title=title, end_ms=end, kind=kind))
+        except ValueError:
+            continue
+    return tuple(sorted(chapters, key=lambda chapter: chapter.start_ms))
+
+
+def _artwork_url(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    url = value.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme in {"https", "http"} and parsed.hostname:
+            return url
+    except ValueError:
+        pass
+    return ""
+
+
+def _catalogue_thumbnail(item: CatalogItem | None) -> str:
+    if item is None:
+        return ""
+    decoration = item.raw.get("decoration")
+    images = decoration.get("images") if isinstance(decoration, dict) else None
+    if not isinstance(images, list):
+        return ""
+    best_url = ""
+    best_area = -1
+    for image in images:
+        # PREVIEW is a short video in GraphQL, not the MediaInfo still.
+        if not isinstance(image, dict) or image.get("type") not in {
+            "THUMBNAIL", "THUMBNAIL_LARGE",
+        }:
+            continue
+        sources = image.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            url = _artwork_url(source.get("url"))
+            area = (_as_int(source.get("width")) or 0) * (_as_int(source.get("height")) or 0)
+            if url and area > best_area:
+                best_url, best_area = url, area
+    return best_url
+
+
+def _attachments(
+    media: dict[str, Any], item: CatalogItem | None
+) -> tuple[Attachment, ...]:
+    preview = _artwork_url(media.get("preview")) or _catalogue_thumbnail(item)
+    square = _artwork_url(media.get("sqPreview"))
+    attachments: list[Attachment] = []
+    if preview:
+        attachments.append(Attachment(preview, name="Cover", kind="poster"))
+    if square and square != preview:
+        attachments.append(Attachment(square, name="Square artwork", kind="artwork"))
+    return tuple(attachments)
+
+
 def _jwt_payload(token: str | None) -> dict[str, Any]:
     try:
         part = str(token or "").split(".")[1]
@@ -246,6 +331,49 @@ def _jwt_exp(token: str | None) -> int | None:
 def _normalize_year(value: Any) -> str:
     year = _text(value)
     return year if re.fullmatch(r"(?:18|19|20|21)\d{2}", year) else ""
+
+
+def _is_movie_program(value: Any) -> bool:
+    """Recognise TF1's movie category without treating season 0 as E0."""
+    raw = value.raw if isinstance(value, CatalogItem) else value
+    if not isinstance(raw, dict):
+        return False
+    categories = raw.get("categories") or []
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        values = (
+            category.get("id"),
+            category.get("slug"),
+            category.get("type"),
+            category.get("label"),
+        )
+        if any(
+            re.search(r"(?:movie|film|cin[eé]ma)", str(item or ""), re.I)
+            for item in values
+        ):
+            return True
+    tags = raw.get("tags") or []
+    for tag in tags:
+        if not isinstance(tag, dict):
+            continue
+        if any(
+            re.search(r"(?:^|[-_ ])(?:film|movie|cin[eé]ma)(?:$|[-_ ])", str(item or ""), re.I)
+            for item in (tag.get("slug"), tag.get("label"))
+        ):
+            return True
+    return False
+
+
+def _channel_slug(value: Any) -> str:
+    raw = value.raw if isinstance(value, CatalogItem) else value
+    if not isinstance(raw, dict):
+        return ""
+    for key in ("mainChannel", "initialChannel", "broadcastChannel"):
+        channel = raw.get(key)
+        if isinstance(channel, dict) and channel.get("slug"):
+            return str(channel["slug"])
+    return ""
 
 
 def _season_number_from_label(label: str) -> int | None:
@@ -302,6 +430,8 @@ def normalize_video_item(
     program_name: str = "",
     season_label: str = "",
     fallback_episode: int | None = None,
+    program_year: str = "",
+    program_is_movie: bool | None = None,
 ) -> CatalogItem:
     decoration = video.get("decoration") if isinstance(video.get("decoration"), dict) else {}
     program = video.get("program") if isinstance(video.get("program"), dict) else {}
@@ -318,8 +448,19 @@ def normalize_video_item(
         )
         if episode is None:
             episode = fallback_episode
-    year = _normalize_year(
-        program.get("releaseYear") or video.get("releaseYear") or video.get("year")
+    is_movie = (
+        _is_movie_program(video)
+        or _is_movie_program(program)
+        if program_is_movie is None
+        else bool(program_is_movie)
+    )
+    year = (
+        _normalize_year(
+            program.get("releaseYear")
+            or video.get("releaseYear")
+            or video.get("year")
+        )
+        or _normalize_year(program_year)
     )
     return CatalogItem(
         id=str(video.get("id") or ""),
@@ -338,6 +479,7 @@ def normalize_video_item(
         episode=episode,
         year=year,
         is_live=str(video.get("type") or "").lower() == "live",
+        is_movie=is_movie,
         detail=_text(decoration.get("description") or video.get("description")),
         raw=dict(video),
     )
@@ -689,8 +831,13 @@ class Tf1Api:
         return items
 
     def program_videos(
-        self, program_slug: str, video_type: str = "REPLAY"
+        self,
+        program_slug: str,
+        video_type: str = "REPLAY",
+        *,
+        program: CatalogItem | None = None,
     ) -> list[CatalogItem]:
+        caller_program = program
         data = self._graphql(
             GQL_PROGRAM_VIDEOS,
             {
@@ -703,6 +850,20 @@ class Tf1Api:
         )
         program = data.get("programBySlug") or {}
         program_name = _item_title(program) if isinstance(program, dict) else program_slug
+        metadata_year = caller_program.year if isinstance(caller_program, CatalogItem) else ""
+        metadata_movie = caller_program.is_movie if isinstance(caller_program, CatalogItem) else False
+        # ``program`` above is the GraphQL response; keep the caller's richer
+        # page metadata separately so a movie's original year survives here.
+        if isinstance(caller_program, CatalogItem):
+            metadata_year = caller_program.year
+            metadata_movie = caller_program.is_movie
+            if not metadata_year or not metadata_movie:
+                page_year, page_movie = self._program_page_metadata(
+                    program_slug,
+                    _channel_slug(caller_program),
+                )
+                metadata_year = metadata_year or page_year
+                metadata_movie = metadata_movie or page_movie
         videos = []
         if isinstance(program, dict):
             videos = (program.get("videos") or {}).get("items") or program.get("items") or []
@@ -716,11 +877,15 @@ class Tf1Api:
                     program_slug=program_slug,
                     program_name=program_name,
                     fallback_episode=index + 1,
+                    program_year=metadata_year,
+                    program_is_movie=(
+                        metadata_movie if isinstance(caller_program, CatalogItem) else None
+                    ),
                 )
             )
         return items
 
-    def program_by_slug(self, slug: str) -> CatalogItem:
+    def program_by_slug(self, slug: str, channel: str = "") -> CatalogItem:
         data = self._graphql(GQL_PROGRAMS, {"slug": slug})
         # fallbacks: some builds use programBySlug only via videos query
         program = data.get("programBySlug") or data.get("program") or {}
@@ -739,6 +904,12 @@ class Tf1Api:
             program = pdata.get("programBySlug") or {}
         if not isinstance(program, dict) or not (program.get("id") or program.get("slug") or slug):
             raise Tf1Error(f"Program not found: {slug}", data)
+        page_year, page_movie = self._program_page_metadata(
+            slug,
+            channel or _channel_slug(program),
+        )
+        program_year = _normalize_year(program.get("releaseYear")) or page_year
+        program_movie = _is_movie_program(program) or page_movie
         return CatalogItem(
             id=str(program.get("id") or ""),
             title=_item_title(program) or slug,
@@ -746,11 +917,14 @@ class Tf1Api:
             slug=str(program.get("slug") or slug),
             program_slug=str(program.get("slug") or slug),
             program_name=_item_title(program) or slug,
-            year=_normalize_year(program.get("releaseYear")),
+            year=program_year,
+            is_movie=program_movie,
             raw=dict(program),
         )
 
-    def video_by_slug(self, program_slug: str, video_slug: str) -> CatalogItem:
+    def video_by_slug(
+        self, program_slug: str, video_slug: str, channel: str = ""
+    ) -> CatalogItem:
         data = self._graphql(
             GQL_VIDEO_BY_SLUG,
             {"programSlug": program_slug, "videoSlug": video_slug},
@@ -762,10 +936,16 @@ class Tf1Api:
                 data,
             )
         program = video.get("program") if isinstance(video.get("program"), dict) else {}
+        page_year, page_movie = self._program_page_metadata(
+            program_slug or str(program.get("slug") or ""),
+            channel or _channel_slug(video) or _channel_slug(program),
+        )
         return normalize_video_item(
             video,
             program_slug=program_slug or str(program.get("slug") or ""),
             program_name=str(program.get("name") or ""),
+            program_year=page_year,
+            program_is_movie=page_movie or _is_movie_program(video) or _is_movie_program(program),
         )
 
     def live_channels(self) -> list[CatalogItem]:
@@ -812,6 +992,37 @@ class Tf1Api:
             slug=normalized,
             is_live=True,
         )
+
+    def _program_page_metadata(self, slug: str, channel: str = "") -> tuple[str, bool]:
+        """Read release year/category omitted by the smart-TV GraphQL fields."""
+        channel = str(channel or "tf1").strip("/") or "tf1"
+        slug = str(slug or "").strip("/")
+        if not slug:
+            return "", False
+        try:
+            response = self._request(
+                "GET",
+                urljoin(TOKEN_BASE + "/", f"{channel}/{slug}"),
+                headers={"User-Agent": CLIENT_USER_AGENT, "Accept": "text/html"},
+            )
+        except Tf1Error:
+            return "", False
+        if response.status_code >= 400:
+            return "", False
+        html = response.text or ""
+        movie = bool(re.search(r"\bFilm\s*\(\s*\d{4}\s*\)", html, re.I))
+        year_match = re.search(
+            r'"datePublished"\s*:\s*"((?:18|19|20|21)\d{2})"',
+            html,
+            re.I,
+        )
+        if year_match is None:
+            year_match = re.search(
+                r"<title>[^<]*?\bFilm\s*\(\s*((?:18|19|20|21)\d{2})\s*\)",
+                html,
+                re.I,
+            )
+        return _normalize_year(year_match.group(1)) if year_match else "", movie
 
     # ---------------------------------------------------------------- playback
 
@@ -898,11 +1109,15 @@ class Tf1Api:
         episode: int | None = None,
         year: str = "",
         is_live: bool = False,
+        item: CatalogItem | None = None,
+        fetch_chapters: bool = True,
+        fetch_attachments: bool = True,
+        prefer_title: bool = False,
     ) -> Source:
         media_info = self.get_mediainfo(media_id)
         media = media_info.get("media") or {}
         delivery = media_info.get("delivery") or {}
-        resolved_title = str(media.get("title") or title or media_id)
+        resolved_title = str((title if prefer_title else media.get("title")) or title or media_id)
         manifest_url = str(delivery.get("url") or "")
         if not manifest_url:
             raise Tf1Error("Playback response has no delivery.url", media_info)
@@ -928,6 +1143,8 @@ class Tf1Api:
             license_headers=license_headers,
             format=str(delivery.get("format") or ""),
             note="widevine" if encrypted else "clear",
+            chapters=_chapters(media) if fetch_chapters and not live else (),
+            attachments=_attachments(media, item) if fetch_attachments else (),
         )
 
     def widevine_license(

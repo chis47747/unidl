@@ -123,34 +123,44 @@ class Mewatch(Service):
             (index for index, profile in enumerate(profiles) if str(profile.get("id") or "") == current_id),
             0,
         )
-        selected = yield ctx.pick(
-            "Choose a mewatch profile",
-            [
-                Choice(
-                    str(profile.get("name") or "Profile"),
-                    profile,
-                    detail="PIN required" if profile.get("isRestricted") else "",
-                )
-                for profile in profiles
-            ],
-            cursor=current_index,
-        )
-        if not isinstance(selected, dict) or not selected.get("id"):
-            return
-        if str(selected.get("id")) == current_id:
-            return
-        pin = ""
-        if selected.get("isRestricted"):
-            answer = yield ctx.text(
-                f"PIN for {selected.get('name') or 'profile'}",
-                placeholder="Profile PIN",
-                password=True,
+        choices = [
+            Choice(
+                str(profile.get("name") or "Profile"),
+                profile,
+                detail="PIN required" if profile.get("isRestricted") else "",
             )
-            pin = str(answer or "")
-            if not pin:
-                raise api.MewatchError("A PIN is required for that mewatch profile")
-        ctx.status(f"Opening profile · {selected.get('name') or 'mewatch'}")
-        client.select_profile(str(selected["id"]), pin)
+            for profile in profiles
+        ]
+        picker = ctx.pick("Choose a mewatch profile", choices, cursor=current_index)
+        while True:
+            selected = yield picker
+            if not isinstance(selected, dict) or not selected.get("id") or str(selected["id"]) == current_id:
+                return
+            pin = ""
+            if selected.get("isRestricted"):
+                try:
+                    answer = yield ctx.text(
+                        f"PIN for {selected.get('name') or 'profile'}",
+                        placeholder="Profile PIN",
+                        password=True,
+                    )
+                except Back:
+                    continue
+                pin = str(answer or "")
+                if not pin:
+                    ctx.warn("A PIN is required for that mewatch profile")
+                    if not ctx.interactive:
+                        return
+                    continue
+            ctx.status(f"Opening profile · {selected.get('name') or 'mewatch'}")
+            try:
+                client.select_profile(str(selected["id"]), pin)
+            except api.MewatchError as exc:
+                if not ctx.interactive:
+                    raise
+                ctx.error(str(exc))
+                continue
+            return
 
     def logout(self) -> None:
         state = api.Session.from_cache(self.ctx.tokens.read(self.TOKEN_FILE))
@@ -219,15 +229,13 @@ class Mewatch(Service):
             ctx.warn(f"mewatch found nothing for {wanted!r}")
             return
 
+        picker = ctx.pick(
+            f"mewatch  ·  {wanted}  ·  {len(results)} results",
+            [Choice(item.label, item, detail=item.detail, tags=(item.type_label,)) for item in results],
+        )
         while True:
             try:
-                selected = yield ctx.pick(
-                    f"mewatch  ·  {wanted}  ·  {len(results)} results",
-                    [
-                        Choice(item.label, item, detail=item.detail, tags=(item.type_label,))
-                        for item in results
-                    ],
-                )
+                selected = yield picker
             except Back:
                 return
             if selected is None:
@@ -235,7 +243,9 @@ class Mewatch(Service):
             try:
                 yield from self._open_item(ctx, client, selected)
             except Back:
-                continue
+                pass
+            if not ctx.interactive:
+                return
 
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
         try:
@@ -248,12 +258,20 @@ class Mewatch(Service):
         if not channels:
             ctx.warn("mewatch returned no live channels")
             return
-        selected = yield ctx.pick(
+        picker = ctx.pick(
             f"mewatch Live  ·  {len(channels)} channels",
             [Choice(channel.name, channel, detail=channel.detail) for channel in channels],
         )
-        if selected is not None:
-            yield from self._emit_live(ctx, client, selected)
+        while True:
+            selected = yield picker
+            if selected is None:
+                return
+            try:
+                yield from self._emit_live(ctx, client, selected)
+            except Back:
+                pass
+            if not ctx.interactive:
+                return
 
     def _page(self, ctx: FlowContext, client: api.MewatchApi, path: str) -> Iterator[Ask]:
         try:
@@ -265,19 +283,13 @@ class Mewatch(Service):
         if not rails:
             ctx.warn(f"mewatch returned no prefetched catalogue rows for {path}")
             return
+        rails_picker = ctx.pick(
+            f"mewatch  ·  {path}",
+            [Choice(entry.title, entry, detail=f"{entry.size or len(entry.items)} title(s)") for entry in rails],
+        )
         while True:
             try:
-                rail = yield ctx.pick(
-                    f"mewatch  ·  {path}",
-                    [
-                        Choice(
-                            entry.title,
-                            entry,
-                            detail=f"{entry.size or len(entry.items)} title(s)",
-                        )
-                        for entry in rails
-                    ],
-                )
+                rail = yield rails_picker
             except Back:
                 return
             if rail is None:
@@ -292,23 +304,23 @@ class Mewatch(Service):
             if not rail_items:
                 ctx.warn(f"mewatch returned no titles for {rail.title}")
                 continue
+            titles_picker = ctx.pick(
+                f"mewatch  ·  {rail.title}",
+                [Choice(item.label, item, detail=item.detail, tags=(item.type_label,)) for item in rail_items],
+            )
             while True:
                 try:
-                    selected = yield ctx.pick(
-                        f"mewatch  ·  {rail.title}",
-                        [
-                            Choice(item.label, item, detail=item.detail, tags=(item.type_label,))
-                            for item in rail_items
-                        ],
-                    )
+                    selected = yield titles_picker
                 except Back:
                     break
                 if selected is None:
-                    return
+                    break
                 try:
                     yield from self._open_item(ctx, client, selected)
                 except Back:
-                    continue
+                    pass
+                if not ctx.interactive:
+                    return
 
     def _open_item(self, ctx: FlowContext, client: api.MewatchApi, item: api.Item) -> Iterator[Ask]:
         if item.is_show:
@@ -335,27 +347,26 @@ class Mewatch(Service):
             ctx.warn(f"mewatch returned no episodes for {show.title}")
             return
 
+        if len(seasons) == 1:
+            try:
+                yield from self._episodes(ctx, client, show, seasons[0])
+            except Back:
+                pass
+            return
+        picker = ctx.pick(
+            f"{show.title}  ·  seasons",
+            [Choice(entry.label, entry, detail=f"{len(entry.episodes)} episode(s)") for entry in seasons],
+        )
         while True:
-            if len(seasons) == 1:
-                season = seasons[0]
-            else:
-                try:
-                    season = yield ctx.pick(
-                        f"{show.title}  ·  seasons",
-                        [
-                            Choice(entry.label, entry, detail=f"{len(entry.episodes)} episode(s)")
-                            for entry in seasons
-                        ],
-                    )
-                except Back:
-                    return
+            try:
+                season = yield picker
+            except Back:
+                return
             if season is None:
                 return
             try:
                 yield from self._episodes(ctx, client, show, season)
             except Back:
-                if len(seasons) == 1:
-                    return
                 continue
             return
 
@@ -366,29 +377,25 @@ class Mewatch(Service):
         show: api.Item,
         season: api.Season,
     ) -> Iterator[Ask]:
+        picker = ctx.pick(
+            f"{show.title}  ·  {season.label}",
+            [Choice(item.label, item, detail=item.detail) for item in season.episodes],
+            multi=True,
+            hint="space to tick, enter to confirm",
+        )
         while True:
-            try:
-                selected = yield ctx.pick(
-                    f"{show.title}  ·  {season.label}",
-                    [Choice(item.label, item, detail=item.detail) for item in season.episodes],
-                    multi=True,
-                    hint="space to tick, enter to confirm",
-                )
-            except Back:
-                raise
+            selected = yield picker
             episodes = list(selected or [])
             if not episodes:
                 return
             if len(episodes) > 1:
                 ctx.batch(len(episodes))
-            return_to_list = False
-            for episode in episodes:
-                try:
+            try:
+                for episode in episodes:
                     yield from self._emit_item(ctx, client, episode, show=show)
-                except Back:
-                    return_to_list = True
-                    break
-            if not return_to_list:
+            except Back:
+                pass
+            if not ctx.interactive:
                 return
 
     # ---------------------------------------------------------------- playback
@@ -409,7 +416,7 @@ class Mewatch(Service):
         title = self._title(item, show=show)
         mux_imports = self._stage_subtitles(ctx, client, source, self.save_name(title))
         ctx.log(f"{title.full_label()}: {source.line()}", "ok")
-        yield ctx.emit(self._playback(title, source, mux_imports=mux_imports))
+        yield ctx.emit(self._playback(title, source, item=item, mux_imports=mux_imports))
 
     def _emit_live(
         self,
@@ -437,7 +444,7 @@ class Mewatch(Service):
             service=self.ID,
         )
         ctx.log(f"{channel.name}: {source.line()}", "ok")
-        yield ctx.emit(self._playback(title, source))
+        yield ctx.emit(self._playback(title, source, item=channel_item))
 
     def _title(self, item: api.Item, *, show: api.Item | None = None) -> Title:
         if item.is_movie:
@@ -525,6 +532,7 @@ class Mewatch(Service):
         title: Title,
         source: api.Source,
         *,
+        item: api.Item | None = None,
         mux_imports: list[ExternalTrack] | None = None,
     ) -> Playback:
         media_headers = {"User-Agent": api.USER_AGENT, **dict(source.headers)}
@@ -537,6 +545,10 @@ class Mewatch(Service):
             is_live=source.is_live,
             note=source.line(),
             mux_imports=list(mux_imports or []),
+            chapters=(
+                item.chapters() if item is not None and not source.is_live and self.fetch_chapters_enabled() else []
+            ),
+            attachments=item.attachments() if item is not None and self.fetch_attachments_enabled() else [],
         )
         if source.encrypted:
             playback.drm = DrmInfo(

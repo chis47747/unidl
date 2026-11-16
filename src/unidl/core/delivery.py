@@ -175,6 +175,7 @@ class DownloadPolicy:
     muxer: str | None = None
     default_audio: str = "auto"
     default_subtitle: str = "auto"
+    subtitle_output: str = "muxed"
     mux_imports: tuple[str, ...] = ()
     #: JSON chapter sidecar generated from service-owned Playback metadata.
     chapters_file: Path | None = None

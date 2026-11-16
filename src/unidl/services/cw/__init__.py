@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from ...core.flow import Ask, Choice, FlowContext
+from ...core.flow import Ask, Back, Choice, FlowContext
 from ...core.playback import DrmInfo, Playback
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
@@ -224,7 +224,10 @@ class Cw(Service):
         self, ctx: FlowContext, client: api.CwApi, items: list[api.Item]
     ) -> Iterator[Ask]:
         if len(items) > 1:
-            ctx.batch(len(items))
+            try:
+                ctx.batch(len(items))
+            except Back:
+                return
         for item in items:
             yield from self._emit(ctx, client, item)
 
@@ -261,7 +264,10 @@ class Cw(Service):
             synopsis=item.synopsis or None,
             service=self.ID,
         )
-        yield ctx.emit(self._playback(title, source))
+        try:
+            yield ctx.emit(self._playback(title, source))
+        except Back:
+            return
 
     def _emit_live(
         self, ctx: FlowContext, client: api.CwApi, channel: api.Channel
@@ -282,7 +288,10 @@ class Cw(Service):
             synopsis=channel.on_now or channel.synopsis or None,
             service=self.ID,
         )
-        yield ctx.emit(self._playback(title, source, is_live=True))
+        try:
+            yield ctx.emit(self._playback(title, source, is_live=True))
+        except Back:
+            return
 
     def _playback(self, title: Title, source: api.Source, *, is_live: bool = False) -> Playback:
         playback = Playback(
@@ -293,6 +302,10 @@ class Cw(Service):
             proxy=self.ctx.proxy,
             is_live=is_live,
             note=source.line(),
+            chapters=list(source.chapters) if self.fetch_chapters_enabled() else [],
+            attachments=(
+                list(source.attachments) if self.fetch_attachments_enabled() else []
+            ),
         )
         if source.encrypted:
             playback.drm = DrmInfo(system=source.system, license_url=source.license_url)

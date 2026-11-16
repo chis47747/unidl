@@ -745,6 +745,13 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     _choice(
+        "subtitle_output",
+        "Subtitle output",
+        [("muxed", "Mux into final file"), ("external", "External sidecar files"), ("none", "Do not download subtitles")],
+        "muxed",
+        "Choose whether selected subtitles are embedded in the final container, kept as external files beside it, or skipped.",
+    ),
+    _choice(
         "after_resolve",
         "After you pick a title",
         [
@@ -1443,6 +1450,20 @@ TRACK_SETTINGS: list[Setting] = [
         options=[Option("auto", "Auto"), Option("original", "Original")],
         default="auto",
         help="Choose the default muxed subtitle from selected tracks only: Auto, Original, or one language tag. This does not download extra tracks.",
+    ),
+    Setting(
+        "subtitle_output",
+        "Subtitle output",
+        "choice",
+        options=[
+            Option("", "Use the app-wide setting"),
+            Option("muxed", "Mux into final file"),
+            Option("external", "External sidecar files"),
+            Option("none", "Do not download subtitles"),
+        ],
+        default="",
+        help="Choose whether selected subtitles are embedded in the final container, kept as external files beside it, or skipped.",
+        inherit_global=True,
     ),
     _choice(
         "audio_selection",

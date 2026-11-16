@@ -322,6 +322,10 @@ class Playback:
     default_audio: str = ""
     default_subtitle: str = ""
     subtitle_selection: str = ""
+    #: Where selected subtitles should be delivered: muxed, external, or none.
+    #: Empty means use the current app/service setting (normal playback) while
+    #: exports can preserve the choice made when they were written.
+    subtitle_output: str = ""
 
     #: What the service asked its playback API for, and what that API explicitly
     #: reported back. These are deliberately separate from the parsed manifest:

@@ -11,6 +11,9 @@ from typing import Any
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
+
 WWW = "https://www.cwtv.com"
 DATA = "https://data.cwtv.com"
 BRIGHTCOVE = "https://edge.api.brightcove.com/playback/v1/accounts/{account}/videos/{video}"
@@ -277,6 +280,8 @@ class Source:
     #: manifest is fetched, and because a Brightcove account that stops listing
     #: them inline would show up here first.
     subtitles: list[tuple[str, str]] = field(default_factory=list)
+    chapters: tuple[Chapter, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def encrypted(self) -> bool:
@@ -579,6 +584,8 @@ class CwApi:
             system=system if licence else None,
             duration=_seconds(data.get("duration")),
             subtitles=_subtitles(data),
+            chapters=_chapters(data),
+            attachments=_attachments(data),
         )
 
     # --------------------------------------------------------------- plumbing
@@ -708,6 +715,98 @@ def _seconds(value: Any) -> float:
         return round(float(str(value).strip()) / 1000, 3)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _chapter_seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number / 1000.0 if number >= 100_000 else number
+
+
+def _chapters(data: dict[str, Any]) -> tuple[Chapter, ...]:
+    rows: list[Any] = []
+    for key in ("chapters", "cue_points", "cuePoints", "markers"):
+        value = data.get(key)
+        if isinstance(value, list):
+            rows.extend(value)
+    found: list[Chapter] = []
+    seen: set[tuple[int, str, str]] = set()
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            continue
+        start = next(
+            (
+                _chapter_seconds(row.get(key))
+                for key in ("time", "start", "start_time", "offset")
+                if row.get(key) not in (None, "")
+            ),
+            None,
+        )
+        if start is None:
+            continue
+        end = next(
+            (
+                _chapter_seconds(row.get(key))
+                for key in ("end", "end_time")
+                if row.get(key) not in (None, "")
+            ),
+            None,
+        )
+        title = str(row.get("name") or row.get("title") or row.get("label") or f"Chapter {index}")
+        kind = str(row.get("type") or row.get("kind") or "").strip().lower()
+        try:
+            chapter = Chapter.from_seconds(start, title, end, kind=kind)
+        except ValueError:
+            continue
+        identity = (chapter.start_ms, chapter.title, chapter.kind)
+        if identity not in seen:
+            seen.add(identity)
+            found.append(chapter)
+    return tuple(found)
+
+
+def _image_urls(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip().startswith(("https://", "http://")) else []
+    if isinstance(value, dict):
+        direct = value.get("url") or value.get("src")
+        if direct:
+            return _image_urls(direct)
+        urls: list[str] = []
+        for child in value.values():
+            urls.extend(_image_urls(child))
+        return urls
+    if isinstance(value, list):
+        urls: list[str] = []
+        for child in value:
+            urls.extend(_image_urls(child))
+        return urls
+    return []
+
+
+def _attachments(data: dict[str, Any]) -> tuple[Attachment, ...]:
+    fields = (
+        ("poster", "Poster", "poster"),
+        ("poster_url", "Poster", "poster"),
+        ("thumbnail", "Thumbnail", "thumbnail"),
+        ("thumbnail_url", "Thumbnail", "thumbnail"),
+        ("images", "Artwork", "artwork"),
+    )
+    found: list[Attachment] = []
+    seen: set[str] = set()
+    for key, name, kind in fields:
+        for url in _image_urls(data.get(key)):
+            if url in seen:
+                continue
+            seen.add(url)
+            found.append(Attachment(url, name=name, kind=kind, mime_type="image/jpeg"))
+    return tuple(found)
 
 
 __all__ = [

@@ -11,6 +11,9 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter, normalize_chapters
+
 APP_VERSION = "3.14.2-tv"
 PACKAGE_NAME = "be.vrt.vrtnu-max"
 CLIENT_NAME = "TVAndroid"
@@ -223,6 +226,8 @@ class Program:
     primary_meta: tuple[str, ...]
     secondary_meta: tuple[str, ...]
     sections: tuple[ProgramSection, ...]
+    image_url: str = ""
+    title_art_url: str = ""
 
     @property
     def is_movie(self) -> bool:
@@ -240,6 +245,9 @@ class PlayerMode:
     active: bool
     label: str
     stream_id: str
+    duration: float | None = None
+    chapters: tuple[Chapter, ...] = ()
+    metadata_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -252,6 +260,8 @@ class PlayerData:
     modes: tuple[PlayerMode, ...]
     primary_meta: tuple[str, ...] = ()
     secondary_meta: tuple[str, ...] = ()
+    image_url: str = ""
+    header_image_url: str = ""
 
     @property
     def release_year(self) -> str | None:
@@ -479,7 +489,7 @@ query Search($query: String!, $facets: [SearchFacetInput], $pageSize: Int!) {
 """ + TILE_FRAGMENT + LIST_FRAGMENT
 
 PROGRAM_QUERY = """
-query ProgramPageTV($pageId: ID!, $pageSize: Int!) {
+query ProgramPageTV($pageId: ID!, $pageSize: Int!, $fetchAttachments: Boolean! = true) {
  page(id: $pageId) {
   __typename
   ... on ProgramPage {
@@ -491,6 +501,8 @@ query ProgramPageTV($pageId: ID!, $pageSize: Int!) {
      primaryMeta { type value }
      secondaryMeta { type value }
      tertiaryMeta { type value }
+     image @include(if: $fetchAttachments) { templateUrl }
+     titleArt @include(if: $fetchAttachments) { templateUrl }
     }
    }
    menu {
@@ -559,14 +571,25 @@ query ListSnapshotTV($listId: ID!, $pageSize: Int!) {
 """ + TILE_FRAGMENT
 
 PLAYER_QUERY = """
-query OnePlayerData($id: ID!) {
+query OnePlayerData($id: ID!, $fetchChapters: Boolean! = true, $fetchAttachments: Boolean! = true) {
  page(id: $id) {
   __typename
   ... on PlaybackPage {
    id brand
+   header @include(if: $fetchAttachments) { ... on PageHeader { image { templateUrl } } }
    player {
     __typename maxAge title subtitle
-    modes { __typename active label streamId }
+    image @include(if: $fetchAttachments) { templateUrl }
+    modes {
+     __typename active label streamId
+     ... on VideoPlayerMode {
+      durationInSeconds
+      markers @include(if: $fetchChapters) {
+       __typename title
+       ... on MediaPlayerChapterMarker { startOffsetInSeconds }
+      }
+     }
+    }
     primaryMeta { type value }
     secondaryMeta { type value }
    }
@@ -578,6 +601,57 @@ query OnePlayerData($id: ID!) {
 """
 
 GEO_QUERY = "query GeoLocation { geoLocation }"
+
+
+def _chapter_markers(mode: dict[str, Any]) -> tuple[tuple[Chapter, ...], tuple[str, ...]]:
+    """Parse the TV schema's chapter offsets, explicitly expressed in seconds."""
+    markers = mode.get("markers")
+    if not isinstance(markers, list):
+        return (), ()
+    duration = _number(mode.get("durationInSeconds"))
+    chapters: list[Chapter] = []
+    warnings: list[str] = []
+    for index, marker in enumerate(markers, 1):
+        if not isinstance(marker, dict) or marker.get("__typename") != "MediaPlayerChapterMarker":
+            continue
+        offset = marker.get("startOffsetInSeconds")
+        title = _text(marker.get("title"))
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or not title:
+            warnings.append(f"VRT MAX chapter {index} has invalid title/time metadata; skipped")
+            continue
+        if duration > 0 and offset >= duration:
+            warnings.append(f"VRT MAX chapter {index} starts outside the media duration; skipped")
+            continue
+        chapters.append(Chapter.from_seconds(offset, title))
+    return normalize_chapters(chapters, duration_ms=round(duration * 1000) if duration > 0 else None), tuple(warnings)
+
+
+def title_attachments(
+    item: CatalogItem, player: PlayerData, program: Program | None,
+) -> list[Attachment]:
+    """Keep only images belonging to this title, without playback credentials."""
+    images = [
+        (player.image_url, "Playback artwork"),
+        (item.image_url, item.title),
+        (player.header_image_url, "Title artwork"),
+    ]
+    if program is not None:
+        images.extend([(program.image_url, program.title), (program.title_art_url, "Title art")])
+    attachments: list[Attachment] = []
+    seen: set[str] = set()
+    for url, label in images:
+        url = url.replace("{width}", "1920").replace("{height}", "1080")
+        if not url or url in seen or "{" in url or "}" in url:
+            continue
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        seen.add(url)
+        attachments.append(Attachment(url=url, name=label, kind="artwork"))
+    return attachments
 
 
 def _parse_tile(data: Any) -> CatalogItem | None:
@@ -708,6 +782,8 @@ class VrtMaxApi:
         self.http.headers.setdefault("User-Agent", USER_AGENT)
         self._player_token = ""
         self._player_token_expires_at = 0.0
+        self.fetch_chapters = True
+        self.fetch_attachments = True
 
     def _persist(self) -> None:
         if self.on_save is not None:
@@ -1025,7 +1101,7 @@ class VrtMaxApi:
     def program(self, page_id: str) -> Program:
         data = self.graphql(
             PROGRAM_QUERY,
-            {"pageId": page_id, "pageSize": PAGE_SIZE},
+            {"pageId": page_id, "pageSize": PAGE_SIZE, "fetchAttachments": self.fetch_attachments},
             "ProgramPageTV",
         )
         page = data.get("page")
@@ -1056,6 +1132,8 @@ class VrtMaxApi:
             primary_meta=_meta(header.get("primaryMeta")),
             secondary_meta=_meta(header.get("secondaryMeta")) + _meta(header.get("tertiaryMeta")),
             sections=tuple(sections),
+            image_url=_image_url(header.get("image")) if self.fetch_attachments else "",
+            title_art_url=_image_url(header.get("titleArt")) if self.fetch_attachments else "",
         )
 
     def component_lists(self, component_id: str) -> tuple[CatalogList, ...]:
@@ -1070,31 +1148,42 @@ class VrtMaxApi:
         return _parse_components(component.get("components"))
 
     def player_data(self, page_id: str) -> PlayerData:
-        data = self.graphql(PLAYER_QUERY, {"id": page_id}, "OnePlayerData")
+        data = self.graphql(
+            PLAYER_QUERY,
+            {"id": page_id, "fetchChapters": self.fetch_chapters, "fetchAttachments": self.fetch_attachments},
+            "OnePlayerData",
+        )
         page = data.get("page")
         if not isinstance(page, dict):
             raise VrtMaxError(f"VRT MAX returned no player page for {page_id}")
         player = page.get("player") if isinstance(page.get("player"), dict) else {}
         raw_modes = player.get("modes") if isinstance(player.get("modes"), list) else []
-        modes = tuple(
-            PlayerMode(
+        modes: list[PlayerMode] = []
+        for mode in raw_modes:
+            if not isinstance(mode, dict) or not _text(mode.get("streamId")):
+                continue
+            chapters, warnings = _chapter_markers(mode) if self.fetch_chapters else ((), ())
+            modes.append(PlayerMode(
                 typename=_text(mode.get("__typename")),
                 active=bool(mode.get("active")),
                 label=_text(mode.get("label")),
                 stream_id=_text(mode.get("streamId")),
-            )
-            for mode in raw_modes
-            if isinstance(mode, dict) and _text(mode.get("streamId"))
-        )
+                duration=_number(mode.get("durationInSeconds")) or None,
+                chapters=chapters,
+                metadata_warnings=warnings,
+            ))
+        header = page.get("header") if isinstance(page.get("header"), dict) else {}
         result = PlayerData(
             page_id=_text(page.get("id")) or page_id,
             page_type=_text(page.get("__typename")),
             brand=_text(page.get("brand")),
             title=_text(player.get("title") or page.get("title")),
             subtitle=_text(player.get("subtitle")),
-            modes=modes,
+            modes=tuple(modes),
             primary_meta=_meta(player.get("primaryMeta")),
             secondary_meta=_meta(player.get("secondaryMeta")),
+            image_url=_image_url(player.get("image")) if self.fetch_attachments else "",
+            header_image_url=_image_url(header.get("image")) if self.fetch_attachments else "",
         )
         result.active_mode()
         return result

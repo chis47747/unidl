@@ -328,6 +328,7 @@ class Entry:
             default_audio=_text(self.selection.get("default_audio")),
             default_subtitle=_text(self.selection.get("default_subtitle")),
             subtitle_selection=_text(self.selection.get("subtitle_selection")),
+            subtitle_output=_text(self.selection.get("subtitle_output")),
         )
 
     def as_document(self) -> dict[str, Any]:

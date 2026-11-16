@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.6.4] - 2026-11-17
+
+### Subtitle output choices
+
+- Added Subtitle output globally and per service, with choices to embed selected subtitles, keep external sidecars beside muxed audio/video, or skip subtitles; retained embedded output as the default.
+- Carried the choice through download policies, saved commands and portable exports/imports, including service inheritance and playback overrides.
+- Kept external subtitle files out of the audio/video mux and protected them during normal cleanup; applied the setting to downloaded subtitle tracks and service-provided imports.
+
+### Service updates
+
+- Updated existing ABC iView, Channel 4, Channel 5, The CW, france.tv, GoPlay, ITV, JustWatch TV, mewatch, NRK, ORF, TF1, U and VRT MAX integrations.
+- Improved service-owned catalogue navigation and return paths, and carried available chapters and artwork into the shared metadata and attachment workflow.
+- Expanded ABC iView catalogue and sign-in handling while preserving the existing public service identifiers.
+
 ## [2.6.3] - 2026-11-14
 
 ### Audio metadata

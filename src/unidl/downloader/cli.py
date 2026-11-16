@@ -433,6 +433,7 @@ def _build_parser(
     g_mux.add_argument("--mux-import", action="append", help='Import external media during mux, e.g. --mux-import "path=sub.srt:lang=eng:name=English".')
     g_mux.add_argument("--chapters-file", help="Read a UniDL JSON chapter sidecar and embed it in the final audio or video container.")
     g_mux.add_argument("--muxer", choices=["auto", "ffmpeg", "mkvmerge", "mp4box", "none"], default="auto", help="Mux tool; mp4box writes MP4 (automatic for 3D VOD); none saves joined, decrypted original tracks without extra conversions.")
+    g_mux.add_argument("--subtitle-output", choices=["muxed", "external", "none"], default="muxed", help="Subtitle output: mux into the final container, keep selected subtitles as external files, or do not download subtitles.")
     g_mux.add_argument("--default-audio", type=normalize_default_audio, default="auto", help="Default muxed audio: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--default-subtitle", type=normalize_default_subtitle, default="auto", help="Default muxed subtitle: auto, original, or one language tag. Only selected tracks are considered.")
     g_mux.add_argument("--mux-format", choices=["mkv", "mp4", "ts"], help="Final mux container. Defaults to mkv for VOD and ts for live.")
@@ -912,6 +913,11 @@ def _download_impl(args: argparse.Namespace) -> int:
     if not selected:
         print(paint("No stream selected.", Palette.yellow, colors))
         return 1
+    if getattr(args, "subtitle_output", "muxed") == "none":
+        selected = [stream for stream in selected if not _is_subtitle_stream(stream)]
+        if not selected:
+            print(paint("No non-subtitle stream selected.", Palette.yellow, colors))
+            return 1
     selected = _replace_direct_audio_with_matching_sabr_audio(selected, streams)
     bind_caption_sources(selected, streams)
     for stream in selected:
@@ -954,6 +960,7 @@ def _download_impl(args: argparse.Namespace) -> int:
         set_allow_insecure_localhost_hls_keys(False)
     keys = [*parse_keys(args.key), *parse_key_text_file(args.key_text_file)]
     mux_imports = [parse_mux_import(value) for value in (args.mux_import or [])]
+    mux_imports_for_output = _mux_imports_for_output(args, mux_imports)
     hls_crypto = HlsCrypto(method="NONE") if args.no_decrypt else _custom_hls_crypto(args)
     _apply_custom_hls_crypto_to_streams(hydrated, hls_crypto, explicit_method=bool(getattr(args, "custom_hls_method", None)))
     for stream in hydrated:
@@ -1089,6 +1096,9 @@ def _download_impl(args: argparse.Namespace) -> int:
             ).update("Muxed ✓", done=True)
             _log_line(args, f"Muxed: {pipe_session.output_path}")
             _log_line(args, f"Elapsed: {format_time(max(0.0, time.monotonic() - task_started_at)) or '0s'}")
+            # A live pipe is built from audio/video FIFOs and cannot carry the
+            # selected subtitle files; preserve them as sidecars regardless of
+            # the VOD subtitle-output choice.
             protected_paths = [
                 pipe_session.output_path,
                 *[track.path for track in downloaded_tracks if _is_subtitle_stream(track.stream)],
@@ -1105,7 +1115,7 @@ def _download_impl(args: argparse.Namespace) -> int:
             )
             mux_output = _stage_artifact_path(task_workspace, mux_destination)
             args._unidown_commit_targets[mux_output] = mux_destination
-            explicit_mux = getattr(args, "mux", False) or bool(mux_imports)
+            explicit_mux = getattr(args, "mux", False) or bool(mux_imports_for_output)
             if live_mux_tracks and (len(live_mux_tracks) > 1 or explicit_mux):
                 task_line = _TaskStatusLine(
                     mux_output,
@@ -1119,10 +1129,11 @@ def _download_impl(args: argparse.Namespace) -> int:
                             live_mux_tracks,
                             getattr(args, "default_audio", "auto"),
                             getattr(args, "default_subtitle", "auto"),
+                            subtitle_output=getattr(args, "subtitle_output", "muxed"),
                         ),
                         mux_output,
                         muxer=_muxer_for_tracks(live_mux_tracks, args, live=True),
-                        imports=mux_imports,
+                        imports=mux_imports_for_output,
                         chapters_file=getattr(args, "chapters_file", None),
                         force_vvc_mp4=False,
                         default_audio=getattr(args, "default_audio", "auto"),
@@ -1132,7 +1143,7 @@ def _download_impl(args: argparse.Namespace) -> int:
                 _log_line(args, f"Muxed: {muxed}")
                 _log_line(args, f"Elapsed: {format_time(max(0.0, time.monotonic() - task_started_at)) or '0s'}")
                 protected_paths = [muxed, *[track.path for track in downloaded_tracks if _is_subtitle_stream(track.stream)]]
-            elif mux_imports:
+            elif mux_imports_for_output:
                 task_line = _TaskStatusLine(
                     mux_output,
                     task_started_at,
@@ -1144,14 +1155,16 @@ def _download_impl(args: argparse.Namespace) -> int:
                         [],
                         mux_output,
                         muxer="ffmpeg" if args.muxer == "mp4box" else args.muxer,
-                        imports=mux_imports,
+                        imports=mux_imports_for_output,
                         chapters_file=getattr(args, "chapters_file", None),
                         default_subtitle=getattr(args, "default_subtitle", "auto"),
                     )
                 task_line.update("Muxed ✓", done=True)
                 _log_line(args, f"Muxed: {muxed}")
                 _log_line(args, f"Elapsed: {format_time(max(0.0, time.monotonic() - task_started_at)) or '0s'}")
-                protected_paths = [muxed, *[track.path for track in downloaded_tracks if _is_subtitle_stream(track.stream)]]
+            protected_paths = [muxed]
+            if getattr(args, "subtitle_output", "muxed") == "external":
+                protected_paths.extend(track.path for track in downloaded_tracks if _is_subtitle_stream(track.stream))
             if _has_subtitle_tracks(downloaded_tracks) and len(live_mux_tracks) != len(downloaded_tracks):
                 print(paint("Live subtitles kept as sidecar files.", Palette.yellow, colors))
         if pipe_session and getattr(args, "live_keep_track_files", False):
@@ -1296,10 +1309,11 @@ def _download_impl(args: argparse.Namespace) -> int:
                     downloaded_tracks,
                     getattr(args, "default_audio", "auto"),
                     getattr(args, "default_subtitle", "auto"),
+                    subtitle_output=getattr(args, "subtitle_output", "muxed"),
                 ),
                 mux_output,
                 muxer=_muxer_for_tracks(downloaded_tracks, args, live=False),
-                imports=mux_imports,
+                imports=mux_imports_for_output,
                 chapters_file=getattr(args, "chapters_file", None),
                 force_vvc_mp4=True,
                 default_audio=getattr(args, "default_audio", "auto"),
@@ -1309,6 +1323,8 @@ def _download_impl(args: argparse.Namespace) -> int:
         _log_line(args, f"Muxed: {muxed}")
         _log_line(args, f"Elapsed: {format_time(max(0.0, time.monotonic() - task_started_at)) or '0s'}")
         protected_paths = [muxed]
+        if getattr(args, "subtitle_output", "muxed") == "external":
+            protected_paths.extend(track.path for track in downloaded_tracks if _is_subtitle_stream(track.stream))
     protected_paths, metadata_paths = _commit_task_outputs(
         args,
         output_dir,
@@ -1805,13 +1821,20 @@ def _with_original_imports(
     default_save_base: str | None,
 ) -> list[_DownloadedTrack]:
     """Keep service-prepared sidecars too, without modifying their source files."""
-    if getattr(args, "muxer", "auto") != "none" or not imports:
+    subtitle_output = getattr(args, "subtitle_output", "muxed")
+    if getattr(args, "muxer", "auto") == "none":
+        copy_imports = [] if subtitle_output == "none" else list(imports)
+    elif subtitle_output == "external":
+        copy_imports = [item for item in imports if _mux_input_is_subtitle(item)]
+    else:
+        copy_imports = []
+    if not copy_imports:
         return tracks
     result = list(tracks)
     output_dir.mkdir(parents=True, exist_ok=True)
     offset = max((track.offset for track in tracks), default=0)
-    total = offset + len(imports)
-    for imported in imports:
+    total = offset + len(copy_imports)
+    for imported in copy_imports:
         _checkpoint_embedding(args)
         offset += 1
         source = Path(imported.path).expanduser()
@@ -1844,6 +1867,23 @@ def _with_original_imports(
         shutil.copyfile(source, destination)
         result.append(_DownloadedTrack(offset, stream, destination, None, []))
     return result
+
+
+def _mux_input_is_subtitle(item: MuxInput) -> bool:
+    media_type = getattr(item, "media_type", None)
+    if media_type in {"subtitle", "subtitles", "text"}:
+        return True
+    return Path(item.path).suffix.lower() in {
+        ".srt", ".vtt", ".ass", ".ssa", ".ttml", ".dfxp", ".xml", ".sup", ".sub",
+    }
+
+
+def _mux_imports_for_output(args: argparse.Namespace, imports: Sequence[MuxInput]) -> list[MuxInput]:
+    """Exclude subtitle imports when the user requested sidecars or no subtitles."""
+    subtitle_output = getattr(args, "subtitle_output", "muxed")
+    if subtitle_output not in {"external", "none"}:
+        return list(imports)
+    return [item for item in imports if not _mux_input_is_subtitle(item)]
 
 
 def _embedding_cancel_callback(args) -> Callable[[], bool] | None:
@@ -9256,6 +9296,7 @@ def _selected_mux_format(args: argparse.Namespace, live: bool = False) -> str:
 
 
 def _should_mux_after_download(args: argparse.Namespace, mux_imports: list, downloaded_paths: list[Path], selected_streams) -> bool:
+    mux_imports = _mux_imports_for_output(args, mux_imports)
     if should_preserve_audio_vivid_source_container(selected_streams):
         return False
     if _has_detected_audio_vivid(selected_streams) and not shutil.which("mkvmerge"):
@@ -9427,7 +9468,12 @@ def _with_audio_vivid_companions(
 
 def _live_mux_tracks(tracks: list[_DownloadedTrack], args: argparse.Namespace) -> list[_DownloadedTrack]:
     mux_format = _selected_mux_format(args, live=True).lower()
-    if mux_format == "ts" or getattr(args, "live_pipe_mux", False) or getattr(args, "live_real_time_merge", False):
+    if (
+        mux_format == "ts"
+        or getattr(args, "live_pipe_mux", False)
+        or getattr(args, "live_real_time_merge", False)
+        or getattr(args, "subtitle_output", "muxed") == "external"
+    ):
         return [track for track in tracks if not _is_subtitle_stream(track.stream)]
     return tracks
 
@@ -9436,7 +9482,11 @@ def _mux_inputs_for_tracks(
     tracks: list[_DownloadedTrack],
     default_audio: str = "auto",
     default_subtitle: str | None = "auto",
+    *,
+    subtitle_output: str = "muxed",
 ) -> list[MuxInput]:
+    if subtitle_output in {"external", "none"}:
+        tracks = [track for track in tracks if not _is_subtitle_stream(track.stream)]
     tracks = [track for track in tracks if not _empty_subtitle_track(track)]
     selected_streams = [track.stream for track in tracks]
     starts = [_dash_mux_start(track.stream) for track in tracks]

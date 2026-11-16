@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from ...core.chapters import Chapter
+
 WWW = "https://u.co.uk"
 CATALOGUE = "https://vschedules.uktv.co.uk/vod"
 BRIGHTCOVE = "https://edge.api.brightcove.com/playback/v1/accounts/1242911124001/videos/{video}"
@@ -140,6 +142,8 @@ class Source:
     protocol: str = "DASH"
     encrypted: bool = True
     subtitles: tuple[str, ...] = ()
+    chapters: tuple[Chapter, ...] = ()
+    attachment_urls: tuple[str, ...] = ()
 
     def line(self) -> str:
         drm = "Widevine" if self.encrypted else "clear"
@@ -258,6 +262,8 @@ class UApi:
                 license_url=license_url,
                 encrypted=True,
                 subtitles=self._subtitle_languages(data),
+                chapters=self._chapters(data),
+                attachment_urls=self._attachment_urls(data),
             )
 
         raise UError(f"Brightcove offered no Widevine source for {video_id}")
@@ -307,6 +313,96 @@ class UApi:
             if language and language not in languages:
                 languages.append(language)
         return tuple(languages)
+
+    @staticmethod
+    def _chapters(data: dict[str, Any]) -> tuple[Chapter, ...]:
+        rows: list[dict[str, Any]] = []
+        for key in ("chapters", "cue_points", "cuePoints", "markers"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                value = value.get("items") or value.get("data") or value.get(key)
+            if isinstance(value, list):
+                rows.extend(row for row in value if isinstance(row, dict))
+        result: list[Chapter] = []
+        seen: set[tuple[int, str, str]] = set()
+        for index, row in enumerate(rows, 1):
+            start = next(
+                (
+                    row.get(key)
+                    for key in ("time", "start", "startTime", "start_time", "offset")
+                    if row.get(key) not in (None, "")
+                ),
+                None,
+            )
+            seconds = UApi._chapter_seconds(start)
+            if seconds is None:
+                continue
+            title = str(row.get("name") or row.get("title") or row.get("label") or f"Chapter {index}").strip()
+            kind = str(row.get("kind") or row.get("type") or "").strip().casefold()
+            try:
+                chapter = Chapter.from_seconds(seconds, title, kind=kind)
+            except ValueError:
+                continue
+            identity = (chapter.start_ms, chapter.title, chapter.kind)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append(chapter)
+        return tuple(result)
+
+    @staticmethod
+    def _chapter_seconds(value: Any) -> float | None:
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            parts = str(value).strip().split(":")
+            if len(parts) not in {2, 3}:
+                return None
+            try:
+                numbers = [float(part) for part in parts]
+            except ValueError:
+                return None
+            seconds = numbers[-1] + numbers[-2] * 60
+            if len(numbers) == 3:
+                seconds += numbers[0] * 3600
+        return seconds if seconds >= 0 else None
+
+    @staticmethod
+    def _attachment_urls(data: dict[str, Any]) -> tuple[str, ...]:
+        values: list[Any] = []
+        for key in (
+            "poster",
+            "poster_url",
+            "posterUrl",
+            "thumbnail",
+            "thumbnail_url",
+            "thumbnailUrl",
+            "image",
+            "image_url",
+            "imageUrl",
+            "artwork",
+            "cover",
+        ):
+            if key in data:
+                values.append(data[key])
+        images = data.get("images")
+        if isinstance(images, dict):
+            values.extend(images.values())
+        elif isinstance(images, list):
+            values.extend(images)
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("src") or value.get("url") or value.get("href")
+            url = str(value or "").strip()
+            if not url.startswith(("http://", "https://")) or url in seen:
+                continue
+            seen.add(url)
+            result.append(url)
+        return tuple(result)
 
     # -------------------------------------------------------------- licensing
     def widevine_license(

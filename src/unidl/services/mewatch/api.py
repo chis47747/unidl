@@ -16,6 +16,9 @@ from urllib.parse import urlparse
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
+
 API = "https://www.mewatch.sg/api/"
 AUTH0 = "https://auth.mediacorp.sg"
 AUTH0_CLIENT_ID = "e0SK6ykchfnk3D3rSgTRpyb7DgrAUCJB"
@@ -387,6 +390,55 @@ class Item:
     @property
     def is_movie(self) -> bool:
         return self.type in {"movie", "film"}
+
+    def chapters(self) -> list[Chapter]:
+        fields = self.raw.get("customFields")
+        if not isinstance(fields, dict):
+            return []
+        chapters = []
+        for label, kind, prefix in (
+            ("Intro", "intro", "Intro"),
+            ("Credits", "credits", "Credit"),
+        ):
+            start = fields.get(f"{prefix}StartPositionInSeconds")
+            end = fields.get(f"{prefix}EndingPositionInSeconds")
+            if start in (None, ""):
+                continue
+            try:
+                chapter = Chapter.from_seconds(start, label, end if end not in (None, "") else None, kind=kind)
+            except (ValueError, OverflowError):
+                continue
+            if chapter.start_ms == 0 and chapter.end_ms is None:
+                continue
+            if self.duration > 0:
+                duration_ms = self.duration * 1000
+                if chapter.start_ms >= duration_ms or (chapter.end_ms or 0) > duration_ms:
+                    continue
+            chapters.append(chapter)
+        return chapters
+
+    def attachments(self) -> list[Attachment]:
+        images = self.raw.get("images")
+        if not isinstance(images, dict):
+            return []
+        attachments = []
+        seen: set[str] = set()
+        for role, value in images.items():
+            if not isinstance(value, str):
+                continue
+            url = value.strip()
+            try:
+                parsed = urlparse(url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
+                    continue
+            except ValueError:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            kind = {"poster": "poster", "tile": "thumbnail"}.get(role, "artwork")
+            attachments.append(Attachment(url=url, name=role.replace("_", " ").title(), kind=kind))
+        return attachments
 
     @property
     def is_episode(self) -> bool:

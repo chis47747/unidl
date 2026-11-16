@@ -445,18 +445,31 @@ class FranceTV(Service):
             )
         else:
             drm = DrmInfo(clear=True)
-        yield ctx.emit(
-            Playback(
-                title=title,
-                save_name=self.save_name(title),
-                manifest_url=source.manifest,
-                headers={"User-Agent": api.USER_AGENT},
-                proxy=self.ctx.proxy,
-                is_live=source.is_live,
-                note=note,
-                drm=drm,
+        try:
+            yield ctx.emit(
+                Playback(
+                    title=title,
+                    save_name=self.save_name(title),
+                    manifest_url=source.manifest,
+                    headers={"User-Agent": api.USER_AGENT},
+                    proxy=self.ctx.proxy,
+                    is_live=source.is_live,
+                    note=note,
+                    drm=drm,
+                    chapters=(
+                        list(source.chapters) if self.fetch_chapters_enabled() else []
+                    ),
+                    attachments=(
+                        list(source.attachments)
+                        if self.fetch_attachments_enabled()
+                        else []
+                    ),
+                )
             )
-        )
+        except Back:
+            # Delivery raises Back after success, failure, or dismissal. Keep
+            # the current France.tv search/program page mounted.
+            return
 
     def _title(self, source: api.Source) -> Title:
         if source.is_live:

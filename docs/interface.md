@@ -94,6 +94,8 @@ space from progress or the log.
 The service-level **Tracks and output → Embed chapters in the final file** toggle
 controls only whether those chapters are written into the final MKV/MP4 container;
 it does not hide or discard the metadata shown here or stored in exports.
+**Subtitle output** in the same section controls whether selected subtitles are
+embedded, kept as external sidecar files while audio/video are muxed, or skipped.
 A multi-title selection adds the queue described in [batch.md](batch.md).
 
 When **Track selection** is set to automatic, **Output scope** controls which

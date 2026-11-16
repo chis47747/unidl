@@ -13,6 +13,7 @@ from datetime import datetime
 
 import requests
 
+from ...core.attachments import Attachment
 from ...core.cdm import CdmError
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
 from ...core.playback import DrmInfo, Playback
@@ -25,7 +26,7 @@ from . import api
 @registry.register
 class GoPlay(Service):
     ID = "goplay"
-    NAME = "Play (Belgium)"
+    NAME = "Play Belgium"
     MEDIA_TYPES = ("video",)
     TAG = "GOPLAY"
     ALIASES = ("goplay", "play.tv", "play belgium", "play tv", "goplay.be")
@@ -490,17 +491,30 @@ class GoPlay(Service):
         program: api.Program | None = None,
         short_form: bool = False,
     ) -> Iterator[Ask]:
-        ctx.status(f"Loading Play video metadata for {item.title}")
-        video = client.short_form(item.id) if short_form or item.is_shortform else client.long_form(item.id)
-        if program is None and video.program_id:
-            try:
-                program = client.program(video.program_id)
-            except api.GoPlayError:
-                program = None
-        ctx.status(f"Authorizing Play playback for {video.title or item.title}")
-        source = client.play(video)
+        try:
+            ctx.status(f"Loading Play video metadata for {item.title}")
+            video = (
+                client.short_form(item.id)
+                if short_form or item.is_shortform
+                else client.long_form(item.id)
+            )
+            if program is None and video.program_id:
+                try:
+                    program = client.program(video.program_id)
+                except api.GoPlayError:
+                    program = None
+            ctx.status(f"Authorizing Play playback for {video.title or item.title}")
+            source = client.play(video)
+        except api.GoPlayError as exc:
+            ctx.error(str(exc))
+            return
         title = self._title(item, video, source, program=program, live=False)
-        yield ctx.emit(self._playback(title, source, live=False))
+        try:
+            yield ctx.emit(
+                self._playback(title, source, live=False, item=item, program=program)
+            )
+        except Back:
+            return
 
     def _emit_live(
         self,
@@ -508,8 +522,12 @@ class GoPlay(Service):
         client: api.GoPlayApi,
         item: api.CatalogItem,
     ) -> Iterator[Ask]:
-        ctx.status(f"Authorizing Play live playback for {item.title}")
-        card, source = client.live_detail(item.id)
+        try:
+            ctx.status(f"Authorizing Play live playback for {item.title}")
+            card, source = client.live_detail(item.id)
+        except api.GoPlayError as exc:
+            ctx.error(str(exc))
+            return
         video = api.Video(
             id=card.id,
             title=source.title or card.now_title or card.title,
@@ -518,9 +536,20 @@ class GoPlay(Service):
             brand=card.brand,
         )
         title = self._title(card, video, source, program=None, live=True)
-        yield ctx.emit(self._playback(title, source, live=True))
+        try:
+            yield ctx.emit(self._playback(title, source, live=True, item=card))
+        except Back:
+            return
 
-    def _playback(self, title: Title, source: api.PlaybackSource, *, live: bool) -> Playback:
+    def _playback(
+        self,
+        title: Title,
+        source: api.PlaybackSource,
+        *,
+        live: bool,
+        item: api.CatalogItem | None = None,
+        program: api.Program | None = None,
+    ) -> Playback:
         drm = None
         if source.drm_xml:
             drm = DrmInfo(
@@ -534,6 +563,25 @@ class GoPlay(Service):
             if drm is not None
             else f"clear {source.manifest_type} · Play Android TV playback"
         )
+        attachments: list[Attachment] = []
+        if self.fetch_attachments_enabled():
+            seen: set[str] = set()
+            for url, name, kind in (
+                (item.image_url if item else "", "Artwork", "artwork"),
+                (program.image_url if program else "", "Program artwork", "artwork"),
+            ):
+                value = str(url or "").strip()
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                attachments.append(
+                    Attachment(
+                        url=value,
+                        name=name,
+                        kind=kind,
+                        mime_type="image/jpeg",
+                    )
+                )
         return Playback(
             title=title,
             save_name=self.save_name(title),
@@ -545,6 +593,7 @@ class GoPlay(Service):
             drm=drm,
             note=note,
             chapters=list(source.chapters) if not live and self.fetch_chapters_enabled() else [],
+            attachments=attachments,
         )
 
     def _title(

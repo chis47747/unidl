@@ -24,6 +24,9 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
+
 APP_VERSION = "5.14.2"
 PLAYER_VERSION = "7.19.1"
 MEDIA3_VERSION = "1.9.0"
@@ -185,6 +188,8 @@ class Source:
     drm_token: str = ""
     format: str = ""
     note: str = ""
+    chapters: tuple[Chapter, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
 
 
 @dataclass
@@ -379,6 +384,142 @@ def _item_title(item: dict[str, Any]) -> str:
 def _normalize_year(value: Any) -> str:
     year = _text(value)
     return year if re.fullmatch(r"(?:18|19|20|21)\d{2}", year) else ""
+
+
+def _chapter_seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        parts = str(value).strip().split(":")
+        if len(parts) not in {2, 3}:
+            return None
+        try:
+            values = [float(part) for part in parts]
+        except ValueError:
+            return None
+        number = values[-1] + values[-2] * 60
+        if len(values) == 3:
+            number += values[0] * 3600
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number / 1000 if number >= 100_000 else number
+
+
+def _chapter_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        for key in ("items", "data", "chapters", "cues", "markers"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return [row for row in nested if isinstance(row, dict)]
+        return [value]
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
+def _chapters_from(*blobs: Any) -> tuple[Chapter, ...]:
+    chapters: list[Chapter] = []
+    seen: set[tuple[int, str, str]] = set()
+    for blob in blobs:
+        if not isinstance(blob, dict):
+            continue
+        for key in ("chapters", "chapter_markers", "cue_points", "cuePoints", "markers", "segments"):
+            for row in _chapter_rows(blob.get(key)):
+                start_value = next(
+                    (
+                        row[name]
+                        for name in ("start", "start_time", "startTime", "time", "offset", "timestamp")
+                        if row.get(name) not in (None, "")
+                    ),
+                    None,
+                )
+                start = _chapter_seconds(start_value)
+                if start is None:
+                    continue
+                end_value = next(
+                    (
+                        row[name]
+                        for name in ("end", "end_time", "endTime")
+                        if row.get(name) not in (None, "")
+                    ),
+                    None,
+                )
+                end = _chapter_seconds(end_value)
+                if end is None:
+                    duration = _chapter_seconds(row.get("duration"))
+                    end = start + duration if duration is not None else None
+                title = _text(row.get("title") or row.get("name") or row.get("label"))
+                kind = _text(row.get("kind") or row.get("type")).lower()
+                try:
+                    chapter = Chapter.from_seconds(
+                        start,
+                        title or f"Chapter {len(chapters) + 1}",
+                        end,
+                        kind=kind,
+                    )
+                except ValueError:
+                    continue
+                identity = (chapter.start_ms, chapter.title, chapter.kind)
+                if identity not in seen:
+                    seen.add(identity)
+                    chapters.append(chapter)
+    return tuple(chapters)
+
+
+def _image_urls(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip().startswith(("https://", "http://")) else []
+    if isinstance(value, dict):
+        direct = value.get("url") or value.get("src") or value.get("href")
+        result = _image_urls(direct)
+        if result:
+            return result
+        urls: list[str] = []
+        for child in value.values():
+            urls.extend(_image_urls(child))
+        return urls
+    if isinstance(value, list):
+        urls: list[str] = []
+        for child in value:
+            urls.extend(_image_urls(child))
+        return urls
+    return []
+
+
+def _attachments_from(*blobs: Any) -> tuple[Attachment, ...]:
+    attachments: list[Attachment] = []
+    seen: set[str] = set()
+    fields = (
+        ("poster", "Poster", "poster"),
+        ("poster_url", "Poster", "poster"),
+        ("posterUrl", "Poster", "poster"),
+        ("thumbnail", "Thumbnail", "thumbnail"),
+        ("thumbnail_url", "Thumbnail", "thumbnail"),
+        ("thumbnailUrl", "Thumbnail", "thumbnail"),
+        ("backdrop", "Backdrop", "artwork"),
+        ("backdrop_url", "Backdrop", "artwork"),
+        ("backdropUrl", "Backdrop", "artwork"),
+        ("cover", "Cover", "artwork"),
+        ("cover_url", "Cover", "artwork"),
+        ("coverUrl", "Cover", "artwork"),
+        ("logo", "Logo", "logo"),
+        ("logo_url", "Logo", "logo"),
+        ("logoUrl", "Logo", "logo"),
+        ("images", "Artwork", "artwork"),
+        ("artworks", "Artwork", "artwork"),
+    )
+    for blob in blobs:
+        if not isinstance(blob, dict):
+            continue
+        for key, name, kind in fields:
+            for url in _image_urls(blob.get(key)):
+                if url in seen:
+                    continue
+                seen.add(url)
+                attachments.append(Attachment(url, name=name, kind=kind, mime_type="image/jpeg"))
+    return tuple(attachments)
 
 
 def _validated_https_url(
@@ -1376,6 +1517,8 @@ class FranceTvApi:
             )
             drm_token = self._drm_token(playback, video, drm)
         playable = self._playable_item(item)
+        chapters = _chapters_from(item.raw, playback, video)
+        attachments = _attachments_from(item.raw, playback, video)
         return Source(
             content_id=_scalar_text(playable.get("id") or item.id),
             media_id=_scalar_text(playable.get("si_id") or item.si_id),
@@ -1391,6 +1534,8 @@ class FranceTvApi:
             drm_token=drm_token,
             format=stream_type,
             note="widevine" if encrypted else "clear",
+            chapters=chapters,
+            attachments=attachments,
         )
 
     def widevine_license(self, challenge: bytes, *, license_url: str, drm_token: str) -> bytes:

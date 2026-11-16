@@ -8,17 +8,74 @@ Playback:      VRT media-services DASH/HLS; protected video uses Widevine DASH.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
+from typing import Any
 
 import requests
 
 from ...core.cdm import CdmError
-from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
+from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
 from ...core.playback import DrmInfo, Playback
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
 from . import api
+
+_FLOW_ERRORS = (RuntimeError, requests.RequestException, OSError)
+
+
+def _browse_page(
+    ctx: FlowContext, page: Pick, visit: Callable[[Any], Iterator[Ask]],
+) -> Iterator[Ask]:
+    """Keep the actual parent page and its selection while visiting a child."""
+    while True:
+        selected = yield page
+        if selected is None:
+            return
+        if page.multi and not selected:
+            if ctx.interactive:
+                continue
+            return
+        values = selected if page.multi else [selected]
+        indexes = [index for index, choice in enumerate(page.choices) if choice.value in values]
+        if indexes:
+            page.cursor = indexes[0]
+            if page.multi:
+                page.preselected = indexes
+        try:
+            yield from visit(selected)
+        except Back:
+            continue
+        except _FLOW_ERRORS as exc:
+            ctx.error(str(exc))
+        if not ctx.interactive:
+            return
+
+
+def _browse_input(
+    ctx: FlowContext,
+    title: str,
+    visit: Callable[[FlowContext, str], Iterator[Ask]],
+    initial: str,
+) -> Iterator[Ask]:
+    page = ctx.text(title)
+    value = initial or None
+    while True:
+        if value is None:
+            value = yield page
+        wanted = str(value or "").strip()
+        if not wanted:
+            return
+        page.default = wanted
+        try:
+            yield from visit(ctx, wanted)
+        except Back:
+            pass
+        except _FLOW_ERRORS as exc:
+            ctx.error(str(exc))
+        if not ctx.interactive:
+            return
+        value = None
 
 
 @registry.register
@@ -53,11 +110,14 @@ class VrtMax(Service):
         path.chmod(0o600)
 
     def _new_client(self, state: api.Session | None = None) -> api.VrtMaxApi:
-        return api.VrtMaxApi(
+        client = api.VrtMaxApi(
             self.ctx.session(user_agent=api.USER_AGENT, cookies=False),
             state or api.Session(),
             on_save=self._save_state,
         )
+        client.fetch_chapters = self.fetch_chapters_enabled()
+        client.fetch_attachments = self.fetch_attachments_enabled()
+        return client
 
     def auth_status(self) -> AuthStatus:
         state = api.Session.from_cache(self.ctx.tokens.read(self.TOKEN_FILE))
@@ -110,6 +170,8 @@ class VrtMax(Service):
 
     def client(self, ctx: FlowContext | None = None) -> api.VrtMaxApi:
         if self._api is not None:
+            self._api.fetch_chapters = self.fetch_chapters_enabled()
+            self._api.fetch_attachments = self.fetch_attachments_enabled()
             self._api.ensure_auth()
             self._save_state(self._api.state)
             return self._api
@@ -132,6 +194,7 @@ class VrtMax(Service):
     # -------------------------------------------------------------------- home
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
         """Add the TV homepage browse entry to the framework's normal actions."""
+        page = ctx.pick("", [], scope=SCOPE_ROOT)
         while True:
             status = self._auth_status_quietly()
             choices: list[Choice] = []
@@ -150,18 +213,18 @@ class VrtMax(Service):
                 choices.append(Choice("Sign in again", "login", detail=status.label))
                 choices.append(Choice("Sign out", "logout", detail=status.label))
 
-            action = yield ctx.pick("", choices, scope=SCOPE_ROOT)
+            page.choices = choices
+            action = yield page
+            page.cursor = next((index for index, choice in enumerate(choices) if choice.value == action), 0)
             try:
                 if action == "browse":
                     yield from self._browse(ctx)
                 elif action == "url":
-                    target = yield ctx.text("Enter a VRT MAX URL")
-                    yield from self.open_url(ctx, str(target or "").strip())
+                    yield from self.open_url(ctx, "")
                 elif action == "live":
                     yield from self.live(ctx)
                 elif action == "search":
-                    query = yield ctx.text("Search VRT MAX")
-                    yield from self.search(ctx, str(query or "").strip())
+                    yield from self.search(ctx, "")
                 elif action == "login":
                     yield from self.begin_login(ctx)
                 elif action == "logout":
@@ -171,7 +234,7 @@ class VrtMax(Service):
                     yield ctx.settings_request()
             except Back:
                 continue
-            except RuntimeError as exc:
+            except _FLOW_ERRORS as exc:
                 ctx.problem(
                     f"{self.NAME} could not finish that",
                     f"{type(exc).__name__}: {exc}",
@@ -186,6 +249,9 @@ class VrtMax(Service):
         yield from self._page_flow(ctx, client, page, title="VRT MAX TV home")
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        yield from _browse_input(ctx, "Enter a VRT MAX URL", self._open_target, target)
+
+    def _open_target(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         page_id = api.parse_reference(target)
         if page_id is None:
             ctx.error("Expected a https://www.vrt.be/vrtmax/... URL")
@@ -224,6 +290,9 @@ class VrtMax(Service):
         return len(parts) > 3 and parts[:2] == ["vrtmax", "a-z"]
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        yield from _browse_input(ctx, "Search VRT MAX", self._search_results, query)
+
+    def _search_results(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
         keyword = str(query or "").strip()
         if not keyword:
             ctx.warn("Search query is empty")
@@ -271,23 +340,19 @@ class VrtMax(Service):
         if not shelves:
             ctx.warn(f"{title} contains no browsable TV lists")
             return
-        while True:
-            try:
-                selected = yield ctx.pick(
-                    title,
-                    [
-                        Choice(
-                            catalog.title or f"Recommendations {index}",
-                            catalog,
-                            detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
-                        )
-                        for index, catalog in enumerate(shelves, 1)
-                    ],
+        picker = ctx.pick(
+            title,
+            [
+                Choice(
+                    catalog.title or f"Recommendations {index}",
+                    catalog,
+                    detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
                 )
-            except Back:
-                return
-            if not isinstance(selected, api.CatalogList):
-                return
+                for index, catalog in enumerate(shelves, 1)
+            ],
+        )
+
+        def visit(selected: api.CatalogList) -> Iterator[Ask]:
             catalog = self._resolve_list(client, selected)
             yield from self._item_flow(
                 ctx,
@@ -295,6 +360,8 @@ class VrtMax(Service):
                 catalog.items,
                 title=catalog.title or title,
             )
+
+        yield from _browse_page(ctx, picker, visit)
 
     def _item_flow(
         self,
@@ -307,29 +374,20 @@ class VrtMax(Service):
         if not items:
             ctx.warn(f"{title} contains no items")
             return
-        while True:
-            try:
-                selected = yield ctx.pick(
-                    title,
-                    [
-                        Choice(
-                            item.title,
-                            item,
-                            detail=item.detail,
-                            tags=(item.type_label,) if item.type_label else (),
-                            disabled=not item.available or not item.link,
-                        )
-                        for item in items
-                    ],
+        picker = ctx.pick(
+            title,
+            [
+                Choice(
+                    item.title,
+                    item,
+                    detail=item.detail,
+                    tags=(item.type_label,) if item.type_label else (),
+                    disabled=not item.available or not item.link,
                 )
-            except Back:
-                return
-            if not isinstance(selected, api.CatalogItem):
-                return
-            try:
-                yield from self._dispatch(ctx, client, selected)
-            except Back:
-                continue
+                for item in items
+            ],
+        )
+        yield from _browse_page(ctx, picker, lambda selected: self._dispatch(ctx, client, selected))
 
     def _dispatch(
         self,
@@ -364,22 +422,13 @@ class VrtMax(Service):
         if not sections:
             raise api.VrtMaxError(f"VRT MAX program {program.title!r} has no playable TV sections")
 
-        while True:
-            if len(sections) == 1:
-                section = sections[0]
-            else:
-                try:
-                    section = yield ctx.pick(
-                        program.title,
-                        [Choice(value.title, value) for value in sections],
-                    )
-                except Back:
-                    return
-                if not isinstance(section, api.ProgramSection):
-                    return
-            yield from self._section_flow(ctx, client, program, section)
-            if len(sections) == 1:
-                return
+        if len(sections) == 1:
+            yield from self._section_flow(ctx, client, program, sections[0])
+            return
+        picker = ctx.pick(program.title, [Choice(value.title, value) for value in sections])
+        yield from _browse_page(
+            ctx, picker, lambda section: self._section_flow(ctx, client, program, section),
+        )
 
     def _section_flow(
         self,
@@ -406,66 +455,53 @@ class VrtMax(Service):
             ctx.warn(f"{program.title} · {section.title} contains no playable lists")
             return
 
-        while True:
-            if len(lists) == 1:
-                selected_list = lists[0]
-            else:
-                try:
-                    selected_list = yield ctx.pick(
-                        f"{program.title} · {section.title}",
-                        [
-                            Choice(
-                                catalog.title or f"List {index}",
-                                catalog,
-                                detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
-                            )
-                            for index, catalog in enumerate(lists, 1)
-                        ],
-                    )
-                except Back:
-                    return
-                if not isinstance(selected_list, api.CatalogList):
-                    return
+        episode_pages: dict[int, Pick] = {}
 
-            complete = self._resolve_list(client, selected_list)
-            while True:
-                try:
-                    selected = yield ctx.pick(
-                        f"{program.title} · {complete.title or section.title} · {len(complete.items)} items",
-                        [
-                            Choice(
-                                item.title,
-                                item,
-                                detail=item.detail,
-                                tags=(item.type_label,) if item.type_label else (),
-                                disabled=not item.available or not item.link,
-                            )
-                            for item in complete.items
-                        ],
-                        multi=True,
-                        hint="space to tick · enter to confirm",
-                    )
-                except Back:
-                    break
-                chosen = list(selected or [])
-                if not chosen:
-                    continue
-                if len(chosen) > 1:
-                    try:
-                        ctx.batch(len(chosen))
-                    except Back:
-                        continue
-                delivery_back = False
-                for item in chosen:
-                    try:
-                        yield from self._emit_item(ctx, client, item, program=program)
-                    except Back:
-                        delivery_back = True
-                        break
-                if delivery_back:
-                    continue
-            if len(lists) == 1:
-                return
+        def episodes(selected_list: api.CatalogList) -> Iterator[Ask]:
+            key = id(selected_list)
+            if key not in episode_pages:
+                complete = self._resolve_list(client, selected_list)
+                if not complete.items:
+                    ctx.warn(f"{program.title} · {complete.title or section.title} contains no items")
+                    return
+                episode_pages[key] = ctx.pick(
+                    f"{program.title} · {complete.title or section.title} · {len(complete.items)} items",
+                    [
+                        Choice(
+                            item.title,
+                            item,
+                            detail=item.detail,
+                            tags=(item.type_label,) if item.type_label else (),
+                            disabled=not item.available or not item.link,
+                        )
+                        for item in complete.items
+                    ],
+                    multi=True,
+                    hint="space to tick · enter to confirm",
+                )
+            yield from _browse_page(ctx, episode_pages[key], deliver)
+
+        def deliver(chosen: list[api.CatalogItem]) -> Iterator[Ask]:
+            if len(chosen) > 1:
+                ctx.batch(len(chosen))
+            for item in chosen:
+                yield from self._emit_item(ctx, client, item, program=program)
+
+        if len(lists) == 1:
+            yield from episodes(lists[0])
+            return
+        picker = ctx.pick(
+            f"{program.title} · {section.title}",
+            [
+                Choice(
+                    catalog.title or f"List {index}",
+                    catalog,
+                    detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
+                )
+                for index, catalog in enumerate(lists, 1)
+            ],
+        )
+        yield from _browse_page(ctx, picker, episodes)
 
     @staticmethod
     def _resolve_list(client: api.VrtMaxApi, catalog: api.CatalogList) -> api.CatalogList:
@@ -493,6 +529,8 @@ class VrtMax(Service):
         *,
         program: api.Program | None = None,
     ) -> Iterator[Ask]:
+        client.fetch_chapters = self.fetch_chapters_enabled() and not item.is_live
+        client.fetch_attachments = self.fetch_attachments_enabled()
         ctx.status(f"Loading VRT MAX playback metadata for {item.title}")
         player = client.player_data(item.link)
         mode = player.active_mode()
@@ -501,6 +539,13 @@ class VrtMax(Service):
         ctx.status(f"Authorizing VRT MAX playback for {player.title or item.title}")
         source = client.playback_source(mode.stream_id, audio_live=audio and live)
         title = self._title(item, player, source, program=program, live=live, audio=audio)
+        if title.duration is None:
+            title.duration = mode.duration
+        chapters = list(mode.chapters) if self.fetch_chapters_enabled() and not live else []
+        if self.fetch_chapters_enabled() and not live:
+            for warning in mode.metadata_warnings:
+                ctx.warn(warning)
+        attachments = api.title_attachments(item, player, program) if self.fetch_attachments_enabled() else []
         drm = (
             DrmInfo(system="widevine", license_url=source.license_url)
             if source.drm_token
@@ -524,6 +569,8 @@ class VrtMax(Service):
                 note=note,
                 audio_only=audio,
                 audio_tags=title.audio_tags() if audio else {},
+                chapters=chapters,
+                attachments=attachments,
             )
         )
 

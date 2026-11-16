@@ -273,7 +273,7 @@ heartbeat interval is part of the shared settings contract.
 | `http_timeout` | seconds | `30` | Compatibility key controlled by **Download behavior**. HTTP timeout for native segment requests. |
 | `max_speed` | e.g. `15M` | empty | Compatibility key controlled by **Download behavior**. Empty means unlimited. |
 | `title_delay` | `off`, `30`, or `20-40` | `off` | Compatibility key controlled by **Download behavior**. Adds a random or fixed delay between automatically queued VOD titles. It does not delay tracks within one title or live recording segments. |
-| `muxer` | `auto` / `ffmpeg` / `mkvmerge` / `none` | `auto` | Controlled by **Download behavior → Muxer**. Choose **No mux (original tracks)** to save joined, decrypted tracks separately, without audio/subtitle conversion or Hybrid processing. Otherwise per-service **Container** chooses MKV or MP4. |
+| `muxer` | `auto` / `ffmpeg` / `mkvmerge` / `mp4box` / `none` | `auto` | Controlled by **Download behavior → Muxer**. Choose **MP4Box (MP4)** for MP4 output, or **No mux (original tracks)** to save joined, decrypted tracks separately, without audio/subtitle conversion or Hybrid processing. 3D VOD selects MP4Box automatically. Otherwise per-service **Container** chooses MKV or MP4. |
 | `segment_downloader` | `python` / `aria2c` | `python` | Compatibility key controlled by **Download behavior**. `aria2c` is used only when chosen and installed. |
 | `resume_parts` | on / off | on | Compatibility key controlled by **Download behavior**. Reuse verified segments and completed track-stage checkpoints after failure or cancellation. Off starts fresh. |
 | `check_segments_count` | on / off | on | Compatibility key controlled by **Download behavior**. Fail a track whose downloaded part count does not match the manifest. |
@@ -476,6 +476,7 @@ compatibility and DASH/HLS/ISM scope.
 | `audio_langs` | comma separated BCP-47/ISO tags, empty = best language | empty |
 | `default_audio` | `auto` / `original` / one language tag; only final selected audio participates | `auto` |
 | `default_subtitle` | `auto` / `original` / one language tag; only final selected subtitles participate | `auto` |
+| `subtitle_output` | `muxed` / `external` / `none` | `muxed` |
 | `audio_selection` | `best` / `all` | `best` |
 | `sub_langs` | comma separated, `all`, or empty to skip | `all` |
 | `subtitle_kinds` | comma separated `normal`, `forced`, `sdh`, `commentary`, `audio_description`, or `all` | `normal,forced` |
@@ -556,6 +557,11 @@ default. It supports Auto, Original, and one language tag, including service
 sidecar subtitles; missing matches fall back to the selected original subtitle
 or leave the default flag unset with a warning. See
 [track-selection.md](track-selection.md#default-subtitle-in-the-muxed-file).
+
+`subtitle_output` controls where the selected subtitles go: `muxed` embeds
+them in the final container, `external` keeps them as sidecar files beside the
+audio/video output while muxing only audio and video, and `none` skips subtitle
+downloads entirely. The service-level value may inherit the app-wide choice.
 
 ### Do not remove `drop_video` without reading this
 

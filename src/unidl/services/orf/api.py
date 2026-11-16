@@ -14,6 +14,9 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse
 
 import requests
 
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
+
 API_BASE_URL = "https://api-tvthek.orf.at/api/v4.3/"
 PROFILE_API_BASE_URL = "https://konto-api.orf.at/"
 OIDC_DEVICE_URL = "https://anmeldung.orf.at/connect/deviceauthorization"
@@ -59,6 +62,13 @@ _SECRET = re.compile(
 )
 _SEASON = re.compile(r"^(.+?)\s+(Staffel|Season)\s+(\d+)$", re.IGNORECASE)
 _EPISODE_POSITION = re.compile(r"\((\d+)\s*/\s*\d+\)")
+_CLOCK = re.compile(r"^(\d+):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$")
+
+_IMAGE_ATTACHMENTS = (
+    ("image", "Artwork", "image"),
+    ("image16x9_with_logo", "Backdrop", "backdrop"),
+    ("image2x3_with_logo", "Poster", "poster"),
+)
 
 
 class OrfError(RuntimeError):
@@ -267,6 +277,8 @@ class Video:
     drm_token_multikey: str = field(default="", repr=False)
     streams: tuple[Stream, ...] = ()
     segments: tuple[Video, ...] = ()
+    chapters: tuple[Chapter, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
     profile: Profile | None = None
     profile_url: str = field(default="", repr=False)
     episode_url: str = field(default="", repr=False)
@@ -422,6 +434,88 @@ def _streams(raw: dict[str, Any]) -> tuple[Stream, ...]:
     return tuple(found)
 
 
+def _clock_seconds(value: Any, label: str) -> float:
+    text = str(value or "").strip()
+    match = _CLOCK.fullmatch(text)
+    if not match:
+        raise OrfError(f"ORF {label} has an invalid timestamp")
+    fraction = (match.group(4) or "").ljust(3, "0")
+    return (
+        int(match.group(1)) * 3600
+        + int(match.group(2)) * 60
+        + int(match.group(3))
+        + int(fraction or "0") / 1000
+    )
+
+
+def _chapters(raw: dict[str, Any]) -> tuple[Chapter, ...]:
+    values = raw.get("jump_marks")
+    if values is None:
+        values = []
+    marks = _list(values, "jump marks")
+    chapters: list[Chapter] = []
+    for index, value in enumerate(marks, start=1):
+        mark = _object(value, f"jump mark {index}")
+        start = _clock_seconds(mark.get("start_time"), f"jump mark {index} start")
+        end = _clock_seconds(mark.get("end_time"), f"jump mark {index} end")
+        if end <= start:
+            raise OrfError(f"ORF jump mark {index} ends before it starts")
+        chapters.append(Chapter.from_seconds(start, "Jump mark", end, kind="jump"))
+
+    closing = _number(raw.get("closing_credits_duration_seconds"))
+    duration = _number(raw.get("duration_seconds"))
+    if closing and closing > 0 and duration and duration > closing:
+        chapters.append(
+            Chapter.from_seconds(
+                duration - closing,
+                "Credits",
+                duration,
+                kind="credits",
+            )
+        )
+    return tuple(chapters)
+
+
+def _attachment_mime(url: str) -> str:
+    suffix = urlparse(url).path.rsplit(".", 1)[-1].casefold() if "." in urlparse(url).path else ""
+    return {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+    }.get(suffix, "")
+
+
+def _attachments(raw: dict[str, Any], embedded: dict[str, Any]) -> tuple[Attachment, ...]:
+    found: list[Attachment] = []
+    seen_urls: set[str] = set()
+    for key, name, kind in _IMAGE_ATTACHMENTS:
+        image = embedded.get(key)
+        if not isinstance(image, dict):
+            continue
+        public_urls = image.get("public_urls")
+        if not isinstance(public_urls, dict):
+            continue
+        reference = public_urls.get("reference")
+        if not isinstance(reference, dict):
+            continue
+        url = str(reference.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        found.append(
+            Attachment(
+                url=url,
+                name=name,
+                kind=kind,
+                mime_type=_attachment_mime(url),
+                filename=f"orf-{_integer(raw.get('id'), 'video ID')}-{kind}"
+                f"{'.' + urlparse(url).path.rsplit('.', 1)[-1] if '.' in urlparse(url).path else ''}",
+            )
+        )
+    return tuple(found)
+
+
 def _video(raw: dict[str, Any], expected_kind: str = "") -> Video:
     item_id = _integer(raw.get("id"), "video ID")
     actual = str(raw.get("video_type") or expected_kind).lower()
@@ -451,6 +545,8 @@ def _video(raw: dict[str, Any], expected_kind: str = "") -> Video:
 
     embedded_profile = embedded.get("profile")
     profile = _profile(embedded_profile, "embedded profile") if isinstance(embedded_profile, dict) else None
+    chapters = _chapters(raw)
+    attachments = _attachments(raw, embedded)
 
     return Video(
         id=item_id,
@@ -470,6 +566,8 @@ def _video(raw: dict[str, Any], expected_kind: str = "") -> Video:
         drm_token_multikey=str(raw.get("drm_token_multikey") or ""),
         streams=_streams(raw),
         segments=segments,
+        chapters=chapters,
+        attachments=attachments,
         profile=profile,
         profile_url=_link(raw, "profile"),
         episode_url=_link(raw, "episode"),

@@ -621,6 +621,9 @@ class Orf(Service):
                             navigates=True,
                         ),
                     ],
+                    chapters=episode.chapters if self.fetch_chapters_enabled() else (),
+                    attachments=episode.attachments if self.fetch_attachments_enabled() else (),
+                    attachments_proxy=self.ctx.proxy,
                 )
             except Back:
                 return
@@ -633,33 +636,37 @@ class Orf(Service):
                 continue
             if action != "segments":
                 return
-            try:
-                picked = yield ctx.pick(
-                    f"{episode.title} · segments",
-                    [
-                        Choice(
-                            segment.title,
-                            segment,
-                            detail=self._duration_detail(segment),
-                            disabled=not segment.available,
-                        )
-                        for segment in episode.segments
-                    ],
-                    multi=True,
-                    hint="space to tick, enter to confirm",
-                )
-            except Back:
-                continue
-            chosen = [item for item in list(picked or []) if isinstance(item, api.Video)]
-            if not chosen:
-                continue
-            if len(chosen) > 1:
-                ctx.batch(len(chosen))
-            for segment in chosen:
+            while True:
                 try:
-                    yield from self._emit_segment(ctx, client, episode, segment)
+                    picked = yield ctx.pick(
+                        f"{episode.title} · segments",
+                        [
+                            Choice(
+                                segment.title,
+                                segment,
+                                detail=self._duration_detail(segment),
+                                disabled=not segment.available,
+                            )
+                            for segment in episode.segments
+                        ],
+                        multi=True,
+                        hint="space to tick, enter to confirm",
+                        chapters=episode.chapters if self.fetch_chapters_enabled() else (),
+                        attachments=episode.attachments if self.fetch_attachments_enabled() else (),
+                        attachments_proxy=self.ctx.proxy,
+                    )
                 except Back:
                     break
+                chosen = [item for item in list(picked or []) if isinstance(item, api.Video)]
+                if not chosen:
+                    continue
+                if len(chosen) > 1:
+                    ctx.batch(len(chosen))
+                for segment in chosen:
+                    try:
+                        yield from self._emit_segment(ctx, client, episode, segment)
+                    except Back:
+                        break
 
     @staticmethod
     def _duration_detail(video: api.Video) -> str:
@@ -757,6 +764,16 @@ class Orf(Service):
             proxy=self.ctx.proxy,
             is_live=live,
             drm=drm,
+            chapters=(
+                list(video.chapters)
+                if self.fetch_chapters_enabled() and not live
+                else []
+            ),
+            attachments=(
+                list(video.attachments)
+                if self.fetch_attachments_enabled()
+                else []
+            ),
             extra_args=["--append-url-params"] if urlsplit(source.manifest_url).query else [],
             note=source.line,
         )

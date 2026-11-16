@@ -253,7 +253,10 @@ class JustWatchTV(Service):
             if chosen is None:
                 return
 
-            yield from self._open_details(ctx, client, chosen)
+            try:
+                yield from self._open_details(ctx, client, chosen)
+            except Back:
+                continue
 
     def live(self, ctx: FlowContext) -> Iterator[Ask]:
         """Browse JustWatch TV Free / FAST catalogue."""
@@ -290,7 +293,10 @@ class JustWatchTV(Service):
             if chosen is None:
                 return
 
-            yield from self._open_details(ctx, client, chosen)
+            try:
+                yield from self._open_details(ctx, client, chosen)
+            except Back:
+                continue
 
     def _open_details(
         self,
@@ -397,7 +403,10 @@ class JustWatchTV(Service):
 
             selected_list = list(picked) if isinstance(picked, (list, tuple)) else [picked]
             if len(selected_list) > 1:
-                ctx.batch(len(selected_list))
+                try:
+                    ctx.batch(len(selected_list))
+                except Back:
+                    continue
 
             for ep in selected_list:
                 offer = ep.jwt_offer
@@ -452,7 +461,12 @@ class JustWatchTV(Service):
             except Exception as exc:
                 ctx.warn(f"Failed to extract chapters: {exc}")
 
-        yield ctx.emit(playback)
+        try:
+            yield ctx.emit(playback)
+        except Back:
+            # Delivery returns Back after success, failure, or dismissal. Keep
+            # the current JustWatch title/episode list mounted.
+            return
 
     def _create_playback(
         self,
@@ -541,13 +555,22 @@ class JustWatchTV(Service):
         else:
             drm = DrmInfo(clear=True)
 
-        return Playback(
+        playback = Playback(
             title=title,
             save_name=self.save_name(title),
             manifest_url=play_info.stream_url,
             headers=client._headers(),
             drm=drm,
         )
+        try:
+            details = client.get_node(title.id)
+            if self.fetch_attachments_enabled():
+                playback.attachments = client.extract_attachments(details)
+            if self.fetch_chapters_enabled() and play_info.stream_url:
+                playback.chapters = client.parse_manifest_chapters(play_info.stream_url)
+        except Exception as exc:
+            logger.debug("JustWatch TV metadata enrichment failed: %s", exc)
+        return playback
 
     # -------------------------------------------------------------- licensing
 
