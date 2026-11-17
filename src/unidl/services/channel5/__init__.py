@@ -8,6 +8,7 @@ from importlib.resources import as_file, files
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
 from ...core.helpers import Helper, HelperKind
 from ...core.playback import DrmInfo, Playback
+from ...core.qr import QrPresentation
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
 from . import api, metadata
@@ -20,11 +21,8 @@ _CURL = Helper(
     install_hint="install curl, or set helpers.curl in unidl.yaml",
 )
 
-# These are client protocol materials shipped by Channel 5's Android app, not
-# account credentials. Keep the password out of argv by sending curl's config
-# over stdin in _cassie().
 _CASSIE_CERT = files(__package__).joinpath("cassie.p12")
-_CASSIE_P12_PASSWORD = "w78t78bfkl@aweQGzE"
+_CASSIE_P12_PASSWORD = "cprow5o**+936754jhfuUUnri548"
 
 
 class Channel5(Service):
@@ -32,18 +30,73 @@ class Channel5(Service):
     NAME = "Channel 5"
     TAG = "MY5"
     ALIASES = ("my5", "five")
-    TITLE_RE = r"(?:channel5\.com|my5\.tv)/(?:show|shows|watch|channels?|live)/"
+    TITLE_RE = (
+        r"^(?:https?://)?(?:[a-z0-9-]+\.)*(?:channel5\.com|my5\.tv)/"
+        r"(?:shows?|season|watch(?:ables?)?|episodes?|channels?|live)/"
+    )
     GEOFENCE = ("GB",)
-    DESCRIPTION = "Channel 5 catalogue and live channels; Widevine via Cassie mTLS."
+    DESCRIPTION = "Channel 5 Android TV catalogue and live channels; Widevine via Cassie mTLS."
     USES = Capabilities()
     DRM_SYSTEMS = ("widevine",)
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
     HELPERS = [_CURL]
+    TOKEN_FILE = "channel5_tv_session.json"
+
+    def _session_token(self) -> str:
+        state = self.ctx.tokens.read(self.TOKEN_FILE) or {}
+        return api.bearer_token(state.get("sessionToken"))
 
     def auth_status(self) -> AuthStatus:
+        if self._session_token():
+            return AuthStatus(logged_in=True, anonymous_ok=True, label="saved TV session")
         return AuthStatus(logged_in=False, anonymous_ok=True, label="no account needed")
+
+    def login(self, ctx: FlowContext) -> Iterator[Ask]:
+        ctx.status("Requesting a Channel 5 TV code")
+        with self.ctx.session(user_agent=api.USER_AGENT, cookies=False) as session:
+            client = api.Channel5Api(session=session)
+            try:
+                code = client.start_tv_code()
+            except api.Channel5Error as exc:
+                ctx.error(str(exc))
+                return
+
+            def poll():
+                try:
+                    return client.poll_tv_code(code)
+                except api.PairingUnavailable as exc:
+                    ctx.warn(str(exc))
+                    return None
+                except api.Channel5Error as exc:
+                    return exc
+
+            result = yield ctx.wait_for(
+                "Sign in to Channel 5",
+                [("Open", api.ACTIVATE_URL), ("Code", code.pin)],
+                poll=poll,
+                qr=QrPresentation(
+                    image_url=code.qr_url, fallback_url=api.ACTIVATE_URL, alt="Channel 5 TV code",
+                ) if code.qr_url else None,
+            )
+        if isinstance(result, api.Channel5Error):
+            ctx.error(str(result))
+            return
+        token = api.bearer_token(result)
+        if not token:
+            ctx.error("Channel 5 did not return a valid TV session")
+            return
+        try:
+            self.ctx.tokens.write(self.TOKEN_FILE, {"sessionToken": token})
+        except OSError:
+            ctx.error("Could not save the Channel 5 TV session")
+            return
+        ctx.log("Channel 5 TV session saved", "ok")
+
+    def logout(self) -> None:
+        self.ctx.tokens.remove(self.TOKEN_FILE)
+        super().logout()
 
     def client(self, ctx: FlowContext | None = None) -> api.Channel5Api:
         session = self.ctx.session(user_agent=api.USER_AGENT)
@@ -54,28 +107,35 @@ class Channel5(Service):
 
         def fetch(asset_id: str, is_live: bool) -> dict:
             runner = self.ctx.runner(log=ctx.log if ctx else None)
+            runner.debug = False  # Cassie stdout includes signed licence URLs.
             with as_file(_CASSIE_CERT) as certificate:
                 result = runner.run(
-                    [curl, "-sS", "--config", "-", api.cassie_url(asset_id, is_live)],
-                    stdin_text=api.curl_config(certificate, _CASSIE_P12_PASSWORD),
+                    [curl, "-q", "-sS", "--config", "-", api.cassie_url(asset_id, is_live)],
+                    stdin_text=api.curl_config(
+                        certificate, _CASSIE_P12_PASSWORD, session_token=self._session_token(),
+                    ),
                     timeout=40,
                 )
             return api.parse_cassie(result.stdout)
 
         return fetch
 
-    # ---------------------------------------------------------------- browsing
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
-        options = [
-            Choice("VOD - open a URL or content ID", "url"),
-            Choice("Live TV", "live"),
-            Choice("Search", "search"),
-            Choice("Settings", "settings"),
-        ]
-        page = ctx.pick("", options, scope=SCOPE_ROOT)
+        cursor = 0
         while True:
+            status = self.auth_status()
+            options = [
+                Choice("VOD - open a URL or content ID", "url"),
+                Choice("Live TV", "live"),
+                Choice("Search", "search"),
+                Choice("Settings", "settings"),
+                Choice("Sign in again" if status.logged_in else "Sign in", "login", detail="TV code"),
+            ]
+            if status.logged_in:
+                options.append(Choice("Sign out", "logout", detail="Continue anonymously"))
+            page = ctx.pick("", options, scope=SCOPE_ROOT, cursor=min(cursor, len(options) - 1))
             action = yield page
-            page.cursor = next((i for i, option in enumerate(options) if option.value == action), 0)
+            cursor = next((i for i, option in enumerate(options) if option.value == action), 0)
             try:
                 if action == "url":
                     yield from self._input(ctx, "Enter URL or content ID", self.open_url)
@@ -85,6 +145,11 @@ class Channel5(Service):
                     yield from self.live(ctx)
                 elif action == "settings":
                     yield ctx.settings_request()
+                elif action == "login":
+                    yield from self.begin_login(ctx)
+                elif action == "logout":
+                    self.logout()
+                    ctx.log("Signed out of Channel 5; continuing anonymously", "ok")
             except Back:
                 continue
             except RuntimeError as exc:
@@ -113,18 +178,20 @@ class Channel5(Service):
         if parsed is None:
             ctx.error(
                 f"That does not look like a Channel 5 link or id: {target}\n"
-                "Expected /show/<slug>, /watch/<C-id>, /channels/<name>, a show id, or a C-id."
+                "Expected a show, season, episode or live channel link, a show id, or a C-id."
             )
             return
         client = self.client(ctx)
         try:
             if parsed.kind == "watchable":
                 yield from self._emit(ctx, client, client.watchable(parsed.value))
+            elif parsed.kind == "episode":
+                yield from self._emit(ctx, client, client.episode(parsed.value, parsed.season, parsed.episode))
             elif parsed.kind == "live":
                 yield from self._emit_live(ctx, client, client.channel(parsed.value))
             else:
                 hit = client.resolve_show(parsed.value)
-                yield from self._show(ctx, client, hit)
+                yield from self._show(ctx, client, hit, season=parsed.season)
         except api.Channel5Error as exc:
             ctx.error(str(exc))
 
@@ -190,10 +257,12 @@ class Channel5(Service):
             if not ctx.interactive:
                 return
 
-    def _show(self, ctx: FlowContext, client: api.Channel5Api, hit: api.SearchHit) -> Iterator[Ask]:
+    def _show(
+        self, ctx: FlowContext, client: api.Channel5Api, hit: api.SearchHit, *, season: str = ""
+    ) -> Iterator[Ask]:
         try:
             ctx.status(f"Loading {hit.title}")
-            show = client.show(hit.id)
+            show = client.show(hit.id, season=season) if season else client.show(hit.id)
         except api.Channel5Error as exc:
             ctx.error(str(exc))
             return
@@ -257,7 +326,6 @@ class Channel5(Service):
         for item in items:
             yield from self._emit(ctx, client, item)
 
-    # --------------------------------------------------------------- playback
     def _emit(self, ctx: FlowContext, client: api.Channel5Api, item: api.Episode) -> Iterator[Ask]:
         try:
             yield ctx.emit(self._resolve_vod(ctx, client, item))
@@ -322,22 +390,10 @@ class Channel5(Service):
         )
         return playback
 
-    # -------------------------------------------------------------- licensing
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
-        """Widevine, against Channel 5's own licence server.
-
-        Every service makes its own licence request: core has no default for it, so
-        that a service which needs one cannot end up relying on somebody else's.
-        """
         return self._licence_client().widevine_license(drm.license_url, challenge, drm.headers)
 
     def _licence_client(self):
-        """The client the licence goes through, reused across a run.
-
-        A licence can be asked for long after the playback that produced it - a saved
-        command re-run, a batch working through a list - so this builds one on demand
-        rather than assuming the browsing client is still around.
-        """
         client = getattr(self, "_licence_api", None)
         if client is None:
             client = self.client()

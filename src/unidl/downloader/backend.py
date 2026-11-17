@@ -53,6 +53,7 @@ from ..core.secureio import (
     private_file,
 )
 from . import api
+from .captions import CAPTION, is_caption
 from .embedding import DownloaderThreadPoolExecutor, DownloadRuntime, proxy_scope
 from .http_client import close_http2_clients, get_global_http_client
 from .models import SegmentInfo, StreamInfo
@@ -1069,6 +1070,7 @@ class NativeDownloaderBackend:
             is_live=bool(stream.is_live),
             key_ids=tuple(api.stream_key_ids(stream)),
             is_3d=stream.is_3d,
+            embedded_caption=str(stream.extra[CAPTION]) if is_caption(stream) else "",
         )
 
     @staticmethod

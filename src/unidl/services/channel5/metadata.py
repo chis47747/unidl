@@ -1,4 +1,4 @@
-"""Channel 5 artwork from the Android app's Otis image contract."""
+"""Channel 5 artwork from the Android TV app's Otis image contract."""
 
 from __future__ import annotations
 
@@ -15,8 +15,11 @@ def attachments(raw: dict[str, Any], *, live: bool = False) -> list[Attachment]:
     images = raw.get("imageUrls")
     images = images if isinstance(images, dict) else {}
     if live:
-        for value in (raw.get("channel_logo"), images.get("channelBrandLogo")):
-            candidates.append((value, "Channel logo", "artwork"))
+        logo = images.get("channelBrandLogo") or raw.get("channel_logo")
+        channel_id = raw.get("channel")
+        if not logo and isinstance(channel_id, str) and channel_id:
+            logo = f"{_IMAGES}/channel/{quote(channel_id, safe='')}/1024x251.png?master=leftAlignedChannelLogo"
+        candidates.append((logo, "Channel logo", "artwork"))
     else:
         candidates.extend((
             (raw.get("episodeImage"), "Episode image", "thumbnail"),

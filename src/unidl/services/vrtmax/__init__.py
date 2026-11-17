@@ -1,10 +1,4 @@
-"""VRT MAX TV-code login, TV catalogue, search, live and Widevine playback.
-
-Authorization: VRT MAX TV code with refresh-token reuse.
-Geofence:      Belgium; catalogue visibility and playback depend on location.
-Catalogue:     Android TV GraphQL home, program, search and live operations.
-Playback:      VRT media-services DASH/HLS; protected video uses Widevine DASH.
-"""
+"""VRT MAX TV-code login, TV catalogue, search, live and Widevine playback."""
 
 from __future__ import annotations
 

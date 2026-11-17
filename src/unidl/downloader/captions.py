@@ -13,25 +13,38 @@ import math
 import mmap
 import os
 import shutil
+import subprocess
 import tempfile
 from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
 
-from .cea708 import Cea708Error, extract_services, service_number, unavailable_reason
+from .cea708 import Cea708Error, extract_services, service_number, unavailable_reason, write_sei_rcwt
+from .embedding import DownloadCancelled
 from .models import StreamInfo
 
 CAPTION = "hls_instream_id"
 SOURCE = "hls_caption_source"
 GROUPS = "closed_caption_ids"
 PRESERVE = "_unidl_preserve_captions"
+CAPTION_WAITING = "Waiting for video"
+CAPTION_EXTRACTING = "Extracting captions"
+CAPTION_COMPLETE = "Caption ready"
+CAPTION_SKIPPED = "Caption skipped"
+CAPTION_PROGRESS = {
+    CAPTION_WAITING: "⣾", CAPTION_EXTRACTING: "⣾", CAPTION_COMPLETE: "✓", CAPTION_SKIPPED: "",
+}
 _SHAPE = tuple(field.name for field in fields(StreamInfo) if field.name not in {"segments", "extra"})
 _SOURCE_EXTRA = {
     "key_id", "key_ids", "media_sequence", "target_duration", "audio_id", "audio_ids",
     "video_id", "subtitle_id", "group_ids", GROUPS, "muxed_audio", "source_metadata",
     "_unidl_source_headers", PRESERVE,
 }
+
+
+class CaptionExtractionError(RuntimeError):
+    """A caption could not be extracted, independently of its video transfer."""
 
 
 def is_caption(stream) -> bool:
@@ -279,8 +292,14 @@ def extract_caption(
         raise RuntimeError("Could not inspect the downloaded caption carrier.")
     document = json.loads(probe.stdout)
     tracks = [row for row in document.get("streams", []) if row.get("codec_name") == "eia_608" and row.get("codec_tag_string") == "c608"]
+    if not tracks and stream.extra[CAPTION] == "CC1" and not raw:
+        return _extract_sei_cc1(source, output.with_suffix(".srt"), ffmpeg, ffprobe)
     if len(tracks) != 1:
-        raise RuntimeError("Expected one MP4 c608 caption track; this carrier needs a different caption extraction method.")
+        raise CaptionExtractionError(
+            "Expected one MP4 c608 caption track; CC1 in video SEI requires a text subtitle output format."
+            if not tracks and stream.extra[CAPTION] == "CC1" else
+            "Expected one MP4 c608 caption track; no other CC channel will be substituted."
+        )
     output = output.with_suffix(".mov" if raw else ".srt")
     output.parent.mkdir(parents=True, exist_ok=True)
     source_offset = float(document.get("format", {}).get("start_time") or 0)
@@ -317,6 +336,30 @@ def extract_caption(
             temporary.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             compact.unlink(missing_ok=True)
+    return output
+
+
+def _extract_sei_cc1(source: Path, output: Path, ffmpeg: str, ffprobe: str) -> Path:
+    from .postprocess import _run_external
+    from .subtitles import _parse_text_subtitle
+
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".unidl-cc1-", dir=output.parent) as tmp:
+            work = Path(tmp)
+            rcwt, _ = write_sei_rcwt(ffmpeg, ffprobe, source, work, cc1=True)
+            temporary = work / "cc1.srt"
+            _run_external([
+                ffmpeg, "-v", "error", "-nostdin", "-y", "-copyts", "-data_field", "0",
+                "-f", "rcwt", "-i", str(rcwt), "-map", "0:s:0", "-c:s", "srt", str(temporary),
+            ], "SEI CC1 decoding (requires FFmpeg with RCWT input support)", reject_demux_errors=True)
+            if not temporary.is_file() or not _parse_text_subtitle(temporary.read_text(encoding="utf-8-sig"), ".srt"):
+                raise CaptionExtractionError("SEI CC1 produced no valid cues; no other CC channel will be substituted.")
+            temporary.replace(output)
+    except (CaptionExtractionError, DownloadCancelled):
+        raise
+    except (OSError, RuntimeError, ValueError, OverflowError, subprocess.SubprocessError) as exc:
+        raise CaptionExtractionError(f"Could not extract SEI CC1: {exc}") from exc
     return output
 
 

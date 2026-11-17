@@ -27,6 +27,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import requests
 
 from unidl.downloader import NativeDownloaderBackend, NativeManifestError, api
+from unidl.downloader.captions import CAPTION_PROGRESS, CAPTION_WAITING
 from unidl.downloader.models import StreamInfo
 from unidl.downloader.mux_audio import normalize_default_audio, resolve_default_audio
 from unidl.downloader.mux_subtitle import (
@@ -272,7 +273,10 @@ def _progress_label(stream) -> str:
             getattr(stream, "codecs", None),
         ]
     else:
-        details = [getattr(stream, "language", None), getattr(stream, "name", None)]
+        details = [
+            getattr(stream, "language", None),
+            getattr(stream, "embedded_caption", None) or getattr(stream, "name", None),
+        ]
     body = " ".join(str(value) for value in details if value)
     return f"{prefix} {body}".strip()
 
@@ -305,7 +309,7 @@ class _StructuredProgressScreen:
                 total_segments=1,
                 live=bool(track.is_live),
                 duration_seconds=(track.duration if track.is_live else None),
-                status="Waiting" if track.is_live else "Downloading",
+                status=CAPTION_WAITING if track.embedded_caption else ("Waiting" if track.is_live else "Downloading"),
             )
             for track in tracks
         }
@@ -344,6 +348,11 @@ class _StructuredProgressScreen:
         records: list[tuple[str, float, str, str, str, str, str]] = []
         for update in updates:
             track = self._tracks.get(update.track_id)
+            if update.status in CAPTION_PROGRESS:
+                records.append((
+                    _progress_label(track), 0.0, "", "", "", "", update.status,
+                ))
+                continue
             total, estimated = self._estimated_total(update, track)
             percent = self._percent(update, total)
             if track is not None and track.manifest_type == "service" and not update.done:
@@ -403,6 +412,11 @@ class _StructuredProgressScreen:
             )
         rows: list[str] = []
         for label, percent, size, segments, speed, eta, done in records:
+            if done in CAPTION_PROGRESS:
+                icon = CAPTION_PROGRESS[done]
+                state = f"{done} {icon}".rstrip()
+                rows.append(f"{label[:max(4, width - len(state) - 3)]} | {state}")
+                continue
             if len(label) > label_width:
                 label = label[: max(1, label_width - 1)] + "…"
             filled = max(0, min(bar_width, round(bar_width * percent / 100)))

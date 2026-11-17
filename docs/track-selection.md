@@ -27,6 +27,11 @@ original c608 track and can contain both data fields; it is not a decoded,
 single-channel text subtitle. Reference and media-playlist exports retain the
 caption declaration and carrier relationship without expanded segment lists.
 
+If no separate `c608` track exists, UniDL can extract `CC1` from AVC/HEVC
+video SEI as text using FFmpeg with RCWT input support. It isolates field-one
+channel 1 without falling back to `CC2` or a CEA-708 service. No video frames
+are decoded. Raw `CC1` and `CC3` continue to use the existing `c608` path.
+
 For AVC/HEVC VOD with CEA-708 in video SEI, install **CCExtractor** on
 `PATH` (or in UniDL's `binaries` folder). UniDL scans the selected video
 once, passes only timestamped caption data to CCExtractor, and extracts the
@@ -37,6 +42,10 @@ by this path. Missing tools disable the CEA-708 rows; if the selected service
 produces no captions, UniDL reports it and keeps other successful tracks.
 A subtitle-only job with no valid selected service fails instead of writing
 an empty file or substituting another channel.
+
+Embedded caption rows show **Waiting for video**, then **Extracting captions**,
+then **Caption ready** or **Caption skipped**. The video transfer is counted
+only once; captions do not have their own network percentage or byte counter.
 
 UniDL has one shared output-track selector for every service. It runs after the
 service has authorized and parsed its manifest (and after any service-owned

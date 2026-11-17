@@ -1,5 +1,4 @@
-"""Channel 5 catalogue and Cassie playback models.
-"""
+"""Channel 5 Android TV 4.22.6 catalogue, pairing and Cassie playback."""
 
 from __future__ import annotations
 
@@ -8,10 +7,10 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlsplit, urlunparse
 
 import requests
 
@@ -19,15 +18,20 @@ from ...core.chapters import Chapter
 
 WWW = "https://www.channel5.com"
 CORONA = "https://corona.channel5.com"
+EDNA = "https://feeds-api.channel5.com"
 CASSIE = "https://cassie-auth.channel5.com/api/v2"
-PLATFORM = "my5android"
-CASSIE_PLATFORM = "my5androidhydradash"
-LIVE_COLLECTION = "PLC_My5FASTLiveTVPageSubTempWithAMC"
-USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 14; SM-S901B Build/UP1A.231005.007)"
+APP_VERSION = "4.22.6"
+CONFIG_URL = "https://cassie.channel5.com/platform/my5androidtv/config.json"
+USER_SERVICE = "https://userservice-api.channel5.com"
+ACTIVATE_URL = "https://activate.channel5.com/"
+PLATFORM = "androidtv"
+CASSIE_PLATFORM = "My5AndroidTVHydra"
+USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 14; Android TV)"
 
 CassieFetch = Callable[[str, bool], dict[str, Any]]
 
 _WATCHABLE = re.compile(r"^C\d{6,}$", re.I)
+_SLUG = re.compile(r"[a-z0-9][a-z0-9-]*", re.I | re.ASCII)
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -35,10 +39,29 @@ class Channel5Error(RuntimeError):
     pass
 
 
+class PairingUnavailable(Channel5Error):
+    """The pairing request can be retried without issuing a new PIN."""
+
+
+@dataclass(frozen=True)
+class TVCode:
+    pin: str
+    secret: str = field(repr=False)
+    qr_url: str = ""
+
+
+def bearer_token(value: object) -> str:
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._~+/\-]+=*", value):
+        return value
+    return ""
+
+
 @dataclass(frozen=True)
 class ParsedInput:
-    kind: str  # show | watchable | live
+    kind: str  # show | season | episode | watchable | live
     value: str
+    season: str = ""
+    episode: str = ""
 
 
 def parse_input(text: str) -> ParsedInput | None:
@@ -50,12 +73,19 @@ def parse_input(text: str) -> ParsedInput | None:
         return ParsedInput("watchable", raw.upper())
     if re.fullmatch(r"\d{6,}", raw):
         return ParsedInput("show", raw)
-    if re.fullmatch(r"[a-z0-9][a-z0-9-]*", raw, re.I):
+    if _SLUG.fullmatch(raw):
         return ParsedInput("show", raw.lower())
 
-    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-    host = (parsed.hostname or "").lower()
-    if not (host.endswith("channel5.com") or host.endswith("my5.tv")):
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.username is not None or parsed.password is not None
+            or not any(host == domain or host.endswith(f".{domain}") for domain in ("channel5.com", "my5.tv"))
+        ):
+            return None
+    except ValueError:
         return None
     parts = [part for part in parsed.path.split("/") if part]
     if not parts:
@@ -66,8 +96,23 @@ def parse_input(text: str) -> ParsedInput | None:
         return ParsedInput("watchable", value.upper()) if value else None
     if head in {"channel", "channels", "live"} and len(parts) > 1:
         return ParsedInput("live", parts[1].lower())
-    if head in {"show", "shows", "season"} and len(parts) > 1:
-        return ParsedInput("show", parts[1].lower())
+    if head in {"show", "shows"} and len(parts) >= 2:
+        show = parts[1].lower()
+        if len(parts) == 2:
+            return ParsedInput("show", show)
+        season = parts[2].lower()
+        if not re.fullmatch(r"(?:season-)?\d+", season):
+            return None
+        if len(parts) == 3:
+            return ParsedInput("season", show, season=season)
+        if len(parts) == 4:
+            if _WATCHABLE.fullmatch(parts[3]):
+                return ParsedInput("watchable", parts[3].upper())
+            episode = parts[3].lower()
+            if _SLUG.fullmatch(episode):
+                return ParsedInput("episode", show, season=season, episode=episode)
+    if head == "season" and len(parts) == 3 and re.fullmatch(r"(?:season-)?\d+", parts[2], re.I):
+        return ParsedInput("season", parts[1].lower(), season=parts[2].lower())
     return None
 
 
@@ -171,18 +216,23 @@ def cassie_url(asset_id: str, is_live: bool = False) -> str:
     return f"{CASSIE}/{kind}/{CASSIE_PLATFORM}/{quote(str(asset_id), safe='')}.json"
 
 
-def curl_config(certificate: Path, password: str) -> str:
-    """curl config sent on stdin, so the certificate password is never argv/logged."""
+def curl_config(certificate: Path, password: str, *, session_token: str = "") -> str:
+    """Build the curl stdin config; credentials never go in argv."""
     cert = str(certificate)
     if any(char in cert + password for char in ('"', "\r", "\n")):
         raise Channel5Error("Cassie certificate path/password contains unsupported characters")
-    return (
+    config = (
         'cert-type = "P12"\n'
         f'cert = "{cert}"\n'
         f'pass = "{password}"\n'
         f'header = "User-Agent: {USER_AGENT}"\n'
         'header = "Accept: application/json"\n'
     )
+    if session_token:
+        if not bearer_token(session_token):
+            raise Channel5Error("Invalid Channel 5 session token")
+        config += f'header = "Authorization: Bearer {session_token}"\n'
+    return config
 
 
 def parse_cassie(text: str) -> dict[str, Any]:
@@ -203,12 +253,71 @@ class Channel5Api:
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", USER_AGENT)
         self.cassie = cassie
+        self._live_collection: str | None = None
 
-    # --------------------------------------------------------------- catalogue
+    def start_tv_code(self) -> TVCode:
+        response = self._pairing_request("POST", "/activationPins")
+        if response.status_code != 201:
+            raise Channel5Error(f"Channel 5 could not issue a TV code (HTTP {response.status_code})")
+        data = self._pairing_json(response)
+        pin = data.get("pin")
+        secret = bearer_token(data.get("pinSecret"))
+        if not isinstance(pin, str) or not re.fullmatch(r"[A-Za-z0-9]{6}", pin) or not secret:
+            raise Channel5Error("Channel 5 returned an invalid TV code")
+        qr_url = data.get("qrCode")
+        if isinstance(qr_url, str):
+            try:
+                link = urlsplit(qr_url)
+                if link.scheme == "https" and link.netloc == urlsplit(USER_SERVICE).netloc:
+                    return TVCode(pin, secret, qr_url=qr_url)
+            except ValueError:
+                pass
+        return TVCode(pin, secret)
+
+    def poll_tv_code(self, code: TVCode) -> str | None:
+        response = self._pairing_request(
+            "GET", f"/activationPins/{code.pin}/poll",
+            params={"longPoll": "false"},
+            headers={"Authorization": f"Bearer {code.secret}"},
+        )
+        if response.status_code == 204:
+            return None
+        if response.status_code in {404, 410}:
+            raise Channel5Error("Channel 5 TV code is no longer valid; request a new code")
+        if response.status_code != 201:
+            raise Channel5Error(f"Channel 5 could not confirm the TV code (HTTP {response.status_code})")
+        token = bearer_token(self._pairing_json(response).get("sessionToken"))
+        if not token:
+            raise Channel5Error("Channel 5 confirmed the TV code without a valid session token")
+        return token
+
+    def _pairing_request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        try:
+            response = self.session.request(
+                method, f"{USER_SERVICE}{path}", timeout=10, allow_redirects=False, **kwargs,
+            )
+        except (requests.ConnectionError, requests.Timeout):
+            raise PairingUnavailable("Could not reach Channel 5 TV pairing") from None
+        except requests.RequestException:
+            raise Channel5Error("Channel 5 TV pairing request failed") from None
+        if response.status_code == 429 or response.status_code >= 500:
+            raise PairingUnavailable(f"Channel 5 TV pairing is temporarily unavailable (HTTP {response.status_code})")
+        return response
+
+    @staticmethod
+    def _pairing_json(response: requests.Response) -> dict[str, Any]:
+        try:
+            data = response.json()
+        except ValueError:
+            raise Channel5Error("Channel 5 returned invalid TV pairing data") from None
+        if not isinstance(data, dict):
+            raise Channel5Error("Channel 5 returned invalid TV pairing data")
+        return data
+
     def search(self, query: str) -> list[SearchHit]:
         data = self._json(
             f"{CORONA}/shows/search.json",
-            params={"platform": PLATFORM, "genre": "", "query": query},
+            params={"platform": PLATFORM, "query": query},
         )
         hits: list[SearchHit] = []
         for raw in data.get("shows") or []:
@@ -226,29 +335,23 @@ class Channel5Api:
         return hits
 
     def resolve_show(self, value: str) -> SearchHit:
-        if value.isdigit():
-            data = self._show_json(value)
-            return SearchHit(
-                "show",
-                str(data.get("id") or value),
-                str(data.get("title") or value),
-                str(data.get("s_desc") or data.get("m_desc") or ""),
-                str(data.get("genre") or ""),
-            )
-        wanted = _slug(value)
-        hits = self.search(value.replace("-", " "))
-        exact = next((hit for hit in hits if _slug(hit.title) == wanted), None)
-        if exact is not None:
-            return exact
-        if len(hits) == 1:
-            return hits[0]
-        raise Channel5Error(f"Channel 5 could not resolve show slug {value!r}; use Search")
+        data = self._show_json(value)
+        return SearchHit(
+            "show",
+            str(data.get("id") or value),
+            str(data.get("title") or value),
+            str(data.get("s_desc") or data.get("m_desc") or ""),
+            str(data.get("genre") or ""),
+        )
 
-    def show(self, show_id: str) -> Show:
+    def show(self, show_id: str, *, season: str = "") -> Show:
         info = self._show_json(show_id)
+        base = f"{CORONA}/shows/{quote(show_id, safe='')}"
+        if season:
+            base += f"/seasons/{quote(season, safe='')}"
         data = self._json(
-            f"{CORONA}/shows/{quote(show_id, safe='')}/episodes.json",
-            params={"platform": PLATFORM},
+            f"{base}/episodes.json",
+            params={"platform": PLATFORM, "friendly": "1"} if season or not show_id.isdigit() else {"platform": PLATFORM},
         )
         episodes = [
             item
@@ -285,34 +388,67 @@ class Channel5Api:
             raise Channel5Error(f"Channel 5 returned no watchable {watchable_id}")
         return item
 
-    def channels(self) -> list[Channel]:
+    def episode(self, show: str, season: str, episode: str) -> Episode:
         data = self._json(
-            f"{CORONA}/collections/{LIVE_COLLECTION}.json",
-            params={"platform": PLATFORM, "min_transmissions": "1"},
+            f"{CORONA}/shows/{quote(show, safe='')}/seasons/{quote(season, safe='')}/episodes/{quote(episode, safe='')}.json",
+            params={"platform": PLATFORM, "friendly": "1"},
         )
-        contents = (data.get("filters") or {}).get("contents") or data.get("contents") or []
+        item = self._episode(data)
+        if item is None:
+            raise Channel5Error(f"Channel 5 returned no episode for {show}/{season}/{episode}")
+        return item
+
+    def channels(self) -> list[Channel]:
+        if self._live_collection is None:
+            config = self._json(CONFIG_URL, params={"label": APP_VERSION})
+            settings = config.get("dataServiceSettings")
+            collection = settings.get("ednaChannelsSubNavId") if isinstance(settings, dict) else None
+            if not isinstance(collection, str) or not collection.strip():
+                raise Channel5Error("Channel 5 TV configuration returned no live channel collection")
+            self._live_collection = collection.strip()
+        data = self._json(
+            f"{EDNA}/collections/{quote(self._live_collection, safe='')}/concise.json",
+            params={"vod_available": PLATFORM},
+        )
+        filters = data.get("filters")
+        contents = filters.get("contents") if isinstance(filters, dict) else None
+        at = datetime.now(UTC)
         channels: list[Channel] = []
-        for raw in contents:
-            if not isinstance(raw, dict):
+        for raw in contents or []:
+            if not isinstance(raw, dict) or raw.get("live") is not True:
                 continue
-            channel_id = str(raw.get("channel") or raw.get("channelId") or raw.get("id") or "")
-            if not channel_id:
+            channel_id = raw.get("channel")
+            if not isinstance(channel_id, str) or not channel_id:
                 continue
-            transmissions = [item for item in raw.get("transmissions") or [] if isinstance(item, dict)]
-            now = _programme(transmissions[0]) if transmissions else ""
-            nxt = _programme(transmissions[1]) if len(transmissions) > 1 else ""
+            now, nxt = self._now_next(channel_id, at)
             name = str(raw.get("title") or raw.get("channel_friendly_name") or channel_id)
             channels.append(
                 Channel(
                     id=channel_id,
                     name=name,
-                    slug=str(raw.get("f_name") or _slug(name)),
+                    slug=str(raw.get("channel_friendly_name") or _slug(name)),
                     now=now,
                     next=nxt,
                     artwork=raw,
                 )
             )
         return channels
+
+    def _now_next(self, channel_id: str, at: datetime) -> tuple[str, str]:
+        start = at.replace(minute=0, second=0, microsecond=0)
+        try:
+            epg = self._json(
+                f"{CORONA}/channels/{quote(channel_id, safe='')}/epg.json",
+                params={
+                    "platform": PLATFORM,
+                    "start": start.strftime("%Y-%m-%dT%H:%M:%S0Z"),
+                    "end": (start + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S0Z"),
+                },
+                timeout=8,
+            )
+        except Channel5Error:
+            return "", ""
+        return _programme_schedule(epg.get("transmissions"), at)
 
     def channel(self, slug: str) -> Channel:
         wanted = _slug(slug)
@@ -321,7 +457,6 @@ class Channel5Api:
                 return channel
         raise Channel5Error(f"Channel 5 returned no live channel for {slug}")
 
-    # -------------------------------------------------------------- playback
     def source(
         self,
         asset_id: str,
@@ -381,16 +516,15 @@ class Channel5Api:
             return candidates[0]
         return normalise_vod_manifest_url(candidates[0])
 
-    # --------------------------------------------------------------- helpers
     def _show_json(self, show_id: str) -> dict[str, Any]:
         return self._json(
             f"{CORONA}/shows/{quote(show_id, safe='')}.json",
-            params={"platform": PLATFORM},
+            params={"platform": PLATFORM, "friendly": "1"} if not show_id.isdigit() else {"platform": PLATFORM},
         )
 
-    def _json(self, url: str, **kwargs: Any) -> dict[str, Any]:
+    def _json(self, url: str, *, timeout: int = 25, **kwargs: Any) -> dict[str, Any]:
         try:
-            response = self.session.get(url, timeout=25, **kwargs)
+            response = self.session.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
             data = response.json()
         except requests.RequestException as exc:
@@ -433,14 +567,6 @@ class Channel5Api:
 
     # -------------------------------------------------------------- licensing
     def widevine_license(self, license_url: str, challenge: bytes, headers: dict[str, str] | None = None) -> bytes:
-        """Channel 5's own Widevine exchange: a challenge in, a licence back.
-
-        Here rather than in core on purpose. A licence request is one of a service's
-        own calls - its URL, its headers, its own way of refusing - and a shared one
-        that posts to whatever URL it was handed cannot say which service was
-        refused or why. Core builds the challenge and reads the keys out of the
-        answer; sending it is this service's job.
-        """
         if not license_url:
             raise Channel5Error("no Channel 5 licence URL came with this playback")
         request_headers = {"Content-Type": "application/octet-stream"}
@@ -464,7 +590,6 @@ def _int(value: Any) -> int | None:
 
 
 def _credits_chapters(asset: dict[str, Any], *, duration: int) -> tuple[Chapter, ...]:
-    """Build the optional end-credits marker from Cassie's playback metadata."""
     raw_duration = asset.get("duration")
     raw_credits = asset.get("creditsduration")
     if isinstance(raw_duration, bool) or isinstance(raw_credits, bool):
@@ -485,18 +610,10 @@ def _credits_chapters(asset: dict[str, Any], *, duration: int) -> tuple[Chapter,
             ),
         )
     except ValueError:
-        # Chapters are optional metadata; a malformed marker must not break DRM.
         return ()
 
 
 def normalise_vod_manifest_url(manifest_url: str) -> str:
-    """Resolve Cassie's decorated SD VOD MPD to the complete master MPD.
-
-    Cassie can advertise names such as ``C123_SD-tt.mpd``.  Those manifests
-    stop at 720p, while the sibling ``C123.mpd`` contains the 1080p ladder and
-    retains the text/audio-description adaptations.  This mirrors the legacy
-    Channel 5 client.  Live MPDs are deliberately never passed through here.
-    """
     if not manifest_url:
         return manifest_url
     parsed = urlparse(manifest_url)
@@ -527,23 +644,50 @@ def _programme(raw: dict[str, Any]) -> str:
     return f"{show}: {episode}" if show and episode else show or episode
 
 
+def _programme_schedule(transmissions: Any, at: datetime) -> tuple[str, str]:
+    if not isinstance(transmissions, list):
+        return "", ""
+    current = upcoming = ""
+    current_start, upcoming_start = None, None
+    for slot in transmissions:
+        if not isinstance(slot, dict):
+            continue
+        try:
+            start = datetime.fromisoformat(slot["start"])
+            end = datetime.fromisoformat(slot["end"])
+            if start <= at < end and (current_start is None or start > current_start):
+                current, current_start = _programme(slot), start
+            elif at < start < end and (upcoming_start is None or start < upcoming_start):
+                upcoming, upcoming_start = _programme(slot), start
+        except (KeyError, TypeError, ValueError):
+            continue
+    return current, upcoming
+
+
 __all__ = [
+    "ACTIVATE_URL",
+    "APP_VERSION",
     "CASSIE",
     "CASSIE_PLATFORM",
     "CORONA",
-    "LIVE_COLLECTION",
+    "CONFIG_URL",
+    "EDNA",
     "PLATFORM",
     "USER_AGENT",
+    "USER_SERVICE",
     "WWW",
     "Channel",
     "Channel5Api",
     "Channel5Error",
     "Episode",
     "ParsedInput",
+    "PairingUnavailable",
     "SearchHit",
     "Season",
     "Show",
     "Source",
+    "TVCode",
+    "bearer_token",
     "cassie_url",
     "curl_config",
     "normalise_vod_manifest_url",

@@ -8,9 +8,9 @@ import time
 from collections.abc import Iterator
 
 from ...core.cdm import CdmError
-from ...core.credentials import CredentialSlot
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
 from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
+from ...core.qr import QrPresentation
 from ...core.secureio import atomic_write_bytes, private_directory
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
@@ -33,7 +33,6 @@ class ITV(Service):
     DESCRIPTION = "ITVX catalogue, live channels and start-again; Widevine or PlayReady."
     USES = Capabilities()
     DRM_SYSTEMS = ("widevine", "playready")
-    CREDENTIALS = [CredentialSlot("default", "ITVX account")]
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
@@ -52,77 +51,102 @@ class ITV(Service):
             return AuthStatus(True, "ITVX session active", detail="cache")
         if state.get("refresh_token") and int(state.get("refresh_token_expires") or 0) > now:
             return AuthStatus(True, "ITVX session ready to refresh", detail="cache")
-        cred = self.ctx.credential("default")
-        if cred.complete:
-            return AuthStatus(False, "credentials ready", detail="will sign in on demand")
-        return AuthStatus(False, "no ITVX account configured")
+        return AuthStatus(False, "TV code sign-in required", logout_available=bool(state.get("access_token") or state.get("refresh_token")))
 
     def login(self, ctx: FlowContext) -> Iterator[Ask]:
-        cred = self.ctx.credential("default")
-        email_page = ctx.text("ITVX email", placeholder="name@example.com")
-        while True:
-            username = cred.username or str((yield email_page) or "").strip()
-            if not username:
-                ctx.warn("no email entered")
-                return
-            email_page.default = username
-            try:
-                password = cred.password or str((yield ctx.text("ITVX password", password=True)) or "")
-            except Back:
-                if cred.username or not ctx.interactive:
-                    raise
-                continue
-            break
-        if not password:
-            ctx.warn("no password entered")
-            return
         client = api.ItvApi(
-            session=self.ctx.session(user_agent=api.USER_AGENT),
+            session=self.ctx.session(user_agent=api.USER_AGENT, cookies=False),
             drm_system=self.drm_system(),
         )
+        saved = False
         try:
-            ctx.status("Signing in to ITVX")
-            state = client.authenticate(username, password)
-        except api.ItvError as exc:
+            ctx.status("Requesting an ITVX TV code")
+            challenge = client.start_tv_code()
+
+            def poll():
+                try:
+                    return client.poll_tv_code(challenge)
+                except api.ItvError as exc:
+                    return exc
+
+            state = yield ctx.wait_for(
+                "Sign in to ITVX",
+                [("Open", api.ACTIVATE_URL), ("Code", challenge.code)],
+                poll=poll,
+                timeout=max(1, challenge.expires_at - time.monotonic()),
+                interval=api.TV_CODE_INTERVAL,
+                qr=QrPresentation(payload=challenge.qr_url, fallback_url=challenge.qr_url, alt="ITVX TV sign-in"),
+            )
+            if isinstance(state, api.ItvError):
+                raise state
+            if not isinstance(state, dict) or not state.get("access_token"):
+                raise api.ItvError("ITVX TV pairing did not complete")
+            self.ctx.tokens.write(self.TOKEN_FILE, state)
+            previous = self._api
+            self._api = client
+            saved = True
+            if previous is not None:
+                previous.session.close()
+            ctx.log("ITVX TV session saved", "ok")
+        except (api.ItvError, OSError) as exc:
             ctx.error(str(exc))
-            return
-        self.ctx.tokens.write(self.TOKEN_FILE, state)
-        self._api = client
-        ctx.log("ITVX session saved", "ok")
+        finally:
+            if not saved:
+                client.session.close()
 
     def logout(self) -> None:
         self.ctx.tokens.remove(self.TOKEN_FILE)
+        if self._api is not None:
+            self._api.session.close()
         self._api = None
 
     def client(self, ctx: FlowContext | None = None) -> api.ItvApi:
         chosen = self.drm_system()
-        if self._api is not None and self._api.drm_system == chosen:
-            return self._api
-        state = self.ctx.tokens.read(self.TOKEN_FILE) or {}
-        client = api.ItvApi(
-            session=self.ctx.session(user_agent=api.USER_AGENT),
-            state=state,
-            drm_system=chosen,
-        )
-        cred = self.ctx.credential("default")
+        client = self._api
+        if client is None or client.drm_system != chosen:
+            state = self.ctx.tokens.read(self.TOKEN_FILE) or {}
+            client = api.ItvApi(
+                session=self.ctx.session(user_agent=api.USER_AGENT, cookies=False),
+                state=state,
+                drm_system=chosen,
+            )
+        else:
+            state = client.state
         if ctx:
             ctx.status("Opening ITVX session")
-        fresh = client.authenticate(cred.username, cred.password)
-        if fresh is not state or fresh.get("saved_at") != state.get("saved_at"):
-            self.ctx.tokens.write(self.TOKEN_FILE, fresh)
-            if ctx:
-                ctx.log("ITVX token refreshed", "ok")
+        try:
+            fresh = client.authenticate()
+            if fresh is not state:
+                self.ctx.tokens.write(self.TOKEN_FILE, fresh)
+                if ctx:
+                    ctx.log("ITVX token refreshed", "ok")
+        except OSError:
+            client.set_state(state)
+            if client is not self._api:
+                client.session.close()
+            raise
+        except api.ItvError:
+            if client is not self._api:
+                client.session.close()
+            raise
+        if self._api is not None and self._api is not client:
+            self._api.session.close()
         self._api = client
         return client
 
     # ---------------------------------------------------------------- browsing
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
+        if self.auth_status().logged_in:
+            try:
+                self.client(ctx)
+            except (api.ItvError, OSError) as exc:
+                ctx.error(str(exc))
         cursor = 0
         while True:
             status = self._auth_status_quietly()
             choices = []
             if not status.usable:
-                choices.append(Choice("Sign in", "login", detail=status.label))
+                choices.append(Choice("Sign in with TV code", "login", detail=status.label))
             choices.extend([
                 Choice("VOD - open a URL or content ID", "url"),
                 Choice("Live TV", "live"),
@@ -130,11 +154,9 @@ class ITV(Service):
                 Choice("Settings", "settings"),
             ])
             if status.usable:
-                choices.append(Choice("Sign in again" if status.logged_in else "Sign in", "login", detail=status.label))
+                choices.append(Choice("Sign in again with TV code", "login", detail=status.label))
             if status.logged_in or status.logout_available:
                 choices.append(Choice("Sign out", "logout", detail=status.label))
-            if self.saved_login() is not None:
-                choices.append(Choice("Delete saved credentials", "forget"))
             action = yield ctx.pick("", choices, cursor=cursor, scope=SCOPE_ROOT)
             cursor = next((index for index, choice in enumerate(choices) if choice.value == action), cursor)
             try:
@@ -151,8 +173,6 @@ class ITV(Service):
                 elif action == "logout":
                     self.logout()
                     ctx.log("ITVX signed out", "ok")
-                elif action == "forget":
-                    yield from self.forget_login(ctx)
             except Back:
                 pass
             except (RuntimeError, OSError) as exc:
@@ -261,7 +281,6 @@ class ITV(Service):
             ],
         )
         shows: dict[tuple[str, bool], api.Show] = {}
-        channels: dict[str, api.Channel] = {}
         while True:
             chosen = yield page
             if chosen is None:
@@ -269,9 +288,7 @@ class ITV(Service):
             page.cursor = hits.index(chosen)
             try:
                 if chosen.route == "live":
-                    if chosen.channel_id not in channels:
-                        channels[chosen.channel_id] = client.channel(chosen.channel_id)
-                    yield from self._emit_live(ctx, client, channels[chosen.channel_id])
+                    yield from self._emit_live(ctx, client, client.channel(chosen.channel_id))
                 else:
                     key = (chosen.content_id, self.fetch_attachments_enabled())
                     if key not in shows:
@@ -372,7 +389,7 @@ class ITV(Service):
             if chosen is None:
                 return
             try:
-                yield from self._emit_live(ctx, client, chosen)
+                yield from self._emit_live(ctx, client, client.channel(chosen.id))
             except Back:
                 pass
             except (RuntimeError, OSError) as exc:
@@ -382,21 +399,14 @@ class ITV(Service):
 
     def _emit_live(self, ctx: FlowContext, client: api.ItvApi, channel: api.Channel) -> Iterator[Ask]:
         try:
+            if client is self._api:
+                client = self.client(ctx)
             ctx.status(f"Resolving {channel.name}")
             source = client.live_source(channel, self.drm_system())
         except api.ItvError as exc:
             ctx.error(str(exc))
             return
         restart = False
-        title = Title(
-            id=channel.id,
-            kind=TitleKind.CHANNEL,
-            name=channel.name,
-            channel=channel.name,
-            episode_name=channel.now or None,
-            synopsis=channel.synopsis or None,
-            service=self.ID,
-        )
         page = None
         if source.start_again:
             page = ctx.pick(
@@ -413,7 +423,11 @@ class ITV(Service):
                 page.cursor = int(restart)
                 if refresh_source:
                     try:
+                        if client is self._api:
+                            client = self.client(ctx)
+                        channel = client.channel(channel.id)
                         source = client.live_source(channel, self.drm_system())
+                        page.title = f"{channel.name}  ·  {channel.now or 'Live'}"
                     except api.ItvError as exc:
                         ctx.error(str(exc))
                         if not ctx.interactive:
@@ -425,6 +439,15 @@ class ITV(Service):
                         return
                     continue
             selected_source = source
+            title = Title(
+                id=channel.id,
+                kind=TitleKind.CHANNEL,
+                name=channel.name,
+                channel=channel.name,
+                episode_name=channel.now or None,
+                synopsis=channel.synopsis or None,
+                service=self.ID,
+            )
             if restart:
                 selected_source = api.Source(
                     manifest=source.start_again, license_url=source.license_url, encrypted=source.encrypted,
@@ -449,6 +472,8 @@ class ITV(Service):
     # --------------------------------------------------------------- playback
     def _emit(self, ctx: FlowContext, client: api.ItvApi, item: api.Episode) -> Iterator[Ask]:
         try:
+            if client is self._api:
+                client = self.client(ctx)
             ctx.status(f"Resolving {item.label}")
             source = client.source(item, self.drm_system())
         except api.ItvError as exc:
@@ -506,7 +531,7 @@ class ITV(Service):
         selected = [reference for reference in playback.subtitle_references if reference.selected]
         if not selected:
             return
-        client = self.client()
+        client = self._api or self.client()
         directory = private_directory(self.ctx.subtitle_dir())
         safe_name = _safe_component(playback.save_name) or "ITVX"
         output_format = str(self.settings.get("sub_format", "srt") or "srt")

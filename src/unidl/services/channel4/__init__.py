@@ -1,19 +1,76 @@
-"""Channel 4 - TV-app authentication, catalogue, VOD and live Widevine."""
+"""Channel 4 - TV authentication, catalogue, VOD and live Widevine/PlayReady."""
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 from ...core.cdm import CdmError
-from ...core.credentials import CredentialSlot
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
-from ...core.playback import DrmInfo, Playback
+from ...core.playback import DrmInfo, ExternalTrack, Playback
+from ...core.qr import QrPresentation
+from ...core.secureio import atomic_write_bytes, private_directory
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
-from . import api, metadata
-from .navigation import FLOW_ERRORS, browse_input, browse_page
+from ...downloader.models import StreamInfo
+from ...downloader.subtitles import SubtitleConversionError, convert_subtitle_file
+from . import api
+
+FLOW_ERRORS = (RuntimeError, OSError)
+
+
+def browse_page(
+    ctx: FlowContext, page: Ask, visit: Callable[[Any], Iterator[Ask]],
+) -> Iterator[Ask]:
+    while True:
+        selected = yield page
+        if selected is None or selected == []:
+            return
+        if isinstance(page, Pick):
+            values = selected if page.multi and isinstance(selected, (list, tuple, set)) else [selected]
+            indexes = [index for index, choice in enumerate(page.choices) if choice.value in values]
+            if indexes:
+                page.cursor = indexes[0]
+                if page.multi:
+                    page.preselected = indexes
+        try:
+            yield from visit(selected)
+        except Back:
+            pass
+        except FLOW_ERRORS as exc:
+            ctx.error(str(exc))
+        if not ctx.interactive:
+            return
+
+
+def browse_input(
+    ctx: FlowContext,
+    title: str,
+    visit: Callable[[FlowContext, str], Iterator[Ask]],
+    initial: str | None = None,
+) -> Iterator[Ask]:
+    page = ctx.text(title)
+    value = initial
+    while True:
+        if value is None:
+            value = yield page
+        wanted = str(value or "").strip()
+        if not wanted:
+            return
+        page.default = wanted
+        try:
+            yield from visit(ctx, wanted)
+        except Back:
+            pass
+        except FLOW_ERRORS as exc:
+            ctx.error(str(exc))
+        if not ctx.interactive:
+            return
+        value = None
 
 
 def _normalise_selection(value):
@@ -33,11 +90,10 @@ class Channel4(Service):
     GEOFENCE = ("GB",)
     DESCRIPTION = "Channel 4 streaming and live channels, including start-over."
     USES = Capabilities()
-    DRM_SYSTEMS = ("widevine",)
+    DRM_SYSTEMS = ("widevine", "playready")
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
-    CREDENTIALS = [CredentialSlot("default", "Channel 4 account")]
 
     TOKEN_FILE = "channel4_user_config.json"
 
@@ -49,6 +105,8 @@ class Channel4(Service):
     def auth_status(self) -> AuthStatus:
         state = self.ctx.tokens.read(self.TOKEN_FILE) or {}
         state = state if isinstance(state, dict) else {}
+        if state.get("auth_client") != api.AUTH_CLIENT:
+            return AuthStatus(False, "TV code sign-in required")
         tokens = state.get("tokens") if isinstance(state.get("tokens"), dict) else {}
         expiry = _int(state.get("tokens_expiry"))
         access = tokens.get("accessToken") or tokens.get("access_token")
@@ -59,36 +117,40 @@ class Channel4(Service):
             return AuthStatus(True, f"TV session, {hours}h left", detail=source)
         if refresh:
             return AuthStatus(True, "TV session ready to refresh", detail=source)
-        cred = self.ctx.credential("default")
-        if cred.complete:
-            return AuthStatus(False, "credentials ready", detail="will sign in on demand")
-        return AuthStatus(False, "no Channel 4 account configured")
+        return AuthStatus(False, "TV code sign-in required")
 
     def login(self, ctx: FlowContext) -> Iterator[Ask]:
-        cred = self.ctx.credential("default")
-        email_page = ctx.text("Channel 4 email", placeholder="name@example.com")
-        while True:
-            username = cred.username or str((yield email_page) or "").strip()
-            if not username:
-                ctx.warn("no email entered")
-                return
-            email_page.default = username
-            try:
-                password = cred.password or str((yield ctx.text("Channel 4 password", password=True)) or "")
-            except Back:
-                if cred.username or not ctx.interactive:
-                    raise
-                continue
-            break
-        if not password:
-            ctx.warn("no password entered")
-            return
-        client = api.Channel4Api(session=self.ctx.session(user_agent=api.USER_AGENT))
+        client = api.Channel4Api(session=api.tv_session(proxy=self.ctx.proxy, cookies=self.ctx.cookies()))
         try:
-            ctx.status("Signing in to Channel 4")
-            state = client.authenticate(username, password)
+            ctx.status("Requesting a Channel 4 TV code")
+            challenge = client.start_tv_code()
         except api.Channel4Error as exc:
             ctx.error(str(exc))
+            return
+
+        def poll():
+            try:
+                return client.poll_tv_code(challenge)
+            except api.Channel4TransientError as exc:
+                ctx.warn(str(exc))
+                return None
+            except api.Channel4Error as exc:
+                # Await retries raised exceptions; return terminal refusals to the flow.
+                return exc
+
+        state = yield ctx.wait_for(
+            "Authorize Channel 4 TV",
+            [("Open", challenge.verification_url), ("Code", challenge.user_code)],
+            poll=poll,
+            timeout=challenge.expires_in,
+            interval=challenge.interval,
+            qr=QrPresentation(payload=challenge.qr_url, fallback_url=challenge.verification_url, alt="Channel 4 TV code"),
+        )
+        if isinstance(state, api.Channel4Error):
+            ctx.error(str(state))
+            return
+        if not isinstance(state, dict) or state is not client.state or not client.authorization:
+            ctx.error("Channel 4 pairing finished without a valid TV session")
             return
         self.ctx.tokens.write(self.TOKEN_FILE, state)
         self._api = client
@@ -99,10 +161,9 @@ class Channel4(Service):
         self._api = None
 
     def client(self, ctx: FlowContext | None = None) -> api.Channel4Api:
-        cred = self.ctx.credential("default")
         if self._api is not None:
             previous = self._api.state
-            fresh = self._api.authenticate(cred.username, cred.password)
+            fresh = self._api.authenticate()
             if fresh is not previous:
                 self.ctx.tokens.write(self.TOKEN_FILE, fresh)
                 if ctx:
@@ -111,15 +172,12 @@ class Channel4(Service):
         state = self.ctx.tokens.read(self.TOKEN_FILE) or {}
         state = state if isinstance(state, dict) else {}
         client = api.Channel4Api(
-            session=self.ctx.session(user_agent=api.USER_AGENT),
+            session=api.tv_session(proxy=self.ctx.proxy, cookies=self.ctx.cookies()),
             state=state,
         )
-        try:
-            if ctx:
-                ctx.status("Opening Channel 4 session")
-            fresh = client.authenticate(cred.username, cred.password)
-        except api.Channel4Error:
-            raise
+        if ctx:
+            ctx.status("Opening Channel 4 session")
+        fresh = client.authenticate()
         if fresh is not state:
             self.ctx.tokens.write(self.TOKEN_FILE, fresh)
             if ctx:
@@ -146,8 +204,6 @@ class Channel4(Service):
                 options.append(Choice("Sign in again" if status.logged_in else "Sign in", "login", detail=status.label))
             if status.logged_in or status.logout_available:
                 options.append(Choice("Sign out", "logout", detail=status.label))
-            if self.saved_login() is not None:
-                options.append(Choice("Delete saved credentials", "forget"))
             page.choices = options
             page.cursor = next((i for i, option in enumerate(options) if option.value == action), 0)
             action = yield page
@@ -167,8 +223,6 @@ class Channel4(Service):
                 elif action == "logout":
                     self.logout()
                     ctx.log("Channel 4 signed out", "ok")
-                elif action == "forget":
-                    yield from self.forget_login(ctx)
             except Back:
                 pass
             except FLOW_ERRORS as exc:
@@ -340,7 +394,7 @@ class Channel4(Service):
     ) -> Iterator[Ask]:
         try:
             ctx.status(f"Resolving {channel.name}{' restart' if restart else ''}")
-            source = client.live_source(channel, restart=restart)
+            source = client.live_source(channel, restart=restart, drm_system=self.drm_system())
         except api.Channel4Error as exc:
             ctx.error(str(exc))
             return
@@ -359,7 +413,7 @@ class Channel4(Service):
     def _emit(self, ctx: FlowContext, client: api.Channel4Api, item: api.Episode) -> Iterator[Ask]:
         try:
             ctx.status(f"Resolving {item.label}")
-            source = client.source(item)
+            source = client.source(item, self.drm_system())
         except api.Channel4Error as exc:
             ctx.error(f"{item.label}: {exc}")
             return
@@ -377,6 +431,71 @@ class Channel4(Service):
         )
         yield ctx.emit(self._playback(title, source, artwork=item.artwork))
 
+    def augment_tracks(self, playback: Playback, tracks, log):
+        del log
+        seen = {stream.url for stream in tracks.streams if stream.media_type == "subtitle"}
+        rows = []
+        for reference in playback.subtitle_references:
+            if reference.url in seen:
+                continue
+            seen.add(reference.url)
+            extension = reference.format or "vtt"
+            rows.append(StreamInfo(
+                manifest_type="service",
+                media_type="subtitle",
+                url=reference.url,
+                original_url=reference.url,
+                id=f"channel4-subtitle-{len(rows) + 1}",
+                group_id=reference.kind,
+                name=reference.name or reference.language,
+                language=reference.language,
+                codecs={"vtt": "webvtt", "srt": "subrip"}.get(extension, extension),
+                extension=extension,
+                extra={
+                    "service_sidecar": "subtitle",
+                    "subtitle_reference_url": reference.url,
+                    "subtitle_kind": reference.kind,
+                },
+            ))
+        return rows
+
+    def prepare_download(self, playback: Playback, log) -> None:
+        selected = {reference.url: reference for reference in playback.subtitle_references if reference.selected}
+        if not selected:
+            return
+        client = self.client()
+        directory = private_directory(self.ctx.subtitle_dir())
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", playback.save_name).strip("._")[:120] or "Channel4"
+        output_format = str(self.settings.get("sub_format", "srt") or "srt")
+        for reference in selected.values():
+            language = re.sub(r"[^A-Za-z0-9_-]+", "_", reference.language)[:32] or "und"
+            data = client.subtitle_bytes(reference.url)
+            digest = hashlib.sha256(reference.url.encode() + b"\0" + data).hexdigest()[:12]
+            original = directory / f"{safe_name}.{language}.{digest}.{reference.format or 'vtt'}"
+            try:
+                atomic_write_bytes(original, data)
+                converted = convert_subtitle_file(
+                    original,
+                    output_format=output_format,
+                    output_path=original.with_suffix(f".{output_format}"),
+                    auto_fix=bool(self.settings.get("auto_subtitle_fix", True)),
+                    duration=playback.title.duration,
+                )
+                if not converted.is_file() or converted.stat().st_size == 0:
+                    raise SubtitleConversionError("no subtitle output was produced")
+                converted.chmod(0o600)
+            except (SubtitleConversionError, OSError) as exc:
+                raise api.Channel4Error(f"Could not prepare Channel 4 subtitles: {exc}") from exc
+            if not any(track.path == str(converted) for track in playback.mux_imports):
+                playback.mux_imports.append(ExternalTrack(
+                    path=str(converted),
+                    language=reference.language,
+                    name=reference.name,
+                    kind=reference.kind,
+                    original=reference.original,
+                ))
+            log(f"Subtitle prepared: {reference.name or reference.language}")
+
     def _playback(
         self, title: Title, source: api.Source, *, is_live: bool = False, artwork: dict | None = None,
     ) -> Playback:
@@ -388,17 +507,18 @@ class Channel4(Service):
             headers={"User-Agent": api.USER_AGENT, "Origin": api.WWW, "Referer": f"{api.WWW}/"},
             proxy=self.ctx.proxy,
             is_live=is_live,
+            subtitle_references=list(source.subtitles),
             chapters=(
                 list(source.chapters)
                 if self.fetch_chapters_enabled() and source.video_type == "ondemand" and not is_live
                 else []
             ),
-            attachments=metadata.attachments(artwork or {}, source.artwork) if self.fetch_attachments_enabled() else [],
+            attachments=api.attachments(artwork or {}, source.artwork) if self.fetch_attachments_enabled() else [],
             note=source.line(),
         )
         playback.drm = DrmInfo(
-            system="widevine",
-            license_url=api.LICENSE,
+            system=source.drm_system,
+            license_url=source.license_url,
             service_certificate=source.service_certificate,
             context={
                 "token": source.license_token,
@@ -421,6 +541,15 @@ class Channel4(Service):
                 video_url=str(drm.context.get("video_url") or ""),
                 request_id=str(drm.context.get("request_id") or ""),
             )
+        except api.Channel4Error as exc:
+            raise CdmError(str(exc)) from exc
+
+    def get_license_soap(self, challenge: str, drm: DrmInfo) -> str:
+        client = self._api
+        if client is None:
+            raise CdmError("Channel 4 session is not open")
+        try:
+            return client.license_soap(challenge, drm.license_url)
         except api.Channel4Error as exc:
             raise CdmError(str(exc)) from exc
 

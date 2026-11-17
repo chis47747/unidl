@@ -1,4 +1,4 @@
-"""VOD CEA-708 carried in AVC/HEVC SEI. No pixel decoding or video-sized copy."""
+"""Timestamped AVC/HEVC SEI scanning and CEA-708 service decoding."""
 from __future__ import annotations
 
 import contextlib
@@ -53,8 +53,8 @@ def _check_cancelled() -> None:
         runtime.checkpoint()
 
 
-def _sei_triplets(packet: bytes, codec: str) -> bytes:
-    """Read only ATSC registered SEI, excluding all CEA-608 compatibility data."""
+def _sei_triplets(packet: bytes, codec: str, *, valid_types: tuple[int, ...] = (6, 7)) -> bytes:
+    """Read selected valid cc_data types from ATSC registered SEI."""
     matches = list(_ANNEX_B.finditer(packet))
     result = bytearray()
     hevc = codec == "hevc"
@@ -94,7 +94,7 @@ def _sei_triplets(packet: bytes, codec: str) -> bytes:
                 stop = start + (header & 31) * 3
                 if header & 0x40 and stop < end_at and rbsp[stop] == 255:
                     for i in range(start, stop, 3):
-                        if rbsp[i] & 7 in (6, 7):
+                        if rbsp[i] & 7 in valid_types:
                             result.extend(rbsp[i:i + 3])
             at = end_at
     return bytes(result)
@@ -118,7 +118,29 @@ def _packet_data(line: bytes) -> tuple[int, bytes] | None:
     return pts_ms, data
 
 
-def _write_rcwt(ffprobe: str, projected: Path, destination: Path, codec: str, origin_ms: int) -> int:
+class _Cc1Filter:
+    """Only addressed field-one channel 1, never CC2 or 708 compatibility guesses."""
+
+    def __init__(self) -> None:
+        self.cc1 = False
+
+    def __call__(self, triplets: bytes) -> bytes:
+        result = bytearray()
+        for at in range(0, len(triplets), 3):
+            tag, first, second = triplets[at:at + 3]
+            if tag & 7 != 4 or first.bit_count() % 2 != 1 or second.bit_count() % 2 != 1:
+                continue
+            byte = first & 0x7f
+            if 0x10 <= byte <= 0x1f:
+                self.cc1 = not bool(byte & 8)
+            if self.cc1 and byte:
+                result.extend((tag, first, second))
+        return bytes(result)
+
+
+def _write_rcwt(
+    ffprobe: str, projected: Path, destination: Path, codec: str, origin_ms: int, *, cc1: bool = False,
+) -> int:
     """Stream small SEI packets into presentation order without buffering video."""
     command = [
         ffprobe, "-v", "fatal", "-probesize", "32768", "-analyzeduration", "0",
@@ -129,12 +151,18 @@ def _write_rcwt(ffprobe: str, projected: Path, destination: Path, codec: str, or
     last_written = -1
     last_packet = -1
     runtime = current_download_runtime()
+    channel = _Cc1Filter() if cc1 else None
+    caption = "CC1" if cc1 else "CEA-708"
     with destination.open("wb") as output:
         output.write(_RCWT_HEADER)
 
         def flush() -> None:
             nonlocal last_written
             pts_ms, _, payload = heapq.heappop(pending)
+            if channel is not None:
+                payload = channel(payload)
+                if not payload:
+                    return
             if pts_ms < last_written or len(payload) // 3 > 65535:
                 raise Cea708Error("CEA-708 packet timestamps or record sizes exceed supported bounds.")
             output.write(struct.pack("<qH", pts_ms, len(payload) // 3))
@@ -158,7 +186,7 @@ def _write_rcwt(ffprobe: str, projected: Path, destination: Path, codec: str, or
                 pts_ms, data = record
                 elapsed = max(0, pts_ms - origin_ms)
                 last_packet = max(last_packet, elapsed)
-                if payload := _sei_triplets(data, codec):
+                if payload := _sei_triplets(data, codec, valid_types=(4,) if cc1 else (6, 7)):
                     heapq.heappush(pending, (elapsed, index, payload))
                 # Flush according to video packet order as well as heap size:
                 # the bound applies to video reordering, not subtitle density.
@@ -180,8 +208,42 @@ def _write_rcwt(ffprobe: str, projected: Path, destination: Path, codec: str, or
         while pending:
             flush()
     if last_written < 0:
-        raise Cea708Error("No CEA-708 subtitle packets were found in the video carrier.")
+        raise Cea708Error(f"No {caption} subtitle packets were found in the video carrier.")
     return last_packet
+
+
+def write_sei_rcwt(ffmpeg: str, ffprobe: str, source: Path, work: Path, *, cc1: bool = False) -> tuple[Path, int]:
+    from .postprocess import _run_external
+
+    metadata = managed_run([
+        ffprobe, "-v", "error", "-select_streams", "V:0", "-show_entries",
+        "stream=index,codec_name,start_time:format=start_time", "-of", "json", str(source),
+    ], capture_output=True, timeout=30)
+    _check_cancelled()
+    if metadata.returncode:
+        raise Cea708Error("Could not inspect the SEI caption carrier.")
+    info = json.loads(metadata.stdout)
+    video = next(iter(info.get("streams", [])), {})
+    codec = video.get("codec_name")
+    if codec not in {"h264", "hevc"}:
+        raise Cea708Error("SEI caption extraction currently supports AVC/HEVC video carriers.")
+    start_time = info.get("format", {}).get("start_time") or video.get("start_time")
+    origin_ms = round(float(start_time or 0) * 1000)
+    # Stream-copy only SEI units. NUT retains packet boundaries and the source time base.
+    filter_types = "39|40" if codec == "hevc" else "6"
+    projected = work / "sei.nut"
+    try:
+        _run_external([
+            ffmpeg, "-v", "error", "-nostdin", "-y", "-copyts", "-i", str(source),
+            "-map", f"0:{int(video['index'])}", "-c:v", "copy",
+            "-bsf:v", f"{codec}_mp4toannexb,filter_units=pass_types={filter_types}",
+            "-map_metadata", "-1", "-avoid_negative_ts", "disabled", "-f", "nut", str(projected),
+        ], "caption SEI projection", reject_demux_errors=True)
+        _check_cancelled()
+        rcwt = work / "cc.bin"
+        return rcwt, _write_rcwt(ffprobe, projected, rcwt, codec, origin_ms, cc1=cc1)
+    finally:
+        projected.unlink(missing_ok=True)
 
 
 def _read_service_file(path: Path, last_packet_ms: int):
@@ -212,40 +274,12 @@ def extract_services(source: Path, destination: Path, services: tuple[int, ...])
         raise Cea708Error(reason)
     ffmpeg, ffprobe, decoder = (shutil.which(name) for name in ("ffmpeg", "ffprobe", "ccextractor"))
     assert ffmpeg and ffprobe and decoder
-    from .postprocess import _run_external
 
     try:
-        metadata = managed_run([
-            ffprobe, "-v", "error", "-select_streams", "V:0", "-show_entries",
-            "stream=index,codec_name,start_time:format=start_time", "-of", "json", str(source),
-        ], capture_output=True, timeout=30)
-        _check_cancelled()
-        if metadata.returncode:
-            raise Cea708Error("Could not inspect the CEA-708 video carrier.")
-        info = json.loads(metadata.stdout)
-        video = next(iter(info.get("streams", [])), {})
-        codec = video.get("codec_name")
-        if codec not in {"h264", "hevc"}:
-            raise Cea708Error("CEA-708 currently supports AVC/HEVC video SEI carriers.")
-        start_time = info.get("format", {}).get("start_time") or video.get("start_time")
-        origin_ms = round(float(start_time or 0) * 1000)
-        # FFmpeg stream-copies only SEI NAL units into a small timestamped
-        # projection. NUT retains packet boundaries and the source time base.
-        filter_types = "39|40" if codec == "hevc" else "6"
         destination.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="cc-", dir=destination) as tmp:
             work = Path(tmp)
-            projected = work / "sei.nut"
-            _run_external([
-                ffmpeg, "-v", "error", "-nostdin", "-y", "-copyts", "-i", str(source),
-                "-map", f"0:{int(video['index'])}", "-c:v", "copy",
-                "-bsf:v", f"{codec}_mp4toannexb,filter_units=pass_types={filter_types}",
-                "-map_metadata", "-1", "-avoid_negative_ts", "disabled", "-f", "nut", str(projected),
-            ], "CEA-708 SEI projection", reject_demux_errors=True)
-            _check_cancelled()
-            rcwt = work / "cc.bin"
-            last_packet_ms = _write_rcwt(ffprobe, projected, rcwt, codec, origin_ms)
-            projected.unlink()
+            rcwt, last_packet_ms = write_sei_rcwt(ffmpeg, ffprobe, source, work)
             decoded = managed_run([
                 decoder, str(rcwt), "--service", ",".join(map(str, sorted(set(services)))),
                 "-o", str(work / "decoded.srt"),

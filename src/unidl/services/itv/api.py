@@ -14,16 +14,20 @@ from urllib.parse import unquote, urlencode, urljoin, urlparse
 import requests
 
 WWW = "https://www.itv.com"
-AUTH = "https://auth.prd.user.itv.com/v2/auth"
-REFRESH = "https://auth.prd.user.itv.com/token"
+AUTH_BASE = "https://auth.prd.user.itv.com"
+REFRESH = f"{AUTH_BASE}/token"
+ACTIVATE_URL = f"{WWW}/watch/pair"
+TV_CODE_LENGTH = 7
+TV_CODE_INTERVAL = 5
+TV_CODE_TIMEOUT = 810
 INVENTORY = "https://content-inventory.prd.oasvc.itv.com/discovery"
 NOW_NEXT = "https://nownext.oasvc.itv.com/channels?supports=simulcast,live-events,fast"
 TEXT_SEARCH = "https://textsearch.prd.oasvc.itv.com/search"
 SHORTFORM = "https://shortform.prd.shows.itv.com/graphql"
 
 AUTH_ORIGIN = "https://app.10ft.itv.com"
-AUTH_REFERER = "https://app.10ft.itv.com/3.748.0/androidtv/"
-APP_VERSION = "3.748.0"
+APP_VERSION = "3.878.0"
+AUTH_REFERER = f"{AUTH_ORIGIN}/{APP_VERSION}/androidtv/"
 CLIENT_ID = "androidtv"
 SERVICE = "itv.x"
 USER_AGENT = (
@@ -82,8 +86,8 @@ query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: 
           variants { features }
         }
         ... on Episode { episodeNumber }
-        ... on Special { episodeNumber productionYear }
-        ... on Film { productionYear }
+        ... on Special { episodeNumber productionYear genres { id name } }
+        ... on Film { productionYear genres { id name } }
       }
     }
   }
@@ -97,8 +101,8 @@ query GetProgramme($brandFilter: BrandFilter!, $titleFilter: TitleFilter!, $id: 
       legacyId duration linearContent playlistUrl subtitled audioDescribed variants { features }
     }
     ... on Episode { episodeNumber }
-    ... on Special { episodeNumber productionYear }
-    ... on Film { productionYear }
+    ... on Special { episodeNumber productionYear genres { id name } }
+    ... on Film { productionYear genres { id name } }
   }
   titlesToRedirect: titles(filter: { legacyId: $id, titleTypes: [EPISODE, SPECIAL, FILM], available: "NOW", tiers: ["PAID", "FREE"] })
     @include(if: $withTitlesToRedirect) { legacyId brandLegacyId title titleType brand { title legacyId } }
@@ -123,6 +127,16 @@ query GetClipByCcid($ccid: ID!, $isNews: Boolean!, $isSport: Boolean!, $withImag
 
 class ItvError(RuntimeError):
     """ITVX rejected a request or returned an unusable shape."""
+
+
+@dataclass(frozen=True)
+class TVCode:
+    code: str = field(repr=False)
+    expires_at: float
+
+    @property
+    def qr_url(self) -> str:
+        return f"{ACTIVATE_URL}?{urlencode({'loginCode': self.code, 'device': CLIENT_ID})}"
 
 
 @dataclass(frozen=True)
@@ -287,46 +301,64 @@ class ItvApi:
         if not self.session.cookies.get("Itv.Cid"):
             self.session.cookies.set("Itv.Cid", str(uuid.uuid4()), domain=".itv.com", path="/")
 
-    def authenticate(self, username: str = "", password: str = "") -> dict[str, Any]:
+    def start_tv_code(self) -> TVCode:
+        # Android TV 1.28.0 loads 3.878.0: authPairCode.length=7, 162 polls at 5s.
+        data = self._auth_json("/generate/code", params={"size": TV_CODE_LENGTH})
+        code = data.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9]{7}", code):
+            raise ItvError("ITVX returned an invalid TV sign-in code")
+        return TVCode(code, time.monotonic() + TV_CODE_TIMEOUT)
+
+    def poll_tv_code(self, challenge: TVCode) -> dict[str, Any] | None:
+        if time.monotonic() >= challenge.expires_at:
+            raise ItvError("The ITVX TV code expired; start TV code sign-in again")
+        data = self._auth_json(f"/verify/{challenge.code}", pending=True)
+        if data is None:
+            return None
+        token = data.get("token")
+        if not isinstance(token, str) or _jwt_expiry(token) <= time.time():
+            raise ItvError("ITVX pairing returned no valid refresh token")
+        return self._accept_tokens(self._auth_json("/token", params={"refresh": token}), refresh_token=token)
+
+    def _auth_json(self, path: str, *, params=None, pending: bool = False) -> dict[str, Any] | None:
+        try:
+            response = self.session.get(
+                f"{AUTH_BASE}{path}",
+                headers=self._auth_headers(AUTH_ACCEPT, origin=AUTH_ORIGIN, referer=AUTH_REFERER),
+                params=params,
+                timeout=10,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise ItvError(f"ITVX TV authentication request failed ({type(exc).__name__})") from None
+        if pending and response.status_code == 404:
+            return None
+        if not 200 <= response.status_code < 300:
+            raise ItvError(f"ITVX TV authentication refused the request ({response.status_code}); sign in with a new TV code")
+        try:
+            data = response.json()
+        except ValueError:
+            raise ItvError("ITVX TV authentication returned invalid JSON") from None
+        if not isinstance(data, dict):
+            raise ItvError("ITVX TV authentication returned an invalid response")
+        return data
+
+    def authenticate(self) -> dict[str, Any]:
         now = int(time.time())
         if self.access_token and (_int(self.state.get("token_expires")) or _jwt_expiry(self.access_token)) > now + 300:
             return self.state
         refresh_expiry = _int(self.state.get("refresh_token_expires")) or _jwt_expiry(self.refresh_token)
         if self.refresh_token and refresh_expiry > now:
-            data = self._json(
-                "GET",
-                REFRESH,
-                headers=self._auth_headers(AUTH_ACCEPT, origin=AUTH_ORIGIN, referer=AUTH_REFERER),
-                params={"refresh": self.refresh_token},
-            )
+            data = self._auth_json("/token", params={"refresh": self.refresh_token})
             return self._accept_tokens(data)
-        if not username or not password:
-            raise ItvError("ITVX needs an account; sign in or configure its credentials")
-        data = self._json(
-            "POST",
-            AUTH,
-            headers=self._auth_headers(
-                AUTH_ACCEPT,
-                content_type="application/json",
-                origin=AUTH_ORIGIN,
-                referer=AUTH_REFERER,
-            ),
-            json={
-                "username": username,
-                "password": password,
-                "scope": "content",
-                "grant_type": "password",
-                "nonce": f"cerberus-auth-request-{int(time.time() * 1000)}",
-            },
-        )
-        return self._accept_tokens(data)
+        raise ItvError("ITVX needs TV code sign-in; choose Sign in with TV code")
 
-    def _accept_tokens(self, data: dict[str, Any]) -> dict[str, Any]:
-        access = str(data.get("access_token") or self.access_token)
-        refresh = str(data.get("refresh_token") or self.refresh_token)
+    def _accept_tokens(self, data: dict[str, Any], *, refresh_token: str = "") -> dict[str, Any]:
+        access = data.get("access_token")
+        if not isinstance(access, str) or _jwt_expiry(access) <= time.time():
+            raise ItvError("ITVX authentication returned no valid access token")
+        refresh = str(data.get("refresh_token") or refresh_token or self.refresh_token)
         profile = str(data.get("profile_token") or self.state.get("profile_token") or "")
-        if not access:
-            raise ItvError("ITVX authentication returned no access token")
         access_claims = _jwt(access)
         refresh_claims = _jwt(refresh)
         account_id = str(access_claims.get("sub") or refresh_claims.get("sub") or self.state.get("account_id") or "")
@@ -380,8 +412,11 @@ class ItvApi:
         return [_search_hit(raw) for raw in data.get("results") or [] if isinstance(raw, dict)]
 
     def show(self, content_id: str, *, shortform_category: str = "", with_images: bool = True) -> Show:
+        content_id = _content_id(content_id)
+        if shortform_category and _is_shortform_id(content_id):
+            return self._shortform_show(content_id, shortform_category, with_images=with_images)
         last_error: ItvError | None = None
-        for candidate in _content_id_candidates(_content_id(content_id)):
+        for candidate in _content_id_candidates(content_id):
             try:
                 return self._show(
                     candidate,
@@ -567,8 +602,8 @@ class ItvApi:
                     stream_url=str(raw["streamUrl"]),
                     now=str(now.get("title") or now.get("programmeTitle") or ""),
                     next=str(nxt.get("title") or nxt.get("programmeTitle") or ""),
-                    synopsis=str(now.get("synopsis") or now.get("description") or ""),
-                    starts_at=str(now.get("start") or now.get("broadcastAt") or ""),
+                    synopsis=str(now.get("shortSynopsis") or now.get("synopsis") or now.get("description") or ""),
+                    starts_at=str(now.get("broadcastAt") or ""),
                     logo_url=(raw.get("images") or {}).get("logo") or "",
                 )
             )
@@ -805,7 +840,7 @@ def _episode(
     genres = raw.get("genres") or brand.get("genres") or []
     genre = ", ".join(str(entry.get("name") or entry.get("id") or "") for entry in genres if isinstance(entry, dict))
     synopsis = str((raw.get("synopses") or {}).get("epg") or (raw.get("synopses") or {}).get("ninety") or "")
-    year = _year(raw.get("productionYear"), raw.get("broadcastDateTime"))
+    year = _year(raw.get("productionYear")) if film else _year(raw.get("productionYear"), raw.get("broadcastDateTime"))
     features = _features(version.get("variants"), discovery_features)
     return Episode(
         id=str(raw.get("legacyId") or version.get("legacyId") or raw.get("ccid") or ""),
@@ -970,7 +1005,7 @@ def _search_hit(raw: dict[str, Any]) -> SearchHit:
     genres = data.get("genre") or data.get("genres") or []
     genre = ", ".join(str(value) for value in genres) if isinstance(genres, list) else str(genres)
     return SearchHit(
-        "vod" if content_id else "unsupported",
+        "vod" if content_type == "vod" and content_id else "unsupported",
         title,
         content_id=content_id,
         synopsis=str(data.get("synopsis") or data.get("description") or ""),
@@ -981,7 +1016,7 @@ def _search_hit(raw: dict[str, Any]) -> SearchHit:
 
 
 def _programme_variables(content_id: str, discovery_features: list[str]) -> dict[str, Any]:
-    legacy = not re.fullmatch(r"[a-z0-9]{7}", content_id or "")
+    legacy = not _is_shortform_id(content_id)
     title_legacy = _is_title_legacy_id(content_id)
     brand_filter = _compact(
         {
@@ -998,7 +1033,7 @@ def _programme_variables(content_id: str, discovery_features: list[str]) -> dict
         {
             "titleTypes": ["EPISODE", "SPECIAL", "FILM"],
             "legacyId": content_id if title_legacy else None,
-            "brandCCId": None if legacy else content_id,
+            "ccid": None if legacy else content_id,
             "brandLegacyId": content_id if legacy and not title_legacy else None,
             "features": discovery_features,
             "available": "NOW",
@@ -1114,5 +1149,6 @@ __all__ = [
     "Show",
     "Source",
     "Subtitle",
+    "TVCode",
     "parse_input",
 ]

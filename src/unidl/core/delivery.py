@@ -128,6 +128,7 @@ class TrackDescriptor:
     is_live: bool = False
     key_ids: tuple[str, ...] = ()
     is_3d: bool = False
+    embedded_caption: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,11 +1,4 @@
-"""France.tv Android TV (fr.francetv.pluzz) API.
-
-Protocol mirrors the TV client 5.14.2: Yatta catalog, K7 playback metadata,
-optional proxy-gin device-code login for catalogue items flagged ``login``.
-K7 itself does not consume the account access token — login is a client-side
-gate only. Playback is DASH/HLS; DRM (when present) uses Widevine with
-``nv-authorizations`` from the DRM tokenizer.
-"""
+"""France.tv Android TV (fr.francetv.pluzz) API."""
 
 from __future__ import annotations
 
@@ -97,8 +90,6 @@ class FranceTvAuthRequired(FranceTvError):
 class RefreshRejected(FranceTvError):
     pass
 
-
-# --------------------------------------------------------------------------- models
 
 
 @dataclass
@@ -202,8 +193,6 @@ class DeviceCodeChallenge:
     deadline: float = 0.0
     transient_errors: int = 0
 
-
-# --------------------------------------------------------------------------- helpers
 
 
 def _as_int(value: Any) -> int | None:
@@ -686,7 +675,6 @@ def catalog_item_from_raw(item: dict[str, Any], *, entry_kind: str | None = None
 
 
 def parse_input(value: str) -> tuple[str, str] | None:
-    """Return a strict supported route without reflecting rejected input."""
     raw = value.strip() if isinstance(value, str) else ""
     if not raw:
         return None
@@ -719,9 +707,6 @@ def parse_input(value: str) -> tuple[str, str] | None:
     ):
         return None
     return _parse_supported_path(parsed.path, query)
-
-
-# --------------------------------------------------------------------------- client
 
 
 class FranceTvApi:
@@ -847,7 +832,6 @@ class FranceTvApi:
         if method.upper() in {"POST", "PUT", "PATCH"}:
             kwargs["data"] = body_text.encode("utf-8")
         response = self._request(method, f"{AUTH_BASE_URL}{path}", **kwargs)
-        # HTTP authority is classified before attempting to interpret an error body.
         if response.status_code >= 400:
             return response, self._error_json_object(response)
         payload = self._safe_json(response)
@@ -891,13 +875,6 @@ class FranceTvApi:
             type_token = previous.type_token
         if not type_token:
             raise FranceTvError("France.tv token response is missing a token type")
-
-        # The official client models ``expire_in`` as a String and stores it
-        # verbatim.  It does not use that field to decide whether the access token
-        # is fresh: it decodes ``exp`` from the JWT into a separate
-        # ``accessExpiration`` column.  Requiring this provider-owned string to be
-        # an integer rejected a successfully activated account before it could be
-        # cached, then the UI polled the already-consumed code again and again.
         expire_in = ""
         for key in ("expire_in", "expires_in"):
             if key in token_data:
@@ -1054,8 +1031,6 @@ class FranceTvApi:
                 pass
         raise FranceTvAuthRequired("France.tv TV sign-in is required for this title")
 
-    # --------------------------------------------------------------- catalogue
-
     def content_details(self, content_id: str) -> CatalogItem:
         value = content_id.strip() if isinstance(content_id, str) else ""
         if not re.fullmatch(r"\d{5,}", value):
@@ -1210,18 +1185,6 @@ class FranceTvApi:
     def _program_items(
         self, page: dict[str, Any], program_path: str
     ) -> list[CatalogItem]:
-        """Return the selected programme's videos, not its recommendation shelves.
-
-        A Yatta programme response is a whole screen.  Alongside seasons and extras
-        belonging to the programme it carries shelves such as ``À découvrir aussi``
-        and ``Des mini-séries``.  Flattening every collection turns an exact URL into
-        dozens of unrelated search-like results and can even put the programme itself
-        back in the list, which opens the same screen recursively.
-
-        Playable rows identify their owner in ``program.program_path``.  Keep that
-        exact owner, tolerate an occasional owner-less bonus in a programme-owned
-        shelf, and never treat navigation cards or the discovery shelf as episodes.
-        """
         if not isinstance(page, dict) or "collections" not in page:
             raise FranceTvError("France.tv program page response has an invalid shape")
 
@@ -1265,7 +1228,6 @@ class FranceTvApi:
             items.append(item)
         return items
 
-    # ---------------------------------------------------------------- playback
 
     def geo_info(self) -> tuple[str, str]:
         if self._geo is not None:

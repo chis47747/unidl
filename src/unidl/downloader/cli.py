@@ -37,8 +37,14 @@ from .audio import (
     transcode_audio,
 )
 from .bbts import decrypt_bbts_file
-from .captions import PRESERVE as _PRESERVE_CAPTIONS
 from .captions import (
+    CAPTION,
+    CAPTION_COMPLETE,
+    CAPTION_EXTRACTING,
+    CAPTION_PROGRESS,
+    CAPTION_SKIPPED,
+    CAPTION_WAITING,
+    CaptionExtractionError,
     bind_caption_sources,
     caption_source,
     cea708_service,
@@ -47,6 +53,9 @@ from .captions import (
     is_caption,
     update_caption_source,
     validate_caption,
+)
+from .captions import (
+    PRESERVE as _PRESERVE_CAPTIONS,
 )
 from .cea708 import Cea708Error
 from .cea708 import extract_services as extract_cea708_services
@@ -939,7 +948,8 @@ def _download_impl(args: argparse.Namespace) -> int:
         if not selected:
             raise Cea708Error(unavailable[0][1])
         for stream, reason in unavailable:
-            _warn_optional_cea708(args, stream, reason, print)
+            _caption_progress(args, stream, CAPTION_SKIPPED)
+            _warn_optional_caption(args, stream, reason, print)
     selected = _replace_direct_audio_with_matching_sabr_audio(selected, streams)
     bind_caption_sources(selected, streams)
     for stream in selected:
@@ -1218,17 +1228,34 @@ def _download_impl(args: argparse.Namespace) -> int:
         return 0
 
     def download_vod_track(stream, offset, show_progress, **progress_options):
+        caption = is_caption(stream)
+        caption_display = progress_options.get("progress_callback")
+        if caption and show_progress and _embedding_console_progress(args):
+            caption_display = _DownloadProgress(stream, colors=colors, force=getattr(args, "force_ansi_console", False))
+            progress_options["progress_callback"] = caption_display
+        if caption:
+            _caption_progress(args, stream, CAPTION_WAITING, caption_display)
         try:
-            return _download_selected_stream(
+            track = _download_selected_stream(
                 stream, offset, len(hydrated), streams, args, headers, keys, hls_crypto,
                 max_speed, staged_output_dir, default_save_base, show_progress, **progress_options,
             )
-        except Cea708Error as exc:
-            if len(hydrated) == 1 or cea708_service(stream) is None:
+        except (Cea708Error, CaptionExtractionError) as exc:
+            if not caption:
                 raise
             _checkpoint_embedding(args)
-            _warn_optional_cea708(args, stream, str(exc), progress_options.get("status_printer") or print)
+            _caption_progress(args, stream, CAPTION_SKIPPED, caption_display)
+            if len(hydrated) == 1:
+                raise
+            _warn_optional_caption(args, stream, str(exc), progress_options.get("status_printer") or print)
             return None
+        else:
+            if caption:
+                _caption_progress(args, stream, CAPTION_COMPLETE, caption_display)
+            return track
+        finally:
+            if isinstance(caption_display, _DownloadProgress):
+                caption_display.finish()
 
     if args.concurrent_download and len(hydrated) > 1:
         track_workers = _concurrent_track_workers(args.workers, len(hydrated))
@@ -1236,6 +1263,8 @@ def _download_impl(args: argparse.Namespace) -> int:
         panel = _MultiDownloadProgress(hydrated, colors=colors, force=getattr(args, "force_ansi_console", False))
         if not _embedding_console_progress(args):
             panel.enabled = False
+        if panel.enabled:
+            args._unidown_caption_video_progress = panel.progress_for
         pool = ThreadPoolExecutor(max_workers=len(hydrated))
         futures = {}
         completed: list[_DownloadedTrack] = []
@@ -1286,8 +1315,8 @@ def _download_impl(args: argparse.Namespace) -> int:
     downloaded_tracks = _with_original_imports(
         downloaded_tracks, mux_imports, staged_output_dir, args, default_save_base,
     )
-    if not downloaded_tracks and any(cea708_service(stream) is not None for stream in hydrated):
-        raise Cea708Error("None of the selected CEA-708 services produced valid subtitles.")
+    if not downloaded_tracks and any(is_caption(stream) for stream in hydrated):
+        raise CaptionExtractionError("None of the selected embedded captions produced valid subtitles.")
     hybrid_enabled = bool(getattr(args, "service_context", {}).get("unidl_hybrid_dv_hdr10"))
     if hybrid_enabled:
         try:
@@ -1367,8 +1396,8 @@ def _download_impl(args: argparse.Namespace) -> int:
     return 0
 
 
-def _warn_optional_cea708(args, stream, reason: str, emit) -> None:
-    name = f"SERVICE{cea708_service(stream)}"
+def _warn_optional_caption(args, stream, reason: str, emit) -> None:
+    name = stream.extra[CAPTION]
     if stream.language:
         name += f" ({stream.language})"
     message = f"Subtitle skipped: {name} — {reason}"
@@ -2012,7 +2041,7 @@ def _embedding_vod_progress(
                     elapsed_seconds=elapsed,
                     speed_bytes_per_second=speed,
                     eta_seconds=eta,
-                    status="Done" if update.done else "Downloading",
+                    status=update.status or ("Done" if update.done else "Downloading"),
                     done=bool(update.done),
                 )
             )
@@ -2022,6 +2051,11 @@ def _embedding_vod_progress(
             _checkpoint_embedding(args)
 
     return progress
+
+
+def _caption_progress(args, stream, status: str, downstream=None) -> None:
+    if report := _embedding_vod_progress(args, downstream):
+        report(ProgressUpdate(stream, 0, 0, 0, None, 0.0, done=status == CAPTION_COMPLETE, status=status))
 
 
 def _embedding_live_progress(
@@ -2381,7 +2415,8 @@ def _download_selected_stream(
     colors = _colors(args)
     name = _track_save_name(args.save_name or default_save_base, args.save_pattern, stream, offset, total)
     name = _audio_source_download_name(name, stream, args)
-    progress_display = progress_callback or (
+    caption = is_caption(stream)
+    progress_display = None if caption else progress_callback or (
         _DownloadProgress(
             stream,
             colors=colors,
@@ -2462,8 +2497,7 @@ def _download_selected_stream(
                 source_offset = offset
             source.extra[_PRESERVE_CAPTIONS] = True
             if source.encrypted and args.no_decrypt:
-                error = Cea708Error if cea708_service(stream) is not None else ValueError
-                raise error("Encrypted caption carriers must be decrypted before extraction.")
+                raise CaptionExtractionError("Encrypted caption carriers must be decrypted before extraction.")
             local = copy.copy(args)
             local._unidown_inside_caption_source = True
             local.repack = False
@@ -2475,27 +2509,28 @@ def _download_selected_stream(
             hooks = getattr(local, "embedding_hooks", None)
             if hooks is not None and not job:
                 local.embedding_hooks = replace(hooks, progress=None)
-            forward = (lambda update: progress(replace(update, stream=stream))) if progress and not job else None
-            with status.spinning("Waiting for caption carrier {spinner}"):
-                try:
-                    physical = args._unidown_muxed_cache.get(
-                        MuxedSourceCache.key(source),
-                        lambda: _download_selected_stream(
-                            source, source_offset, total, all_streams if job else [source],
-                            local, headers, keys, hls_crypto, max_speed,
-                            output_dir if job else output_dir / ".captions", default_save_base, False,
-                            progress_callback=forward, status_printer=emit, workers=workers,
-                        ),
-                        lambda: _checkpoint_embedding(args),
-                    )
-                except DownloadCancelled:
+            factory = getattr(args, "_unidown_caption_video_progress", None)
+            forward = factory(source_offset) if job and factory else None
+            try:
+                physical = args._unidown_muxed_cache.get(
+                    MuxedSourceCache.key(source),
+                    lambda: _download_selected_stream(
+                        source, source_offset, total, all_streams if job else [source],
+                        local, headers, keys, hls_crypto, max_speed,
+                        output_dir if job else output_dir / ".captions", default_save_base, False,
+                        progress_callback=forward, status_printer=emit, workers=workers,
+                    ),
+                    lambda: _checkpoint_embedding(args),
+                )
+            except DownloadCancelled:
+                raise
+            except (OSError, RuntimeError, ValueError) as exc:
+                if job:
                     raise
-                except (OSError, RuntimeError, ValueError) as exc:
-                    if job or cea708_service(stream) is None:
-                        raise
-                    raise Cea708Error(f"Could not prepare the CC-only video carrier: {_short_error(exc)}") from exc
+                raise CaptionExtractionError(f"Could not prepare the CC-only video carrier: {_short_error(exc)}") from exc
             _checkpoint_embedding(args)
-            with status.spinning("Downloaded ✓", "Extracting CC {spinner}"):
+            _caption_progress(args, stream, CAPTION_EXTRACTING, progress_callback)
+            try:
                 cea708_files = None
                 if (service := cea708_service(stream)) is not None:
                     carrier_key = MuxedSourceCache.key(source)
@@ -2515,12 +2550,13 @@ def _download_selected_stream(
                     physical.path, _output_path(stream, output_dir, name), stream,
                     raw=getattr(args, "sub_format", "srt") == "raw", cea708_files=cea708_files,
                 )
+            except (DownloadCancelled, Cea708Error, CaptionExtractionError):
+                raise
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                raise CaptionExtractionError(_short_error(exc)) from exc
             projection_result = DownloadResult(stream, extracted)
             projection_cleanup = [physical.path, *physical.cleanup_paths]
             checkpoint.save("decrypted", extracted, projection_result)
-            if progress:
-                progress(ProgressUpdate(stream, stream.segments_count, stream.segments_count,
-                                        extracted.stat().st_size, extracted.stat().st_size, 0.001, done=True))
         elif is_demux_stream(stream) and not checkpoint.reached("decrypted"):
             projection_result, projection_cleanup = _prepare_muxed_projection(
                 stream, name, args, headers, keys, hls_crypto, max_speed,
@@ -6278,7 +6314,7 @@ class _MultiDownloadProgress:
                 return
             update = _coalesce_progress_update(self.updates.get(offset), update)
             self.updates[offset] = update
-            if not update.done and now - self.last_render < 0.12:
+            if not update.done and not update.status and now - self.last_render < 0.12:
                 return
             self.last_render = now
             self._render_locked()
@@ -6308,7 +6344,7 @@ class _MultiDownloadProgress:
         progress_rows = []
         for offset, stream in self.streams.items():
             status_line = self.status_lines.get(offset)
-            if status_line:
+            if status_line and not is_caption(stream):
                 rows.append((offset, status_line, None))
                 continue
             update = self.updates.get(offset)
@@ -6320,6 +6356,7 @@ class _MultiDownloadProgress:
                     downloaded_bytes=0,
                     total_bytes=None,
                     elapsed_seconds=0.001,
+                    status=CAPTION_WAITING if is_caption(stream) else "",
                 )
             frame = self.frames.get(offset, 0)
             rows.append((offset, update, frame))
@@ -6374,7 +6411,7 @@ class _DownloadProgress:
         if not self.enabled:
             return
         now = time.monotonic()
-        if not update.done and now - self.last_render < 0.12:
+        if not update.done and not update.status and now - self.last_render < 0.12:
             return
         self.last_render = now
         self._render(update)
@@ -6463,6 +6500,11 @@ def _progress_one_line(
     speed: float | None = None,
 ) -> str:
     safe_width = max(32, width - 1)
+    if update.status in CAPTION_PROGRESS:
+        label = _progress_title(update.stream)
+        icon = CAPTION_PROGRESS[update.status]
+        state = f"{update.status} {icon}".rstrip()
+        return f"{_ellipsize(label, max(4, safe_width - len(state) - 3))} | {state}"
     percent = _progress_percent(update)
     if speed is None:
         speed = update.downloaded_bytes / max(update.elapsed_seconds, 0.001)
@@ -6488,7 +6530,7 @@ def _progress_one_line(
 
 
 def _coalesce_progress_update(previous: ProgressUpdate | None, current: ProgressUpdate) -> ProgressUpdate:
-    if previous is None:
+    if previous is None or current.status:
         return current
     if previous.done and not current.done:
         return previous
@@ -6583,8 +6625,9 @@ def _progress_title(stream) -> str:
             codec = "Atmos"
         body = compact_join([stream.language, format_bitrate(stream.bandwidth), codec], separator=" ")
     elif stream.media_type in {"subtitle", "subtitles", "text"}:
+        label = stream.extra[CAPTION] if is_caption(stream) else stream.role or stream.name or stream.group_id or stream.id
         body = compact_join(
-            [stream.language, stream.role or stream.name or stream.group_id or stream.id], separator=" "
+            [stream.language, label], separator=" "
         )
     else:
         body = compact_join(

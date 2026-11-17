@@ -10,6 +10,7 @@ requests[socks]>=2.31
 qrcode[pil]>=7.4
 textual-image[textual]>=0.13.2; python_version >= "3.12"
 httpx[http2,socks]>=0.27
+curl-cffi>=0.17
 cryptography>=42
 PyYAML>=6.0
 geonamescache>=2.0

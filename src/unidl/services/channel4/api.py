@@ -10,26 +10,33 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlsplit, urlunparse
+from xml.etree import ElementTree
 
-import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+from curl_cffi import requests as browser_requests
 
+from ...core.attachments import Attachment
 from ...core.chapters import Chapter, normalize_chapters
-from . import metadata
+from ...core.playback import SubtitleReference
 
 WWW = "https://www.channel4.com"
 API = "https://api.channel4.com/online/v1"
 AUTH = "https://api.channel4.com/online/v2/auth/token"
+PIN = "https://api.channel4.com/online/v2/auth/pin"
+TV_CONFIG = "https://config.bsd.client.streaming.channel4.com/26.2.0/google/config.json"
+PLAYREADY_CONFIG = "https://config.bsd.client.streaming.channel4.com/26.2.0/tizen/config.json"
+TV_CONFIG_KEY = "ALr9MMDdNUFaH8CLwlJt"
 LICENSE = "https://c4.eme.lp.aws.redbeemedia.com/wvlicenceproxy-service/widevine/acquire"
+PLAYREADY_CLIENT = "samsung-dash"
+PLAYREADY_SOAP_ACTION = '"http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense"'
 
-API_CLIENT = "android-mod"
-AUTH_CLIENT = "samsungorsay"
+API_CLIENT = "googletv"
+AUTH_CLIENT = "googletv"
 DEVICE_GROUP = "console"
-LIVE_SCHEDULE_CLIENT = "samsungorsay"
-LIVE_CLIENT = "android-mod"
-AUTH_BASIC = "MzZVVUN0OThWTVF2QkFnUTI3QXU4ekdIbDMxTjlMUTE6Sllzd3lIdkdlNjJWbGlrVw=="
+LIVE_SCHEDULE_CLIENT = "googletv"
+LIVE_CLIENT = "googletv"
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 12; Chromecast Build/STTL.240508.005; wv) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
@@ -37,10 +44,10 @@ USER_AGENT = (
     "WebAppWrapper/1.0.3 (Google TV; Channel 4; google; Chromecast; Chromecast)"
 )
 
-VOD_TOKEN_KEY = "QVlESUQ4U0RGQlA0TThESA=="
-VOD_TOKEN_IV = "MURDRDAzODNES0RGU0w4Mg=="
-LIVE_TOKEN_KEY = "bjljTGllWWtxd3pOQ3F2aQ=="
-LIVE_TOKEN_IV = "b2R6Y1UzV2RVaVhMdWNWZA=="
+VOD_TOKEN_KEY = "UVNZVDY2QkJJMlgzUVRVTg=="
+VOD_TOKEN_IV = "VjlZUk4zUElWWFkyTUhHNQ=="
+LIVE_TOKEN_KEY = VOD_TOKEN_KEY
+LIVE_TOKEN_IV = VOD_TOKEN_IV
 SERVICE_CERTIFICATE_CHALLENGE = "CAQ="
 
 CHANNEL_IDS = {
@@ -87,6 +94,33 @@ class Channel4AuthError(Channel4Error):
 
 class Channel4TransientError(Channel4Error):
     """A transport, throttling, or server failure may succeed later."""
+
+
+class Channel4GeoError(Channel4Error):
+    """The playback API rejected this network location."""
+
+
+@dataclass(frozen=True)
+class TvCode:
+    user_code: str
+    device_code: str = field(repr=False)
+    create_date: str = field(repr=False)
+    verification_url: str
+    qr_url: str = field(repr=False)
+    expires_in: int
+    interval: int
+    deadline: float = field(repr=False)
+
+
+def tv_session(session=None, *, proxy: str | None = None, cookies=None):
+    """Use the browser TLS handshake accepted by Channel 4's TV token endpoint."""
+    return browser_requests.Session(
+        impersonate="chrome",
+        headers={**(dict(session.headers) if session is not None else {}), "User-Agent": USER_AGENT},
+        cookies=getattr(session.cookies, "jar", session.cookies) if session is not None else cookies,
+        proxies=dict(session.proxies) if session is not None else ({"http": proxy, "https": proxy} if proxy else None),
+        trust_env=getattr(session, "trust_env", True),
+    )
 
 
 @dataclass(frozen=True)
@@ -202,6 +236,7 @@ class Channel:
     synopsis: str = ""
     restart: bool = False
     artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    stream_url: str = ""
 
     @property
     def url(self) -> str:
@@ -215,28 +250,39 @@ class Source:
     video_type: str
     video_url: str
     protocol: str = "DASH"
-    subtitle: str = ""
+    subtitles: tuple[SubtitleReference, ...] = ()
     service_certificate: bytes | None = None
     restart: bool = False
     chapters: tuple[Chapter, ...] = ()
     duration: float | None = None
     artwork: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    drm_system: str = "widevine"
+    license_url: str = field(default=LICENSE, repr=False)
+
+    @property
+    def subtitle(self) -> str:
+        return self.subtitles[0].url if self.subtitles else ""
 
     def line(self) -> str:
-        bits = [self.protocol, "Widevine"]
+        bits = [self.protocol, "PlayReady" if self.drm_system == "playready" else "Widevine"]
         if self.restart:
             bits.append("restart")
-        if self.subtitle:
+        if self.subtitles:
             bits.append("subtitles")
         return " · ".join(bits)
 
 
 class Channel4Api:
-    def __init__(self, session: requests.Session | None = None, state: dict[str, Any] | None = None):
-        self.session = session or requests.Session()
+    def __init__(self, session: browser_requests.Session | None = None, state: dict[str, Any] | None = None):
+        # Normalize an injected legacy Session too; it must not reintroduce Python TLS.
+        self.session = tv_session(session) if session is None or hasattr(session, "adapters") else session
+        if isinstance(self.session, browser_requests.Session):
+            self.session.impersonate = "chrome"
         self.session.headers.setdefault("User-Agent", USER_AGENT)
         self.state = state or {}
         self.authorization = ""
+        self._config: dict[str, Any] | None = None
+        self._tizen: dict[str, Any] | None = None
         self.set_state(self.state)
 
     # ------------------------------------------------------------------- auth
@@ -246,7 +292,9 @@ class Channel4Api:
         access = _token_value(tokens, "accessToken", "access_token")
         self.authorization = f"Bearer {access}" if access else ""
 
-    def authenticate(self, username: str = "", password: str = "") -> dict[str, Any]:
+    def authenticate(self) -> dict[str, Any]:
+        if self.state.get("auth_client") != AUTH_CLIENT:
+            raise Channel4AuthError("Sign in with a Channel 4 TV code from the service menu")
         tokens = _dict(self.state.get("tokens"))
         expiry = _int(self.state.get("tokens_expiry")) or 0
         if self.authorization and expiry > int(time.time()) + 60:
@@ -259,28 +307,60 @@ class Channel4Api:
                     {"grant_type": "refresh_token", "refresh_token": refresh}
                 )
                 return self._accept_tokens(fresh, previous=tokens)
-            except Channel4AuthError:
-                if not (username and password):
-                    raise
+            except Channel4AuthError as exc:
+                raise Channel4AuthError(f"{exc}. Sign in with a new Channel 4 TV code") from exc
+        raise Channel4AuthError("Sign in with a Channel 4 TV code from the service menu")
 
-        if not username or not password:
-            raise Channel4AuthError(
-                "Channel 4 needs an account; sign in or configure its credentials"
-            )
-        fresh = self._token_request(
-            {"grant_type": "password", "username": username, "password": password}
+    def start_tv_code(self) -> TvCode:
+        data = self._json("GET", PIN, headers=self._auth_headers())
+        user_code = data.get("userCode")
+        device_code = data.get("deviceCode")
+        created = data.get("createDate")
+        expires = _int(data.get("expiresIn"))
+        interval = _int(data.get("nextPollIn"))
+        verification = _dict(data.get("verification"))
+        url = _verification_url(verification.get("url"))
+        qr_url = _verification_url(verification.get("urlForDynamicQr")) or url
+        if (
+            not isinstance(user_code, str) or not user_code.strip()
+            or not isinstance(device_code, str) or not device_code.strip() or isinstance(created, bool)
+            or not isinstance(created, (str, int)) or not str(created).strip()
+            or isinstance(data.get("expiresIn"), bool) or expires is None or not 0 < expires <= 3600
+            or isinstance(data.get("nextPollIn"), bool) or interval is None or not 0 < interval < expires or not url
+        ):
+            raise Channel4AuthError("Channel 4 returned an incomplete TV code")
+        return TvCode(user_code, device_code, str(created), url, qr_url, expires, interval, time.monotonic() + expires)
+
+    def poll_tv_code(self, challenge: TvCode) -> dict[str, Any] | None:
+        if time.monotonic() >= challenge.deadline:
+            raise Channel4AuthError("Channel 4 TV code expired; request a new code")
+        data = self._token_request(
+            {"grant_type": "pin_pairing", "code": challenge.device_code, "create_date": challenge.create_date},
+            pairing=True,
         )
-        return self._accept_tokens(fresh)
+        paired = data.get("paired")
+        if paired is False or (isinstance(paired, str) and paired.casefold() == "false"):
+            return None
+        if paired is not True and not (isinstance(paired, str) and paired.casefold() == "true"):
+            raise Channel4AuthError("Channel 4 returned an invalid TV pairing status")
+        return self._accept_tokens(data)
 
-    def _token_request(self, form: dict[str, str]) -> dict[str, Any]:
-        headers = {
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.8",
-            "Authorization": f"Basic {AUTH_BASIC}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": USER_AGENT,
-        }
-        return self._json("POST", f"{AUTH}?client={AUTH_CLIENT}", headers=headers, data=form)
+    def _auth_headers(self) -> dict[str, str]:
+        if self._config is None:
+            config = self._json("GET", TV_CONFIG, headers={"x-c4-api-key": TV_CONFIG_KEY, "User-Agent": USER_AGENT})
+            oauth = _dict(config.get("oauth"))
+            if not all(isinstance(oauth.get(key), str) and oauth[key] for key in ("c_key", "c_secret")):
+                raise Channel4AuthError("Channel 4 Google TV configuration has no OAuth client")
+            if _dict(config.get("deviceStrings")).get("apiClient") != AUTH_CLIENT:
+                raise Channel4AuthError("Channel 4 Google TV client configuration changed")
+            self._config = config
+        oauth = self._config["oauth"]
+        basic = base64.b64encode(f"{oauth['c_key']}:{oauth['c_secret']}".encode()).decode("ascii")
+        return {**self._headers(), "Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"}
+
+    def _token_request(self, form: dict[str, str], *, pairing: bool = False) -> dict[str, Any]:
+        url = AUTH if pairing else f"{AUTH}?client={AUTH_CLIENT}"
+        return self._json("POST", url, headers=self._auth_headers(), data=form)
 
     def _accept_tokens(
         self,
@@ -290,18 +370,19 @@ class Channel4Api:
     ) -> dict[str, Any]:
         if not isinstance(tokens, dict):
             raise Channel4AuthError("Channel 4 authentication response is invalid")
-        merged = dict(previous) if isinstance(previous, dict) else {}
-        merged.update(
-            {key: value for key, value in tokens.items() if value not in (None, "")}
-        )
-        access = _token_value(merged, "accessToken", "access_token")
-        refresh = _token_value(merged, "refreshToken", "refresh_token")
+        previous = previous or {}
+        access = _token_value(tokens, "accessToken", "access_token")
+        refresh = _token_value(tokens, "refreshToken", "refresh_token") or _token_value(previous, "refreshToken", "refresh_token")
         expires = _int(_token_value(tokens, "expiresIn", "expires_in"))
         if not access or not refresh:
             raise Channel4AuthError("Channel 4 authentication returned incomplete tokens")
         if expires is None or expires <= 0:
             raise Channel4AuthError("Channel 4 authentication returned no trustworthy expiry")
-        state = {"tokens": merged, "tokens_expiry": int(time.time()) + expires}
+        merged = {"accessToken": access, "refreshToken": refresh}
+        user = _dict(tokens.get("user")) or _dict(previous.get("user"))
+        if user:
+            merged["user"] = user
+        state = {"tokens": merged, "tokens_expiry": int(time.time()) + expires, "auth_client": AUTH_CLIENT}
         self.set_state(state)
         return state
 
@@ -407,27 +488,34 @@ class Channel4Api:
             film=film,
             chapters=extract_chapters(raw, duration=stream.get("duration")),
             duration=_number(stream.get("duration")),
-            artwork={"episode": metadata.image_fields(raw), "brand": metadata.image_fields(brand)},
+            artwork={"episode": image_fields(raw), "brand": image_fields(brand)},
         )
 
     # --------------------------------------------------------------- VOD source
-    def source(self, item: Episode) -> Source:
+    def source(self, item: Episode, drm_system: str = "widevine") -> Source:
+        _check_drm(drm_system)
+        playready = drm_system == "playready"
         url = urljoin(f"{API}/", item.vod_href) if item.vod_href else f"{API}/vod/stream/{item.id}"
-        url = _query(url, {"client": API_CLIENT, "uuid": self.user_uuid or None})
+        url = _query(url, {"client": PLAYREADY_CLIENT if playready else API_CLIENT, "uuid": self.user_uuid or None})
         data = self._json("GET", url, headers=self._stream_headers())
         channel_info = _dict(data.get("channelInfo"))
         profiles = _list(data.get("videoProfiles")) or _list(channel_info.get("videoProfiles"))
-        profile = _vod_profile(profiles)
-        if profile is None:
-            raise Channel4Error("Channel 4 returned no Widevine profile")
-        stream = _profile_stream(profile)
+        preferred = str(_dict(self._tizen_config().get("stream")).get("videoProfileDashVOD") or "") if playready else ""
+        profile = _vod_profile(profiles, drm_system, preferred=preferred)
+        if not playready and _dict(data.get("uriData")).get("token"):
+            stream = _profile_stream(data)
+        elif profile is None:
+            raise Channel4Error(f"Channel 4 returned no {drm_system} VOD profile")
+        else:
+            stream = _profile_stream(profile)
         manifest = str(stream.get("uri") or "")
         encrypted_token = str(stream.get("token") or "")
         if not manifest or not encrypted_token:
             raise Channel4Error("Channel 4 returned incomplete playback")
         manifest = self._working_manifest(manifest)
-        token = decrypt_token(encrypted_token, live=False)
-        subtitle = _subtitle(data)
+        token = "" if playready else decrypt_token(encrypted_token, live=False)
+        license_url = self._playready_license_url(encrypted_token) if playready else LICENSE
+        subtitles = _subtitles(data)
         duration = _number(data.get("duration"))
         if duration is None:
             duration = item.duration
@@ -437,10 +525,12 @@ class Channel4Api:
             token,
             "ondemand",
             manifest,
-            subtitle=subtitle,
+            subtitles=subtitles,
             chapters=chapters,
             duration=duration,
-            artwork={"episode": metadata.image_fields(data)},
+            artwork={"episode": image_fields(data)},
+            drm_system=drm_system,
+            license_url=license_url,
         )
 
     # ------------------------------------------------------------------- live
@@ -488,28 +578,35 @@ class Channel4Api:
                     synopsis=str(slot.get("summary") or item.get("summary") or ""),
                     restart=str(slot.get("startAgainRights") or "").lower() == "true",
                     artwork={
-                        "episode": metadata.image_fields(item),
-                        "brand": metadata.image_fields(item.get("brand")),
+                        "episode": image_fields(item),
+                        "brand": image_fields(item.get("brand")),
                     },
+                    stream_url=str(slot.get("simulcastBSStreamUri") or ""),
                 )
             )
         return channels
 
-    def live_source(self, channel: Channel, *, restart: bool = False) -> Source:
+    def live_source(self, channel: Channel, *, restart: bool = False, drm_system: str = "widevine") -> Source:
+        _check_drm(drm_system)
+        playready = drm_system == "playready"
         data = self._json(
             "GET",
-            f"{WWW}/simulcast/channels/{channel.id}",
-            params={"client": LIVE_CLIENT, "quality": "HD"},
-            headers=self._headers(auth=True),
+            _query(
+                channel.stream_url or f"{WWW}/simulcast/channels/{channel.id}",
+                {"client": PLAYREADY_CLIENT if playready else LIVE_CLIENT, "quality": "HD"},
+            ),
+            headers=self._stream_headers(),
         )
         slot = _dict(data.get("slotInfo"))
         info = _dict(data.get("channelInfo"))
         profiles = _list(info.get("videoProfiles"))
         if restart and str(slot.get("startAgainRights") or "").lower() != "true":
             raise Channel4Error("Restart is not available right now")
-        profile = _live_profile(profiles, restart)
+        watch_live = _dict(_dict(self._tizen_config().get("features")).get("watchLive")) if playready else {}
+        preferred = str(watch_live.get("videoProfileForStartAgain" if restart else "videoProfileForLive") or "")
+        profile = _live_profile(profiles, restart, drm_system, preferred=preferred)
         if profile is None:
-            raise Channel4Error("Channel 4 returned no live Widevine profile")
+            raise Channel4Error(f"Channel 4 returned no {drm_system} live profile")
         if restart:
             stream = _dict(profile.get("startAgainStream"))
         else:
@@ -519,8 +616,9 @@ class Channel4Api:
         encrypted_token = str(stream.get("token") or "")
         if not manifest or manifest == "https://tbc.mpd" or not encrypted_token:
             raise Channel4Error("Channel 4 returned incomplete live playback")
-        token = decrypt_token(encrypted_token, live=True)
-        certificate = self.service_certificate(token, "simulcast", manifest)
+        token = "" if playready else decrypt_token(encrypted_token, live=True)
+        license_url = self._playready_license_url(encrypted_token) if playready else LICENSE
+        certificate = None if playready else self.service_certificate(token, "simulcast", manifest)
         return Source(
             manifest,
             token,
@@ -528,8 +626,94 @@ class Channel4Api:
             manifest,
             service_certificate=certificate,
             restart=restart,
-            artwork={"episode": metadata.image_fields(slot), "channel": metadata.image_fields(info)},
+            subtitles=_subtitles(data),
+            artwork={"episode": image_fields(slot), "channel": image_fields(info)},
+            drm_system=drm_system,
+            license_url=license_url,
         )
+
+    def _tizen_config(self) -> dict[str, Any]:
+        if self._tizen is None:
+            config = self._json(
+                "GET", PLAYREADY_CONFIG,
+                headers={"x-c4-api-key": TV_CONFIG_KEY, "User-Agent": USER_AGENT},
+            )
+            clients = [_dict(config.get("deviceStrings"))]
+            clients.extend(
+                _dict(_dict(item.get("override")).get("deviceStrings"))
+                for item in _list(config.get("deviceOverrides")) if isinstance(item, dict)
+            )
+            if config.get("platform") != "tizen" or not any(
+                client.get("vodStreamClient") == PLAYREADY_CLIENT for client in clients
+            ):
+                raise Channel4Error("Channel 4 Tizen DASH client configuration changed")
+            self._tizen = config
+        return self._tizen
+
+    def _playready_license_url(self, encrypted_token: str) -> str:
+        dash = _dict(_dict(_dict(self._tizen_config().get("stream")).get("keys")).get("dash"))
+        try:
+            # The TV app unwraps the configured DASH key before decoding the licence URL.
+            key = unpad(AES.new(b"Up69fq3tve9uTHG5", AES.MODE_CBC, iv=bytes(16)).decrypt(
+                base64.b64decode(dash["key"], validate=True)
+            ), AES.block_size)
+            decoded = unpad(AES.new(key, AES.MODE_CBC, iv=dash["iv"].encode()).decrypt(
+                base64.b64decode(encrypted_token, validate=True)
+            ), AES.block_size).decode().strip()
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise Channel4Error("Channel 4 returned invalid PlayReady token parameters") from exc
+        return _playready_url(decoded)
+
+    def license_soap(self, challenge: str, license_url: str) -> str:
+        url = _playready_url(license_url)
+        try:
+            response = self.session.post(
+                url,
+                data=challenge.encode("utf-8"),
+                headers={
+                    "Content-Type": "text/xml; charset=utf-8",
+                    "SOAPAction": PLAYREADY_SOAP_ACTION,
+                    "User-Agent": USER_AGENT,
+                },
+                timeout=35,
+            )
+        except browser_requests.RequestsError as exc:
+            raise Channel4TransientError(f"Channel 4 PlayReady licence request failed ({type(exc).__name__})") from exc
+        if not response.ok:
+            raise Channel4Error(f"Channel 4 PlayReady licence HTTP {response.status_code}")
+        try:
+            root = ElementTree.fromstring(response.content)
+        except ElementTree.ParseError as exc:
+            raise Channel4Error("Channel 4 returned an invalid PlayReady licence response") from exc
+        tags = {node.tag.rsplit("}", 1)[-1] for node in root.iter()}
+        if "Fault" in tags or "AcquireLicenseResponse" not in tags:
+            raise Channel4Error("Channel 4 rejected the PlayReady licence challenge")
+        return response.text
+
+    def subtitle_bytes(self, url: str) -> bytes:
+        try:
+            parsed = urlparse(url)
+        except ValueError as exc:
+            raise Channel4Error("Channel 4 returned an invalid subtitle URL") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise Channel4Error("Channel 4 returned an invalid subtitle URL")
+        try:
+            response = self.session.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Origin": WWW, "Referer": f"{WWW}/"},
+                timeout=35,
+            )
+        except browser_requests.RequestsError as exc:
+            raise Channel4TransientError(
+                f"Channel 4 subtitle request failed ({type(exc).__name__})"
+            ) from exc
+        if not response.ok:
+            raise Channel4Error(f"Channel 4 subtitle request HTTP {response.status_code}")
+        if not response.content:
+            raise Channel4Error("Channel 4 returned an empty subtitle")
+        if "text/html" in response.headers.get("Content-Type", "").lower():
+            raise Channel4Error("Channel 4 returned HTML instead of a subtitle")
+        return response.content
 
     # ---------------------------------------------------------------- licence
     def service_certificate(self, token: str, video_type: str, video_url: str) -> bytes:
@@ -586,11 +770,11 @@ class Channel4Api:
 
     def _discard_connections(self) -> None:
         """Drop pooled transports without losing this session's proxy or cookies."""
-        adapters = getattr(self.session, "adapters", {})
-        for adapter in getattr(adapters, "values", lambda: ())():
-            close = getattr(adapter, "close", None)
-            if callable(close):
-                close()
+        if isinstance(self.session, browser_requests.Session):
+            previous = self.session
+            self.session = tv_session(previous)
+            previous.close()
+            return
 
     # --------------------------------------------------------------- internals
     def _headers(self, *, auth: bool = False) -> dict[str, str]:
@@ -619,7 +803,7 @@ class Channel4Api:
         for candidate in candidates:
             try:
                 response = self.session.get(candidate, timeout=20)
-            except requests.RequestException as exc:
+            except browser_requests.RequestsError as exc:
                 failures.append(type(exc).__name__)
                 continue
             if response.ok:
@@ -642,14 +826,30 @@ class Channel4Api:
     def _data(self, method: str, url: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
         try:
             response = self.session.request(method, url, timeout=35, **kwargs)
-        except requests.RequestException as exc:
+        except browser_requests.RequestsError as exc:
             raise Channel4TransientError(
                 f"Channel 4 request failed ({type(exc).__name__})"
             ) from exc
         status = response.status_code
         if not response.ok:
+            try:
+                error = _dict(response.json())
+            except ValueError:
+                error = {}
+            code = _int(error.get("code") or error.get("errorCode"))
+            if status == 403 and code in {10200, 10302} and "location" in str(error.get("description") or "").lower():
+                raise Channel4GeoError(
+                    f"Channel 4 playback is blocked in the current location (HTTP 403, code {code}). "
+                    "Select a UK proxy in Channel 4 settings."
+                )
             message = f"Channel 4 request HTTP {status}"
-            if status in {401, 403} or (url.startswith(AUTH) and status == 400):
+            if code is not None:
+                message += f" (API code {code})"
+            elif "text/html" in response.headers.get("Content-Type", "").lower():
+                message += " (HTML response)"
+            if url.startswith(AUTH) and status == 403:
+                raise Channel4AuthError("Channel 4 TV token request was blocked (HTTP 403); no session was saved")
+            if status == 401 or (url.startswith(AUTH) and status in {400, 403}):
                 raise Channel4AuthError(message)
             if status == 429 or status >= 500:
                 raise Channel4TransientError(message)
@@ -665,6 +865,74 @@ class Channel4Api:
         if isinstance(data, list):
             return data
         raise Channel4Error("Channel 4 returned an unexpected JSON value")
+
+
+_IMAGE_FIELDS = ("href", "title", "type", "templated", "width", "height")
+_MIME_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml",
+}
+
+
+def image_fields(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    images = [raw.get("image")]
+    if isinstance(raw.get("images"), list):
+        images.extend(raw["images"])
+    return {"images": [
+        {key: image[key] for key in _IMAGE_FIELDS if key in image}
+        for image in images if isinstance(image, dict)
+    ]}
+
+
+def attachments(*documents: dict[str, Any]) -> list[Attachment]:
+    result: list[Attachment] = []
+    seen: set[str] = set()
+    for document in documents:
+        for group, label, kind in (
+            ("episode", "Episode image", "thumbnail"),
+            ("brand", "Programme artwork", "artwork"),
+            ("channel", "Channel artwork", "artwork"),
+        ):
+            section = document.get(group)
+            if not isinstance(section, dict) or not isinstance(section.get("images"), list):
+                continue
+            for image in section["images"]:
+                if not isinstance(image, dict):
+                    continue
+                value = image.get("href")
+                if not isinstance(value, str):
+                    continue
+                # TV image URLs include this optional resize template even when templated=False.
+                url = value.strip().replace("{&resize}", "")
+                try:
+                    parsed = urlsplit(url)
+                    if (
+                        parsed.scheme not in {"http", "https"} or not parsed.hostname
+                        or parsed.username is not None or parsed.password is not None
+                        or any(char.isspace() or ord(char) < 32 for char in url)
+                        or any(char in url for char in "{}")
+                    ):
+                        continue
+                except ValueError:
+                    continue
+                if url in seen:
+                    continue
+                mime = str(image.get("type") or "").lower()
+                if mime and not mime.startswith("image/"):
+                    continue
+                if not mime:
+                    mime = _MIME_TYPES.get("." + parsed.path.rsplit(".", 1)[-1].lower(), "")
+                image_kind = kind
+                width, height = image.get("width"), image.get("height")
+                if type(width) in (int, float) and type(height) in (int, float) and height > width > 0:
+                    image_kind = "poster"
+                title = image.get("title")
+                name = title if isinstance(title, str) and title.strip() else label
+                result.append(Attachment(url=url, name=name, kind=image_kind, mime_type=mime))
+                seen.add(url)
+    return result
 
 
 def decrypt_token(token: str, *, live: bool) -> str:
@@ -697,9 +965,32 @@ def _profile_stream(profile: dict[str, Any]) -> dict[str, Any]:
     return _dict(streams[0]) if streams else {}
 
 
-def _vod_profile(profiles: Any) -> dict[str, Any] | None:
+def _check_drm(drm_system: str) -> None:
+    if drm_system not in {"widevine", "playready"}:
+        raise Channel4Error("Channel 4 supports Widevine or PlayReady")
+
+
+def _playready_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme == "https" and parsed.hostname == "api.channel4.com"
+            and parsed.path.startswith("/online/v1/licence/")
+            and parsed.username is None and parsed.password is None
+            and parsed.port in {None, 443} and not parsed.fragment
+            and not any(char.isspace() or ord(char) < 32 for char in url)
+            and parse_qs(parsed.query).get("token")
+        ):
+            return url
+    except (TypeError, ValueError):
+        pass
+    raise Channel4Error("Channel 4 returned an invalid PlayReady licence URL")
+
+
+def _vod_profile(profiles: Any, drm_system: str = "widevine", *, preferred: str = "") -> dict[str, Any] | None:
     entries = [item for item in _list(profiles) if isinstance(item, dict)]
-    preferred = (
+    names = (preferred, "samsungdashpr-dyn-stream-1") if drm_system == "playready" else (
+        "googledashwv-dyn-stream-1",
         "widevine-stream-4",
         "widevine-stream-3",
         "widevine-stream-2",
@@ -707,7 +998,9 @@ def _vod_profile(profiles: Any) -> dict[str, Any] | None:
         "dashwv-dyn-stream-1",
         "dashwv-stream-1",
     )
-    for wanted in preferred:
+    prefixes = ("samsungdashpr", "dashpr") if drm_system == "playready" else ("googledashwv", "dashwv", "widevine-")
+    entries = [profile for profile in entries if str(profile.get("profileName") or profile.get("name") or "").startswith(prefixes)]
+    for wanted in names:
         for profile in entries:
             stream = _profile_stream(profile)
             if (profile.get("profileName") or profile.get("name")) == wanted and stream.get("uri") and stream.get("token"):
@@ -716,17 +1009,18 @@ def _vod_profile(profiles: Any) -> dict[str, Any] | None:
         (
             profile
             for profile in entries
-            if str(profile.get("profileName") or profile.get("name") or "").startswith("dashwv")
-            and _profile_stream(profile).get("uri")
+            if _profile_stream(profile).get("uri")
             and _profile_stream(profile).get("token")
         ),
         None,
     )
 
 
-def _live_profile(profiles: Any, restart: bool) -> dict[str, Any] | None:
+def _live_profile(
+    profiles: Any, restart: bool, drm_system: str = "widevine", *, preferred: str = "",
+) -> dict[str, Any] | None:
     entries = [item for item in _list(profiles) if isinstance(item, dict)]
-    preferred = (
+    names = (preferred,) if drm_system == "playready" else (
         ("dashwv-dai-live-stream-iso-dash-mp-tl", "dashwv-live-stream-iso-dash-sp-tl")
         if restart
         else ("dashwv-live-stream-iso-dash-sp-tl", "dashwv-dai-live-stream-iso-dash-mp-tl")
@@ -734,15 +1028,16 @@ def _live_profile(profiles: Any, restart: bool) -> dict[str, Any] | None:
 
     def available(profile: dict[str, Any]) -> bool:
         name = str(profile.get("profileName") or profile.get("name") or "")
-        if not name.startswith("dashwv"):
+        if not name.startswith("dashpr" if drm_system == "playready" else "dashwv"):
             return False
         if restart:
-            uri = _dict(profile.get("startAgainStream")).get("uri")
+            stream = _dict(profile.get("startAgainStream"))
         else:
-            uri = _profile_stream(profile).get("uri")
-        return bool(uri and uri != "https://tbc.mpd")
+            stream = _profile_stream(profile)
+        uri = stream.get("uri")
+        return bool(uri and uri not in {"https://tbc.mpd", "http://tbc.mpd"} and stream.get("token"))
 
-    for wanted in preferred:
+    for wanted in names:
         match = next(
             (profile for profile in entries if (profile.get("profileName") or profile.get("name")) == wanted and available(profile)),
             None,
@@ -881,14 +1176,47 @@ def _seconds_to_milliseconds(value: float | None) -> int | None:
     return round(value * 1000)
 
 
+def _subtitles(data: dict[str, Any]) -> tuple[SubtitleReference, ...]:
+    # The TV app uses webvtt_007; the SRT/HLS entries are alternate encodings.
+    preferred: dict[tuple[str, str], SubtitleReference] = {}
+    for container in (data, _dict(data.get("channelInfo"))):
+        assets = _list(container.get("subtitlesAssets")) or _list(container.get("subtitleAssets"))
+        for item in assets:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or item.get("href") or "").strip()
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                continue
+            asset_format = str(item.get("format") or "").lower()
+            extension = {"webvtt_007": "vtt", "srt_009": "srt"}.get(asset_format)
+            if not asset_format:
+                extension = parsed.path.rsplit(".", 1)[-1].lower()
+            if extension not in {"vtt", "srt"}:
+                continue
+            language = str(item.get("language") or item.get("languageCode") or "en").replace("_", "-")
+            kind = str(item.get("kind") or "normal")
+            identity = (language.casefold(), kind.casefold())
+            existing = preferred.get(identity)
+            if existing is not None and (existing.format == "vtt" or extension != "vtt"):
+                continue
+            preferred[identity] = SubtitleReference(
+                url=url,
+                language=language,
+                name=str(item.get("label") or item.get("name") or ("English" if language == "en" else language)),
+                kind=kind,
+                format=extension,
+                headers={"User-Agent": USER_AGENT, "Origin": WWW, "Referer": f"{WWW}/"},
+            )
+    return tuple(preferred.values())
+
+
 def _subtitle(data: dict[str, Any]) -> str:
-    for item in _list(data.get("subtitlesAssets")) or _list(data.get("subtitleAssets")):
-        if not isinstance(item, dict):
-            continue
-        url = str(item.get("url") or item.get("href") or "")
-        if urlparse(url).path.lower().endswith(".vtt"):
-            return url
-    return ""
+    subtitles = _subtitles(data)
+    return subtitles[0].url if subtitles else ""
 
 
 def _query(url: str, updates: dict[str, str | None]) -> str:
@@ -898,6 +1226,24 @@ def _query(url: str, updates: dict[str, str | None]) -> str:
         if value is not None:
             query[key] = [value]
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+
+def _verification_url(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    value = value.strip()
+    url = value if "://" in value else f"https://{value}"
+    try:
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https" or parsed.username is not None or parsed.password is not None
+            or parsed.hostname not in {"channel4.com", "www.channel4.com", "c4.tv", "www.c4.tv"}
+            or parsed.port not in {None, 443} or any(char.isspace() for char in url)
+        ):
+            return ""
+    except ValueError:
+        return ""
+    return url
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -951,6 +1297,7 @@ __all__ = [
     "Channel4Api",
     "Channel4AuthError",
     "Channel4Error",
+    "Channel4GeoError",
     "Channel4TransientError",
     "Episode",
     "ParsedInput",
@@ -958,8 +1305,12 @@ __all__ = [
     "Season",
     "Show",
     "Source",
+    "TvCode",
     "channel_id",
+    "attachments",
+    "image_fields",
     "decrypt_token",
     "extract_chapters",
     "parse_input",
+    "tv_session",
 ]

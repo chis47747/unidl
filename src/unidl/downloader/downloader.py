@@ -157,6 +157,8 @@ class ProgressUpdate:
     total_bytes: int | None
     elapsed_seconds: float
     done: bool = False
+    #: A phase-only update, with no independent network transfer.
+    status: str = ""
 
 
 @dataclass(frozen=True, slots=True)

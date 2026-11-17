@@ -1,9 +1,4 @@
-"""U (formerly UKTV Play) catalogue and Brightcove playback.
-
-The catalogue is a small public UKTV API. It returns brands, series and
-episodes; each episode carries the Brightcove video id that actually plays.
-Brightcove then supplies a Widevine DASH manifest and licence URL.
-"""
+"""U (formerly UKTV Play) catalogue and Brightcove playback."""
 
 from __future__ import annotations
 
@@ -20,8 +15,6 @@ WWW = "https://u.co.uk"
 CATALOGUE = "https://vschedules.uktv.co.uk/vod"
 BRIGHTCOVE = "https://edge.api.brightcove.com/playback/v1/accounts/1242911124001/videos/{video}"
 
-# Public policy key used by U's Android player. It authorises reads from this
-# Brightcove account; it is not an account credential.
 POLICY_KEY = (
     "BCpkADawqM2ZEz-kf0i2xEP9VuhJF_DB5boH7YAeSx5EHDSNFFl4QUoHZ3bKLQ9yWboSOBNyvZKm4HiZrqMNRxXm-"
     "laTAnmls1QOL7_kUM3Eij4KjQMz0epMs3WIedg64fnRxQTX6XubGE9p"

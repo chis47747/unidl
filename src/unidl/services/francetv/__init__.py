@@ -1,11 +1,4 @@
-"""France.tv - free public broadcaster (Android TV protocol).
-
-Authorization:  free for most catalogue items; optional TV code at
-                france.tv/appstv/connexion for login-flagged titles.
-Geofence:       FR (geo-info.ftven.fr).
-Playback:       DASH/HLS via K7; Widevine with nv-authorizations when DRM.
-Catalogue:      URL (france.tv), search, live hub.
-"""
+"""France.tv - free public broadcaster (Android TV protocol)."""
 
 from __future__ import annotations
 
@@ -129,11 +122,6 @@ class FranceTV(Service):
             return
 
         def poll() -> api.Session | api.FranceTvError | None:
-            # Await retries an exception because a single failed network poll is
-            # normally harmless.  FranceTV's client already absorbs the bounded
-            # transient cases; anything it raises here is terminal.  Return that
-            # error as the answer so the wait closes instead of polling a code the
-            # provider has already exchanged for a token.
             try:
                 return client.poll_device_code(challenge)
             except api.FranceTvError as exc:
@@ -208,7 +196,6 @@ class FranceTV(Service):
             ctx.log("France.tv client ready", "ok")
         return self._api
 
-    # ---------------------------------------------------------------- browsing
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)

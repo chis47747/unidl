@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.6.5"
+version = "2.6.6"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,8 @@ dependencies = [
     "textual-image[textual]>=0.13.2; python_version >= '3.12'",
     # Optional HTTP/2 fast path used by the native delivery engine.
     "httpx[http2,socks]>=0.27",
+    # Browser-compatible HTTP transport for service APIs.
+    "curl-cffi>=0.17",
     # The native download core performs AES/CENC operations directly.
     "cryptography>=42",
     "PyYAML>=6.0",

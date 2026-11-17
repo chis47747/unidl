@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.6.6] - 2026-11-18
+
+### Embedded captions
+
+- Added text extraction for CEA-608 CC1 carried in AVC/HEVC SEI when a separate c608 track was unavailable. Kept the selected channel and original timing without decoding video frames or substituting another caption service.
+- Fixed embedded-caption progress to show waiting for video, extraction, completion, or a skipped track without counting the carrier video transfer twice.
+
+### Services
+
+- Added MUBI, TVNZ+, Tubi, and SBS On Demand.
+- Updated Channel 4, Channel 5, and ITV with TV-code sign-in and playback changes. Added PlayReady and selectable external subtitles for Channel 4.
+- Updated Channel 5 to its Android TV catalogue and refreshed live channel schedules and episode links.
+- Refreshed The CW, france.tv, GoPlay, U, and VRT MAX integrations.
+
 ## [2.6.5] - 2026-11-17
 
 ### HLS key detection

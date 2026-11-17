@@ -1,8 +1,4 @@
-"""Play Belgium (GoPlay) Android TV API client.
 
-Aligned to Play Android TV 3.1.23 (be.goplay.app, versionCode 292):
-TV-code authorisation, token refresh, catalogue, search, live and KeyOS Widevine.
-"""
 
 from __future__ import annotations
 

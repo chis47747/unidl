@@ -16,24 +16,17 @@ from . import api
 class Cw(Service):
     ID = "cw"
     NAME = "The CW"
-    #: The tag unshackle uses, so a name from either tool resolves here.
     TAG = "CWTV"
     ALIASES = ("cwtv", "thecw")
-    #: ``/channels`` is here as well as the three catalogue paths: a linear channel
-    #: is addressed as ``/channels/?channel=<slug>``, which is what The CW's own
-    #: search results hand out, so a pasted one has to route here too.
     TITLE_RE = r"cwtv\.com/(?:series|shows|movies|channels)"
     GEOFENCE = ("US",)
     DESCRIPTION = "Free with ads. Recent episodes only, plus 75 linear channels."
     USES = Capabilities()
-    #: Brightcove signs the same DASH manifest for both, so the choice is real and
-    #: it changes which licence server is called.
     DRM_SYSTEMS = ("widevine", "playready")
     SUPPORTS_URL = True
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
 
-    # -------------------------------------------------------------------- auth
     def auth_status(self) -> AuthStatus:
         """Nothing to sign in to. Not a token, not even an anonymous one."""
         return AuthStatus(logged_in=False, anonymous_ok=True, label="no sign-in needed")
@@ -41,7 +34,6 @@ class Cw(Service):
     def client(self) -> api.CwApi:
         return api.CwApi(session=self.ctx.session(user_agent=api.USER_AGENT))
 
-    # ---------------------------------------------------------------- browsing
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)
         if parsed is None:
@@ -57,15 +49,11 @@ class Cw(Service):
         if parsed.kind == "video":
             yield from self._one(ctx, client, parsed.play_id)
         elif parsed.kind == "channel":
-            # Bare /channels/ names no channel, so it means the list. Sending that
-            # to the picker is the answer the link asks for; an error would not be.
             if parsed.slug:
                 yield from self._channel(ctx, client, parsed.slug)
             else:
                 yield from self.live(ctx)
         else:
-            # The URL's own word for what it is, which decides only where the feed
-            # is silent - see api.catalogue.
             yield from self._catalogue(ctx, client, parsed.slug, hint=parsed.kind)
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
@@ -86,10 +74,6 @@ class Cw(Service):
         )
         if chosen is None:
             return
-        # Four kinds come back and they go four different ways. An episode hit is
-        # already a guid, so it plays without a listing in between; a channel hit
-        # is one of the linear channels; the two slug kinds are a catalogue to
-        # browse.
         if chosen.kind == "episode":
             yield from self._one(ctx, client, chosen.guid)
         elif chosen.kind == "channel":
@@ -117,18 +101,9 @@ class Cw(Service):
         if chosen is not None:
             yield from self._emit_live(ctx, client, chosen)
 
-    # ---------------------------------------------------------------- listings
     def _catalogue(
         self, ctx: FlowContext, client: api.CwApi, slug: str, hint: str = ""
     ) -> Iterator[Ask]:
-        """A slug, which may turn out to be a film or a series.
-
-        The feed does not say which before it is asked, so this decides from what
-        came back rather than from the URL - a ``/movies/`` link and a ``/shows/``
-        link reach the same endpoint, and The CW is not always consistent about
-        which one it hands out. ``hint`` is the URL's word for it, and only breaks
-        a tie the feed left open.
-        """
         try:
             series, items = client.catalogue(slug, hint)
         except api.CwError as exc:
@@ -162,9 +137,6 @@ class Cw(Service):
             "info",
         )
         if films:
-            # A slug carrying both is rare, and filtering the films out of the
-            # season grouping used to drop them without a word - a listing that is
-            # quietly short is worse than one that is untidy.
             ctx.log(f"  and {len(films)} film(s) under the same slug", "info")
         choices = [Choice(entry.label, entry) for entry in seasons]
         choices += [
@@ -231,7 +203,6 @@ class Cw(Service):
         for item in items:
             yield from self._emit(ctx, client, item)
 
-    # ---------------------------------------------------------------- playback
     def _emit(self, ctx: FlowContext, client: api.CwApi, item: api.Item) -> Iterator[Ask]:
         wanted = self.drm_system()
         try:
@@ -242,9 +213,6 @@ class Cw(Service):
             return
         ctx.log(f"{item.label}: {source.line()}")
         if item.encrypted and not source.encrypted:
-            # Worth saying: the feed and Brightcove disagree about this more often
-            # than not, and a clear stream where DRM was expected is good news that
-            # would otherwise look like a missed licence step.
             ctx.log("  the feed said DRM, Brightcove served it clear", "info")
 
         episode = item.kind == "episode"
@@ -256,9 +224,6 @@ class Cw(Service):
             season=item.season if episode else None,
             episode=item.episode if episode else None,
             year=item.year or None,
-            # The feed's runtime first, Brightcove's second. Two sources because
-            # they are two APIs and either can be silent; Brightcove's is the one
-            # the legacy script used, in milliseconds.
             duration=float(item.duration) or source.duration or None,
             genre=item.genre or None,
             synopsis=item.synopsis or None,
@@ -313,26 +278,13 @@ class Cw(Service):
             playback.drm = DrmInfo(clear=True)
         return playback
 
-    # -------------------------------------------------------------- licensing
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
-        """Widevine, against The CW's own licence server.
-
-        Every service makes its own licence request: core has no default for it, so
-        that a service which needs one cannot end up relying on somebody else's.
-        """
         return self._licence_client().widevine_license(drm.license_url, challenge, drm.headers)
 
     def get_license_soap(self, challenge: str, drm: DrmInfo) -> str:
-        """PlayReady, against the same server, which speaks SOAP."""
         return self._licence_client().playready_license(drm.license_url, challenge, drm.headers)
 
     def _licence_client(self):
-        """The client the licence goes through, reused across a run.
-
-        A licence can be asked for long after the playback that produced it - a saved
-        command re-run, a batch working through a list - so this builds one on demand
-        rather than assuming the browsing client is still around.
-        """
         client = getattr(self, "_licence_api", None)
         if client is None:
             client = self.client()
@@ -340,16 +292,7 @@ class Cw(Service):
         return client
 
 
-# ---------------------------------------------------------------------- labels
-
-
 def _hit_tags(hit: api.SearchHit) -> tuple[str, ...]:
-    """What kind of result this is, and its certificate.
-
-    The kind has to be on the row: one search answers with shows, films, single
-    episodes and linear channels, and picking a channel when a series was wanted
-    is a different screen, not a slower one.
-    """
     kind = {"movie": "film", "episode": "episode", "channel": "live"}.get(
         hit.kind, "series"
     )
@@ -357,7 +300,6 @@ def _hit_tags(hit: api.SearchHit) -> tuple[str, ...]:
 
 
 def _item_tags(item: api.Item) -> tuple[str, ...]:
-    """When this leaves the free window, if the feed said."""
     return (item.leaves,) if item.leaves else ()
 
 
