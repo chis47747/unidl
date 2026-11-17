@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.6.5] - 2026-11-17
+
+### HLS key detection
+
+- Used KIDs from the selected HLS media playlist for key checks and retained the master-playlist KID only as a fallback when the encrypted rendition did not declare its own.
+
+### Proxy isolation
+
+- Scoped downloader proxy settings to the current operation and its workers and subprocesses, without changing the application's environment.
+
+### External subtitles
+
+- Skipped media KID and size probes for clear subtitle tracks, stopped interpreting subtitle text as a redirect, and excluded subtitle inputs from VVC muxer detection.
+
+### CEA-708 captions
+
+- Added extraction of selected CEA-708 services from AVC/HEVC video on demand using CCExtractor, FFmpeg, and ffprobe. Preserved other successful tracks when a selected caption service produced no cues.
+- Documented tool requirements and the limits on live and original-track output.
+
+### HLS disk usage
+
+- Reduced temporary disk usage for multi-section HLS fMP4 video on demand by avoiding a redundant full-track copy and cleaning up temporary decryption and timestamp files.
+- Preserved the original sections for retry or resume and retained explicitly requested temporary files.
+
 ## [2.6.4] - 2026-11-17
 
 ### Subtitle output choices

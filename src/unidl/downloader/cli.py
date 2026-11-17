@@ -41,11 +41,15 @@ from .captions import PRESERVE as _PRESERVE_CAPTIONS
 from .captions import (
     bind_caption_sources,
     caption_source,
+    cea708_service,
+    cea708_unavailable,
     extract_caption,
     is_caption,
     update_caption_source,
     validate_caption,
 )
+from .cea708 import Cea708Error
+from .cea708 import extract_services as extract_cea708_services
 from .cenc_fragment import CencFragmentKeyError, fragment_cenc_key_ids_from_bytes, mp4_audio_is_explicitly_clear
 from .chapters import ChapterFileError, load_chapters_file
 from .console import Palette, color_enabled, paint
@@ -77,6 +81,7 @@ from .embedding import (
     current_download_runtime,
     managed_popen,
     managed_run,
+    proxy_scope,
 )
 from .hybrid import process_hybrid_tracks
 from .live import (
@@ -768,8 +773,12 @@ def _add_filter_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _list(args: argparse.Namespace) -> int:
+    with _proxy_scope(args):
+        return _list_impl(args)
+
+
+def _list_impl(args: argparse.Namespace) -> int:
     colors = _colors(args)
-    _configure_proxy(args)
     headers = normalize_headers(args.header)
     args.append_url_params = args.append_url_params or should_append_child_url_params(args.input)
     if args.append_url_params:
@@ -813,7 +822,7 @@ def _list(args: argparse.Namespace) -> int:
 
 def _download(args: argparse.Namespace) -> int:
     """Run one delivery and always settle its staged work directory."""
-    with contextlib.ExitStack() as stack:
+    with _proxy_scope(args), contextlib.ExitStack() as stack:
         args._unidown_cache_stack = stack
         try:
             result = _download_impl(args)
@@ -870,7 +879,6 @@ def _download_impl(args: argparse.Namespace) -> int:
     if getattr(args, "live_pipe_mux", False) and not getattr(args, "live_real_time_merge", False):
         args.live_real_time_merge = True
         print(paint("Note:", Palette.yellow, colors) + " --live-pipe-mux enables --live-real-time-merge.")
-    _configure_proxy(args)
     headers = normalize_headers(args.header)
     args.append_url_params = args.append_url_params or should_append_child_url_params(args.input)
     if args.append_url_params:
@@ -918,6 +926,20 @@ def _download_impl(args: argparse.Namespace) -> int:
         if not selected:
             print(paint("No non-subtitle stream selected.", Palette.yellow, colors))
             return 1
+    unavailable = [
+        (stream, reason) for stream in selected
+        if (reason := cea708_unavailable(
+            stream, live=bool(getattr(args, "is_live", False) and not args.live_perform_as_vod),
+            raw=args.sub_format == "raw",
+        ))
+    ]
+    if unavailable:
+        blocked = {id(stream) for stream, _ in unavailable}
+        selected = [stream for stream in selected if id(stream) not in blocked]
+        if not selected:
+            raise Cea708Error(unavailable[0][1])
+        for stream, reason in unavailable:
+            _warn_optional_cea708(args, stream, reason, print)
     selected = _replace_direct_audio_with_matching_sabr_audio(selected, streams)
     bind_caption_sources(selected, streams)
     for stream in selected:
@@ -1025,6 +1047,11 @@ def _download_impl(args: argparse.Namespace) -> int:
         for offset, stream in enumerate(hydrated, 1)
         if stream.media_type == "video" and stream.extra.get(_PRESERVE_CAPTIONS)
     }
+    args._unidown_cea708_cache = MuxedSourceCache()
+    args._unidown_cea708_jobs = {}
+    for stream in hydrated:
+        if (service := cea708_service(stream)) is not None:
+            args._unidown_cea708_jobs.setdefault((stream.url, stream.original_url), set()).add(service)
     prepare_dvr_sequence_windows(
         hydrated,
         headers=headers,
@@ -1190,6 +1217,19 @@ def _download_impl(args: argparse.Namespace) -> int:
         )
         return 0
 
+    def download_vod_track(stream, offset, show_progress, **progress_options):
+        try:
+            return _download_selected_stream(
+                stream, offset, len(hydrated), streams, args, headers, keys, hls_crypto,
+                max_speed, staged_output_dir, default_save_base, show_progress, **progress_options,
+            )
+        except Cea708Error as exc:
+            if len(hydrated) == 1 or cea708_service(stream) is None:
+                raise
+            _checkpoint_embedding(args)
+            _warn_optional_cea708(args, stream, str(exc), progress_options.get("status_printer") or print)
+            return None
+
     if args.concurrent_download and len(hydrated) > 1:
         track_workers = _concurrent_track_workers(args.workers, len(hydrated))
         print(paint("Concurrent download:", Palette.green, colors) + f" {len(hydrated)} tracks, {track_workers} workers/track")
@@ -1205,18 +1245,9 @@ def _download_impl(args: argparse.Namespace) -> int:
                 futures[
                     pool.submit(
                         context.run,
-                        _download_selected_stream,
+                        download_vod_track,
                         stream,
                         offset,
-                        len(hydrated),
-                        streams,
-                        args,
-                        headers,
-                        keys,
-                        hls_crypto,
-                        max_speed,
-                        staged_output_dir,
-                        default_save_base,
                         False,
                         progress_callback=panel.progress_for(offset) if panel.enabled else None,
                         status_printer=panel.print if panel.enabled else None,
@@ -1225,7 +1256,8 @@ def _download_impl(args: argparse.Namespace) -> int:
                     )
                 ] = offset
             for future in as_completed(futures):
-                completed.append(future.result())
+                if (item := future.result()) is not None:
+                    completed.append(item)
         except BaseException:
             args._unidown_sibling_failure.set()
             _cancel_futures_now(pool, futures)
@@ -1242,20 +1274,9 @@ def _download_impl(args: argparse.Namespace) -> int:
     else:
         for offset, stream in enumerate(hydrated, start=1):
             _checkpoint_embedding(args)
-            item = _download_selected_stream(
-                stream,
-                offset,
-                len(hydrated),
-                streams,
-                args,
-                headers,
-                keys,
-                hls_crypto,
-                max_speed,
-                staged_output_dir,
-                default_save_base,
-                True,
-            )
+            item = download_vod_track(stream, offset, True)
+            if item is None:
+                continue
             downloaded_tracks.append(item)
             downloaded_paths.append(item.path)
             temp_dirs = [task_temp_root]
@@ -1265,6 +1286,8 @@ def _download_impl(args: argparse.Namespace) -> int:
     downloaded_tracks = _with_original_imports(
         downloaded_tracks, mux_imports, staged_output_dir, args, default_save_base,
     )
+    if not downloaded_tracks and any(cea708_service(stream) is not None for stream in hydrated):
+        raise Cea708Error("None of the selected CEA-708 services produced valid subtitles.")
     hybrid_enabled = bool(getattr(args, "service_context", {}).get("unidl_hybrid_dv_hdr10"))
     if hybrid_enabled:
         try:
@@ -1344,6 +1367,15 @@ def _download_impl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _warn_optional_cea708(args, stream, reason: str, emit) -> None:
+    name = f"SERVICE{cea708_service(stream)}"
+    if stream.language:
+        name += f" ({stream.language})"
+    message = f"Subtitle skipped: {name} — {reason}"
+    emit(message)
+    _log_line(args, message)
+
+
 def _print_status_line(label: str, value: object, label_color: str, colors: bool | None = None) -> None:
     print(f"{paint(label, label_color, colors)} {value}")
 
@@ -1359,7 +1391,10 @@ def _verify_selected_content_keys(args, selected, keys, headers) -> None:
     from ..core.vault import playready_kid_alias
     from .key_probe import KeyProbe, stream_token
 
-    probe = KeyProbe(cancel=_embedding_cancel_callback(args))
+    probe = KeyProbe(
+        cancel=_embedding_cancel_callback(args),
+        use_system_proxy=getattr(args, "use_system_proxy", True),
+    )
     seen = set()
     for stream in selected:
         marker = stream_token(stream, keys, _stream_key_ids(stream))
@@ -1376,7 +1411,7 @@ def _verify_selected_content_keys(args, selected, keys, headers) -> None:
                 print(tr("key_verify.unknown", kid=kid, reason="no matching KID:key candidate"))
                 continue
             verdict = probe.verify(stream, kid, candidate.key, aliases=(alias,) if alias else (), headers=headers,
-                                   proxy=getattr(args, "proxy", None))
+                                   proxy=getattr(args, "custom_proxy", None))
             if verdict.status == "failed":
                 raise ValueError(tr("key_verify.failed_terminal", kid=kid))
             print(tr("key_verify.passed", kid=kid) if verdict.status == "passed" else
@@ -2427,7 +2462,8 @@ def _download_selected_stream(
                 source_offset = offset
             source.extra[_PRESERVE_CAPTIONS] = True
             if source.encrypted and args.no_decrypt:
-                raise ValueError("Encrypted caption carriers must be decrypted before extraction.")
+                error = Cea708Error if cea708_service(stream) is not None else ValueError
+                raise error("Encrypted caption carriers must be decrypted before extraction.")
             local = copy.copy(args)
             local._unidown_inside_caption_source = True
             local.repack = False
@@ -2441,20 +2477,44 @@ def _download_selected_stream(
                 local.embedding_hooks = replace(hooks, progress=None)
             forward = (lambda update: progress(replace(update, stream=stream))) if progress and not job else None
             with status.spinning("Waiting for caption carrier {spinner}"):
-                physical = args._unidown_muxed_cache.get(
-                    MuxedSourceCache.key(source),
-                    lambda: _download_selected_stream(
-                        source, source_offset, total, all_streams if job else [source],
-                        local, headers, keys, hls_crypto, max_speed,
-                        output_dir if job else output_dir / ".captions", default_save_base, False,
-                        progress_callback=forward, status_printer=emit, workers=workers,
-                    ),
-                    lambda: _checkpoint_embedding(args),
-                )
+                try:
+                    physical = args._unidown_muxed_cache.get(
+                        MuxedSourceCache.key(source),
+                        lambda: _download_selected_stream(
+                            source, source_offset, total, all_streams if job else [source],
+                            local, headers, keys, hls_crypto, max_speed,
+                            output_dir if job else output_dir / ".captions", default_save_base, False,
+                            progress_callback=forward, status_printer=emit, workers=workers,
+                        ),
+                        lambda: _checkpoint_embedding(args),
+                    )
+                except DownloadCancelled:
+                    raise
+                except (OSError, RuntimeError, ValueError) as exc:
+                    if job or cea708_service(stream) is None:
+                        raise
+                    raise Cea708Error(f"Could not prepare the CC-only video carrier: {_short_error(exc)}") from exc
             _checkpoint_embedding(args)
             with status.spinning("Downloaded ✓", "Extracting CC {spinner}"):
-                extracted = extract_caption(physical.path, _output_path(stream, output_dir, name), stream,
-                                            raw=getattr(args, "sub_format", "srt") == "raw")
+                cea708_files = None
+                if (service := cea708_service(stream)) is not None:
+                    carrier_key = MuxedSourceCache.key(source)
+                    services = args._unidown_cea708_jobs.get((stream.url, stream.original_url), {service})
+
+                    def cea708_files():
+                        return args._unidown_cea708_cache.get(
+                            carrier_key,
+                            lambda: extract_cea708_services(
+                                physical.path, args._unidown_task_workspace / "cc" / carrier_key,
+                                tuple(sorted(services)),
+                            ),
+                            lambda: _checkpoint_embedding(args),
+                        )
+
+                extracted = extract_caption(
+                    physical.path, _output_path(stream, output_dir, name), stream,
+                    raw=getattr(args, "sub_format", "srt") == "raw", cea708_files=cea708_files,
+                )
             projection_result = DownloadResult(stream, extracted)
             projection_cleanup = [physical.path, *physical.cleanup_paths]
             checkpoint.save("decrypted", extracted, projection_result)
@@ -2492,7 +2552,10 @@ def _download_selected_stream(
                 gate=lambda: _checkpoint_embedding(args),
                 diagnostic=_download_diagnostic(args),
             )
-            checkpoint.save("downloaded", result.path, result)
+            checkpoint.save(
+                "downloaded", result.path, result,
+                sections_only=bool(result.sections and _use_hls_section_sources(stream, args, hls_crypto)),
+            )
         else:
             emit(f"{paint('Cached:', Palette.green, colors)} {checkpoint.phase}")
 
@@ -2528,7 +2591,10 @@ def _download_selected_stream(
             _log_line(args, note)
         if _should_finalize_clear_hls_sections(stream, result, hls_crypto):
             with status.spinning("Downloaded ✓", "Finalizing {spinner}"):
-                current_path = _finalize_clear_hls_sections(stream, result, current_path)
+                current_path = _finalize_clear_hls_sections(
+                    stream, result, current_path,
+                    keep_temp=bool(args.keep_temp or not getattr(args, "del_after_done", True)),
+                )
             status.update("Downloaded ✓", "Finalized ✓")
             _log_line(args, f"Finalized: {current_path}")
         if _stream_uses_bbts(stream) and not args.no_decrypt:
@@ -2625,6 +2691,7 @@ def _download_selected_stream(
                                 normalize_large_composition_offsets=restamp_sections and stream.media_type == "video",
                                 event_callback=decrypt_event,
                                 section_expected_kids=_stream_section_key_ids(stream),
+                                keep_temp=bool(args.keep_temp or not getattr(args, "del_after_done", True)),
                                 **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
                             )
                     else:
@@ -2734,6 +2801,8 @@ def _release_redundant_download_parts(stream, result, current_path, checkpoint, 
     """Retain one resumable assembly, not both it and unused download parts."""
     if stream.is_live or getattr(args, "keep_temp", False) or not getattr(args, "del_after_done", True):
         return result
+    if result.sections and _use_hls_section_sources(stream, args, hls_crypto):
+        return _release_hls_section_download_parts(result, current_path, checkpoint)
     if result.temp_dir is None or not Path(current_path).is_file():
         return result
     if _download_parts_needed_for_postprocess(stream, result, hls_crypto, args):
@@ -2755,6 +2824,77 @@ def _release_redundant_download_parts(stream, result, current_path, checkpoint, 
     return replace(result, temp_dir=remaining, parts=None, sections=None)
 
 
+def _release_hls_section_download_parts(result, current_path, checkpoint):
+    """Publish resumable sections before dropping their redundant inputs."""
+    if result.temp_dir is None:
+        return result
+    root = Path(result.temp_dir).resolve()
+    sections = [Path(path) for path in result.sections]
+    parts = [Path(path) for path in result.parts or []]
+    try:
+        for path in sections:
+            path.resolve().relative_to(root / "sections")
+        for path in [*sections, *parts]:
+            path.resolve().relative_to(root)
+            if path.is_symlink() or not path.is_file():
+                return result
+        if len({path.resolve() for path in sections}) != len(sections):
+            return result
+        section_size = sum(path.stat().st_size for path in sections)
+        if not section_size or any(not path.stat().st_size for path in sections):
+            return result
+        if parts and section_size != sum(path.stat().st_size for path in parts):
+            return result
+    except (OSError, ValueError):
+        return result
+    reduced = replace(result, parts=None)
+    checkpoint.save("downloaded", result.path, reduced, sections_only=True)
+    # Atomic save precedes removal, including migration of older whole-track
+    # checkpoints. Interrupted cleanup leaves extras, not a broken resume source.
+    protected = {path.resolve() for path in sections}
+    obsolete = [path for path in parts if path.resolve() not in protected]
+    current = Path(current_path)
+    if current.is_file() and current.resolve() not in protected:
+        try:
+            current.resolve().relative_to(checkpoint.work.resolve())
+        except ValueError:
+            pass
+        else:
+            obsolete.append(current)
+    # Earlier versions left these working copies after a failed concat.
+    # None is part of the newly published section-only checkpoint.
+    for section in sections:
+        obsolete.extend([
+            section.with_name(f"{section.stem}.dec{section.suffix}"),
+            section.with_name(f"{section.stem}.dec.time{section.suffix}"),
+            section.with_name(f"{section.stem}.time{section.suffix}"),
+        ])
+    for path in obsolete:
+        try:
+            if path.resolve() not in protected:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return reduced
+
+
+def _use_hls_section_sources(stream, args, hls_crypto) -> bool:
+    """Use MAP sections instead of a redundant whole-track VOD assembly."""
+    if (
+        stream.is_live or getattr(args, "keep_temp", False)
+        or not getattr(args, "del_after_done", True) or getattr(args, "no_decrypt", False)
+        or stream.manifest_type != "hls" or stream.media_type not in {"video", "audio"}
+        or not _stream_has_multiple_init_sections(stream)
+        or not _stream_uses_fragmented_mp4_sections(stream)
+        or _stream_sections_need_whole_file_decryption(stream)
+        or uses_legacy_sample_aes(stream)
+    ):
+        return False
+    return _stream_needs_external_decryption(stream, hls_crypto) or (
+        not stream.encrypted and _stream_sections_need_timestamp_restamp(stream)
+    )
+
+
 def _should_decrypt_fragmented_parts(stream, result) -> bool:
     if not _stream_needs_fragment_parts(stream):
         return False
@@ -2768,6 +2908,8 @@ def _should_decrypt_fragmented_parts(stream, result) -> bool:
 
 
 def _should_skip_assembled_download_output(stream, args, hls_crypto) -> bool:
+    if _use_hls_section_sources(stream, args, hls_crypto):
+        return True
     if getattr(args, "keep_temp", False) or not getattr(args, "del_after_done", True):
         return False
     if getattr(args, "no_decrypt", False):
@@ -3031,30 +3173,28 @@ def _stream_uses_fragmented_mp4_sections(stream) -> bool:
     return False
 
 
-def _finalize_clear_hls_sections(stream, result, current_path: Path) -> Path:
+def _finalize_clear_hls_sections(stream, result, current_path: Path, *, keep_temp: bool = False) -> Path:
     section_fragment_durations = _stream_section_fragment_durations(stream)
-    finalized_sections = restamp_fragmented_mp4_sequence(
-        result.sections or [],
-        start_decode_time=0,
-        section_durations=[sum(durations) for durations in section_fragment_durations] if section_fragment_durations else None,
-        section_fragment_durations=section_fragment_durations,
-        normalize_large_composition_offsets=getattr(stream, "media_type", None) == "video",
-        **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    work_context = contextlib.nullcontext(None) if keep_temp else tempfile.TemporaryDirectory(
+        prefix=".unidl-sections-", dir=current_path.parent,
     )
-    temp_output = unique_path(
-        bounded_path(
-            current_path.with_name(f"{current_path.stem}.final{current_path.suffix}"),
-            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+    with work_context as work:
+        finalized_sections = restamp_fragmented_mp4_sequence(
+            result.sections or [],
+            start_decode_time=0,
+            section_durations=[sum(durations) for durations in section_fragment_durations] if section_fragment_durations else None,
+            section_fragment_durations=section_fragment_durations,
+            normalize_large_composition_offsets=getattr(stream, "media_type", None) == "video",
+            output_dir=Path(work) if work is not None else None,
+            **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
         )
-    )
-    try:
-        concat_media_files(finalized_sections, temp_output, **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}))
-        temp_output.replace(current_path)
-    finally:
-        try:
-            temp_output.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # concat_media_files publishes atomically. The resumable sections remain
+        # untouched until a complete clear-track checkpoint has been saved.
+        concat_media_files(
+            finalized_sections, current_path,
+            **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
+        )
     return current_path
 
 
@@ -8190,16 +8330,8 @@ def _append_params(url: str, params: list[tuple[str, str]]) -> str:
     return urlunparse(parsed._replace(query=urlencode(merged, doseq=True)))
 
 
-def _configure_proxy(args: argparse.Namespace) -> None:
-    custom_proxy = getattr(args, "custom_proxy", None)
-    if custom_proxy:
-        os.environ["HTTP_PROXY"] = custom_proxy
-        os.environ["HTTPS_PROXY"] = custom_proxy
-        os.environ["http_proxy"] = custom_proxy
-        os.environ["https_proxy"] = custom_proxy
-    elif getattr(args, "use_system_proxy", True) is False:
-        os.environ["NO_PROXY"] = "*"
-        os.environ["no_proxy"] = "*"
+def _proxy_scope(args: argparse.Namespace):
+    return proxy_scope(getattr(args, "custom_proxy", None), getattr(args, "use_system_proxy", True))
 
 
 def _colors(args: argparse.Namespace) -> bool:
@@ -10001,26 +10133,14 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
     if not detail_streams:
         return stream
     detail = detail_streams[0]
-    # A Disney-style master can expose an EXT-X-SESSION-KEY while the selected
-    # media playlist exposes the rendition's own EXT-X-KEY.  They are both
-    # legitimate KIDs for the same delivery (and the licence response can
-    # contain both), so do not lose either value while hydrating.  The selected
-    # media playlist is the first track-level authority; the master/session KID
-    # is retained only as an alias until an init probe can establish the exact
-    # rendition KID.
-    original_key_id = _normalize_kid_text((stream.extra or {}).get("key_id"))
-    original_key_ids = [
-        normalized
-        for value in ((stream.extra or {}).get("key_ids") or [])
-        if (normalized := _normalize_kid_text(value))
-    ]
+    original_key_ids = _stream_key_ids(stream)
     # Keep metadata supplied by a lazy third-party export when the selected HLS
     # playlist omits it (notably exported KID inventories and JOC/Atmos flags).
     lazy_metadata = {}
     if stream.extra.get("_unidl_lazy_hls"):
         lazy_metadata = {
             key: stream.extra.get(key)
-            for key in ("_unidl_lazy_hls", "key_id", "key_ids", "audio_atmos", "channels_raw")
+            for key in ("_unidl_lazy_hls", "audio_atmos", "channels_raw")
             if stream.extra.get(key) not in (None, "", [])
         }
     stream.segments = detail.segments
@@ -10035,42 +10155,28 @@ def _hydrate_stream(stream, headers: dict[str, str], no_probe: bool, base_url: s
     stream.is_live = detail.is_live
     stream.extra.update(detail.extra or {})
     stream.extra.update(lazy_metadata)
-    if detail.encrypted:
-        detail_key_ids = [
+    # Only the rendition's KIDs belong to the selected track. A master/session
+    # or exported KID is a fallback for a child without its own KID inventory.
+    stream.extra.pop("key_id", None)
+    stream.extra.pop("key_ids", None)
+    if stream.encrypted:
+        key_ids = list(dict.fromkeys(
             normalized
-            for value in _stream_key_ids(stream)
+            for value in (_stream_key_ids(detail) or original_key_ids)
             if (normalized := _normalize_kid_text(value))
-        ]
-        # _stream_key_ids() now sees the child metadata and its per-segment
-        # values.  Keep the pre-hydration master/session IDs in the inventory as
-        # aliases, without letting them replace the selected media KID.
-        merged_key_ids = list(
-            dict.fromkeys(
-                value
-                for value in (*detail_key_ids, original_key_id, *original_key_ids)
-                if value
-            )
+        ))
+        media_key_id = next(
+            (kid for segment in stream.segments if (kid := _normalize_kid_text(segment.key_id))),
+            None,
         )
-        if merged_key_ids:
-            stream.extra["key_ids"] = merged_key_ids
-            media_key_id = next(
-                (
-                    _normalize_kid_text(getattr(segment, "key_id", None))
-                    for segment in stream.segments
-                    if _normalize_kid_text(getattr(segment, "key_id", None))
-                ),
-                None,
-            )
-            stream.extra["key_id"] = media_key_id or merged_key_ids[0]
-            # Some HLS media playlists inherit the session key but do not
-            # repeat it on EXT-X-KEY/EXT-X-MAP.  Attach that inherited KID to
-            # encrypted segments so fragment decryption can use the same
-            # expected-KID path as an explicitly declared child playlist.
-            if not media_key_id:
-                inherited = stream.extra["key_id"]
+        if key_ids:
+            stream.extra["key_ids"] = key_ids
+            primary = media_key_id or _normalize_kid_text(detail.extra.get("key_id")) or key_ids[0]
+            stream.extra["key_id"] = primary
+            if not media_key_id and len(key_ids) == 1:
                 for segment in stream.segments:
-                    if getattr(segment, "encrypted", False) and not getattr(segment, "key_id", None):
-                        segment.key_id = inherited
+                    if segment.encrypted and not segment.key_id:
+                        segment.key_id = primary
     _filter_hls_segments_for_requested_asset(stream)
     if is_demux_stream(stream):
         stream.extra["muxed_audio"] = False
@@ -10095,6 +10201,8 @@ def _hydrate_selected_stream_key_ids(
 ) -> None:
     from ..core.manifest_sources import source_request_headers
 
+    if _is_subtitle_stream(stream) and not stream.encrypted:
+        return
     headers = source_request_headers(stream.extra, headers) or {}
     if _is_sabr_stream(stream):
         if _should_probe_selected_sabr_stream_key_ids(stream):

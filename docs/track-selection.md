@@ -16,20 +16,27 @@ Subtitle-only output keeps only the requested subtitles, not that temporary
 video. Any carrier keys must be present/licensed through the normal selected
 track flow; the dependency never licenses the entire ladder.
 
-Extraction currently supports MP4 `c608` tracks for CEA-608 `CC1` and `CC3`,
-using FFmpeg and ffprobe. Other channels, CEA-708 services, live recording and
-captions carried only in video SEI/TS require another extraction method and
-produce an explicit unsupported error rather than substituting a different
-channel or reporting an absent track as an empty download.
-Fragmented MP4 extraction copies only caption samples into a small temporary
+CEA-608 `CC1` and `CC3` use FFmpeg and ffprobe to read MP4 `c608` tracks.
+Fragmented MP4 extraction copies only those caption samples into a small temporary
 container, retaining their timing and normalizing empty c608 placeholders.
 It does not decode video or allocate a video-sized copy for caption conversion.
 Normal subtitle format settings apply after extraction. With
 **Download behavior → Muxer → No mux**, original captions are retained as a
-caption-only MOV instead of being converted to SRT. This file retains the
+caption-only MOV for CEA-608 instead of being converted to SRT. This file retains the
 original c608 track and can contain both data fields; it is not a decoded,
 single-channel text subtitle. Reference and media-playlist exports retain the
 caption declaration and carrier relationship without expanded segment lists.
+
+For AVC/HEVC VOD with CEA-708 in video SEI, install **CCExtractor** on
+`PATH` (or in UniDL's `binaries` folder). UniDL scans the selected video
+once, passes only timestamped caption data to CCExtractor, and extracts the
+exact `SERVICEn` selected. Subtitle format and embedded/external output
+settings still apply. No video is re-encoded or duplicated. Live recording,
+original-track CEA-708 output and dedicated `c708` tracks are not supported
+by this path. Missing tools disable the CEA-708 rows; if the selected service
+produces no captions, UniDL reports it and keeps other successful tracks.
+A subtitle-only job with no valid selected service fails instead of writing
+an empty file or substituting another channel.
 
 UniDL has one shared output-track selector for every service. It runs after the
 service has authorized and parsed its manifest (and after any service-owned

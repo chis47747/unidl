@@ -18,6 +18,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
+from textual.widgets.selection_list import Selection
 
 from ..core import ranges
 from ..core.flow import Ask, Await, Confirm, Form, Panel, Pick, TableAsk, TextAsk
@@ -62,11 +63,15 @@ class _ConfirmingSelectionList(SelectionList[int]):
         self.post_message(self.Confirmed())
 
     def action_toggle_all(self) -> None:
-        # option_count is the public way to ask this; _options is Textual's
-        if len(self.selected) == self.option_count:
+        selections = [self.get_option_at_index(index) for index in range(self.option_count)]
+        enabled = [item for item in selections if not item.disabled]
+        if len(self.selected) == len(enabled):
             self.deselect_all()
-        else:
+        elif len(enabled) == len(selections):
             self.select_all()
+        else:
+            for item in enabled:
+                self.select(item.value)
 
     def action_clear_all(self) -> None:
         self.deselect_all()
@@ -385,7 +390,8 @@ class MultiPickWidget(_Filterable):
     def __init__(self, ask: Ask) -> None:
         super().__init__(ask)
         self._chosen: set[int] = {
-            index for index in ask.preselected if 0 <= index < len(ask.choices)
+            index for index in ask.preselected
+            if 0 <= index < len(ask.choices) and not ask.choices[index].disabled
         }
         #: rows a half-typed expression would select, or None when the field holds
         #: an ordinary filter. Kept rather than applied on every keystroke, because
@@ -415,12 +421,13 @@ class MultiPickWidget(_Filterable):
         yield ScrollTail(_ConfirmingSelectionList(*self._selections(self._visible)))
         yield from self.compose_filter()
 
-    def _selections(self, indexes: list[int]) -> list[tuple[str, int, bool]]:
+    def _selections(self, indexes: list[int]) -> list[Selection[int]]:
         return [
-            (
+            Selection(
                 render_choice(self.ask.choices[index], index + 1, single_line=True),
                 index,
                 index in self._chosen,
+                disabled=self.ask.choices[index].disabled,
             )
             for index in indexes
         ]
@@ -498,7 +505,7 @@ class MultiPickWidget(_Filterable):
             # A set is not a filter: it states what you want, so the list stays as
             # it is and the hint says what would be taken. Narrowing here was the
             # first thing I tried and it read as "S01 hides season two".
-            self._pending = {row - 1 for row in rows}
+            self._pending = {row - 1 for row in rows if not self.ask.choices[row - 1].disabled}
             self._render_hint()
             return
         if self._pending is not None:
@@ -534,7 +541,7 @@ class MultiPickWidget(_Filterable):
         """
         event.stop()
         shown = set(self._visible)
-        selected = {int(value) for value in self._list().selected}
+        selected = {int(value) for value in self._list().selected if not self.ask.choices[int(value)].disabled}
         self._chosen = (self._chosen - shown) | selected
         self._render_hint()
 

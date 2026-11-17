@@ -3566,15 +3566,17 @@ class SessionController:
         playback: Playback,
     ) -> list | None:
         visible = tracks.selectable_streams
+        blocked = [self.engine.cea708_block_reason(playback, self.settings, stream) for stream in visible]
         choices = [
             Choice(
-                stream.format_line(),
+                f"{stream.format_line()} · {reason}" if reason else stream.format_line(),
                 stream,
+                disabled=bool(reason),
                 highlights=_track_highlights(stream),
             )
-            for stream in visible
+            for stream, reason in zip(visible, blocked, strict=True)
         ]
-        preselected = _selected_track_indexes(visible, tracks.selected)
+        preselected = [index for index in _selected_track_indexes(visible, tracks.selected) if not blocked[index]]
         ask = ctx.pick(
             f"Tracks · {playback.save_name}",
             choices,

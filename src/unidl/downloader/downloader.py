@@ -23,6 +23,7 @@ from ..core.manifest_sources import source_request_headers
 from .bbts import bbts_part_is_complete
 from .embedding import (
     DownloadCancelled,
+    DownloaderThreadPoolExecutor,
     current_download_runtime,
     managed_popen,
     managed_run,
@@ -521,13 +522,14 @@ def download_stream(
                 max_speed=max_speed,
                 request_timeout=request_timeout,
                 gate=gate,
+                assemble_output=assemble_output,
             )
         except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
             if not (keep_temp or resume) and temp_root.exists():
                 shutil.rmtree(windows_long_path(temp_root), ignore_errors=True)
             raise DownloadError(f"aria2c download failed: {_error_text(exc)}") from exc
-        size = output_path.stat().st_size if output_path.exists() else 0
         part_paths = [temp_root / f"{index:08d}.part" for index in range(len(urls))]
+        size = output_path.stat().st_size if assemble_output and output_path.exists() else _downloaded_part_paths_size(part_paths)
         sections = _write_section_outputs(output_path, part_paths, urls)
         _emit_progress(progress, stream, len(urls), len(urls), size, size, start, done=True)
         if not (keep_temp or resume or sections) and temp_root.exists():
@@ -615,7 +617,7 @@ def download_stream(
         if resume:
             _migrate_inline_init_resume_parts(stream, output_path, temp_dir, temp_root, part_paths)
         progress_bytes = _part_progress_callback(progress, stream, len(urls), total_bytes, start)
-        pool = ThreadPoolExecutor(max_workers=max(1, workers))
+        pool = DownloaderThreadPoolExecutor(max_workers=max(1, workers))
         pool_wait = True
         futures = {}
         try:
@@ -734,6 +736,7 @@ def download_stream(
             final_size = output_path.stat().st_size
         else:
             final_size = _downloaded_part_paths_size(part_paths)
+            sections = _write_section_outputs(output_path, part_paths, urls)
         _emit_progress(progress, stream, len(urls), len(urls), final_size, final_size, start, done=True)
         if preserve_parts:
             return DownloadResult(stream=stream, path=output_path, temp_dir=temp_root, sections=sections or None, parts=part_paths)
@@ -855,7 +858,7 @@ def _apply_json_live_base_fallback(
         return segments
 
     probe_timeout = max(2, min(3, int(request_timeout or 30)))
-    pool = ThreadPoolExecutor(max_workers=min(len(candidates), 4))
+    pool = DownloaderThreadPoolExecutor(max_workers=min(len(candidates), 4))
     future_to_base = {
         pool.submit(_json_live_probe_url, candidate, headers, probe_timeout): base
         for base, candidate in candidates
@@ -966,7 +969,7 @@ def _split_single_large_remote_segment(
     hls_crypto: HlsCrypto | None = None,
     request_timeout: int = 30,
 ) -> list[SegmentInfo]:
-    if stream.is_live or len(segments) != 1:
+    if stream.is_live or stream.media_type in {"subtitle", "subtitles", "text"} or len(segments) != 1:
         return segments
     if hls_crypto and _hls_method(hls_crypto.method) != "NONE":
         return segments
@@ -1527,7 +1530,7 @@ def probe_remote_stream_size(
     headers: dict[str, str] | None = None,
     request_timeout: int = 30,
 ) -> int | None:
-    if stream.is_live or len(stream.segments) != 1:
+    if stream.is_live or stream.media_type in {"subtitle", "subtitles", "text"} or len(stream.segments) != 1:
         return None
     segment = stream.segments[0]
     if segment.data is not None or not is_url(segment.url):
@@ -1652,11 +1655,20 @@ def _text_url_redirect_from_bytes(data: bytes, headers: dict[str, str] | None = 
     looks_like_url = stripped.startswith((b"http://", b"https://"))
     if content_type and "text/" not in content_type and "url" not in content_type and not looks_like_url:
         return None
-    text = data.decode("utf-8", "ignore").strip()
-    if not text:
+    try:
+        text = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
         return None
-    first = text.splitlines()[0].strip()
-    parsed = urlparse(urljoin(base_url, first))
+    # A URL handoff is a single URL, not the first line of a subtitle,
+    # manifest, HTML error page, or other short text response.
+    if not text or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in text):
+        return None
+    if not text.startswith(("http://", "https://", "/")) or "\\" in text:
+        return None
+    try:
+        parsed = urlparse(urljoin(base_url, text))
+    except ValueError:
+        return None
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
     return None
@@ -3895,6 +3907,7 @@ def _download_with_aria2c(
     max_speed: int | None = None,
     request_timeout: int = 30,
     gate: Callable[[], None] | None = None,
+    assemble_output: bool = True,
 ) -> None:
     executable = shutil.which("aria2c") or shutil.which("aria2")
     if not executable:
@@ -3974,9 +3987,10 @@ def _download_with_aria2c(
 
     if gate is not None:
         gate()
-    with output_path.open("wb") as output:
-        for part, segment in zip(part_paths, segments, strict=True):
-            _copy_stream_part_to_output(part, output, segment=segment)
+    if assemble_output:
+        with output_path.open("wb") as output:
+            for part, segment in zip(part_paths, segments, strict=True):
+                _copy_stream_part_to_output(part, output, segment=segment)
 
 
 def _output_path(stream: StreamInfo, output_dir: str | Path, filename: str | None) -> Path:

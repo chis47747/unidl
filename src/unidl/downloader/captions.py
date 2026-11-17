@@ -15,9 +15,11 @@ import os
 import shutil
 import tempfile
 from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
 
+from .cea708 import Cea708Error, extract_services, service_number, unavailable_reason
 from .models import StreamInfo
 
 CAPTION = "hls_instream_id"
@@ -35,6 +37,16 @@ _SOURCE_EXTRA = {
 def is_caption(stream) -> bool:
     extra = getattr(stream, "extra", {}) or {}
     return bool(extra.get(CAPTION)) and isinstance(extra.get(SOURCE), dict)
+
+
+def cea708_service(stream) -> int | None:
+    return service_number(stream.extra[CAPTION]) if is_caption(stream) else None
+
+
+def cea708_unavailable(stream, *, live: bool = False, raw: bool = False) -> str:
+    if cea708_service(stream) is not None:
+        return unavailable_reason(live=live or stream.is_live, raw=raw)
+    return ""
 
 
 def _carrier(stream, group):
@@ -86,9 +98,7 @@ def add_caption_rows(streams, declarations):
         if identity in seen:
             continue
         seen.add(identity)
-        if instream not in {"CC1", "CC2", "CC3", "CC4"} and not (
-            instream.startswith("SERVICE") and instream[7:].isdigit() and 1 <= int(instream[7:]) <= 63
-        ):
+        if instream not in {"CC1", "CC2", "CC3", "CC4"} and service_number(instream) is None:
             continue
         candidates = [s for s in streams if _carrier(s, group)]
         if not candidates:
@@ -142,7 +152,11 @@ def bind_caption_sources(selected, inventory):
     return bindings
 
 
-def validate_caption(stream):
+def validate_caption(stream, *, raw=False):
+    if cea708_service(stream) is not None:
+        if reason := cea708_unavailable(stream, raw=raw):
+            raise Cea708Error(reason)
+        return
     if stream.is_live:
         raise ValueError("In-band caption extraction currently requires finite VOD.")
     if stream.extra[CAPTION] not in {"CC1", "CC3"}:
@@ -227,12 +241,36 @@ def restamp_caption_carrier(section, output, start, duration, *, normalize_compo
     return Path(output), next_time
 
 
-def extract_caption(source: Path, output: Path, stream, *, raw=False):
-    """Decode a real MP4 c608 track; never treat an absent track as success."""
+def extract_caption(
+    source: Path,
+    output: Path,
+    stream,
+    *,
+    raw=False,
+    cea708_files: Callable[[], dict[int, Path]] | None = None,
+):
+    """Decode the selected embedded channel without substituting another."""
+    validate_caption(stream, raw=raw)
+    if (service := cea708_service(stream)) is not None:
+        output = output.with_suffix(".srt")
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.ExitStack() as stack:
+                if cea708_files is not None:
+                    results = cea708_files()
+                else:
+                    temp = stack.enter_context(tempfile.TemporaryDirectory(prefix=".unidl-708-", dir=output.parent))
+                    results = extract_services(source, Path(temp), (service,))
+                if service not in results:
+                    raise Cea708Error(f"SERVICE{service} produced no valid cues; no other CC channel was substituted.")
+                shutil.copyfile(results[service], output)
+        except OSError as exc:
+            raise Cea708Error(f"Could not save the SERVICE{service} subtitle file.") from exc
+        return output
+
     from .embedding import managed_run
     from .postprocess import _run_external
 
-    validate_caption(stream)
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe are required for embedded CC extraction.")

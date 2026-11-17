@@ -115,7 +115,7 @@ class KeyProbe:
     """One title's bounded sample cache. No download/resume files are modified."""
 
     def __init__(self, *, cancel: Event | Callable[[], bool] | None = None, max_bytes: int = 32 * 1024 * 1024,
-                 max_requests: int = 48, seconds: float = 45, tmp: Path | None = None):
+                 max_requests: int = 48, seconds: float = 45, tmp: Path | None = None, use_system_proxy: bool = True):
         self.cancel = cancel
         self.max_bytes = max_bytes
         self.max_requests = max_requests
@@ -123,6 +123,7 @@ class KeyProbe:
         self.bytes_read = 0
         self.requests = 0
         self.tmp = tmp
+        self.use_system_proxy = use_system_proxy
         self._cache: dict[tuple, bytes] = {}
         self.resource_sizes: dict[tuple, int] = {}
         self._samples: dict[int, list[bytes]] = {}
@@ -158,8 +159,13 @@ class KeyProbe:
         request_headers.update({"Range": f"bytes={span[0]}-{span[1]}", "Accept-Encoding": "identity"})
         if not url.startswith(("https://", "http://")):
             raise ProbeUnavailable("only authorized HTTP media references are sampled")
+        proxies = None
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+        elif not self.use_system_proxy:
+            proxies = {"no_proxy": "*"}
         try:
-            with requests.get(url, headers=request_headers, proxies={"http": proxy, "https": proxy} if proxy else None,
+            with requests.get(url, headers=request_headers, proxies=proxies,
                               timeout=(5, 8), stream=True) as response:
                 expected = None
                 if response.status_code == 206:

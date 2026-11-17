@@ -11,7 +11,6 @@ import hashlib
 import json
 import threading
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,7 +53,7 @@ from ..core.secureio import (
     private_file,
 )
 from . import api
-from .embedding import DownloadRuntime
+from .embedding import DownloaderThreadPoolExecutor, DownloadRuntime, proxy_scope
 from .http_client import close_http2_clients, get_global_http_client
 from .models import SegmentInfo, StreamInfo
 from .utils import looks_like_h266
@@ -172,30 +171,30 @@ class NativeDownloaderBackend:
         """
         from . import cli
 
-        headers = dict(request.policy.headers)
-        for stream in streams:
-            try:
-                if stream.manifest_type in {"hls", "m3u"}:
-                    cli._hydrate_stream(
+        policy = request.policy
+        headers = dict(policy.headers)
+        with proxy_scope(policy.proxy, policy.use_system_proxy):
+            for stream in streams:
+                try:
+                    if stream.manifest_type in {"hls", "m3u"}:
+                        cli._hydrate_stream(
+                            stream,
+                            headers=headers,
+                            no_probe=policy.no_probe,
+                            base_url=policy.base_url,
+                        )
+                    if not stream.encrypted:
+                        continue
+                    cli._hydrate_selected_stream_key_ids(
                         stream,
                         headers=headers,
-                        no_probe=request.policy.no_probe,
-                        base_url=request.policy.base_url,
+                        request_timeout=max(1, int(request_timeout or 30)),
+                        force=True,
                     )
-                if not stream.encrypted:
+                except Exception:
+                    # One rendition can expire while another remains usable.
+                    # The downloader reports failures for selected media it cannot fetch.
                     continue
-                cli._hydrate_selected_stream_key_ids(
-                    stream,
-                    headers=headers,
-                    request_timeout=max(1, int(request_timeout or 30)),
-                    force=True,
-                )
-            except Exception:
-                # One rendition can expire while another remains usable.  The
-                # normal downloader will report a hard failure if that selected
-                # stream cannot actually be fetched; do not hide KIDs for the
-                # other selected tracks here.
-                continue
 
     def split_muxed_audio(self, manifest: ParsedManifest) -> tuple[ParsedManifest, dict[int, list[StreamInfo]]]:
         """Return independent output tracks plus original-to-projection identities."""
@@ -408,7 +407,9 @@ class NativeDownloaderBackend:
             # A direct media URL is already the complete source. Never GET the
             # actual media file while producing a metadata-only export.
             return source_bundle([record], mode="collection", tracks=[self._json_track(stream) for stream in streams])
-        records = self._media_sources(record, dict(manifest.request.policy.headers))
+        policy = manifest.request.policy
+        with proxy_scope(policy.proxy, policy.use_system_proxy):
+            records = self._media_sources(record, dict(policy.headers))
         return source_bundle(records, mode="collection", tracks=[self._json_track(stream) for stream in streams])
 
     def _media_sources(self, record: dict, inherited_headers: dict[str, str], *, depth: int = 0) -> list[dict]:
@@ -490,7 +491,7 @@ class NativeDownloaderBackend:
 
         # Read short-lived authorized playlists promptly; never fetch init,
         # segment or key bytes. map preserves the original track order.
-        with ThreadPoolExecutor(max_workers=min(8, len(children))) as pool:
+        with DownloaderThreadPoolExecutor(max_workers=min(8, len(children))) as pool:
             result = list(pool.map(snapshot, children))
         return [{"type": "json", "document": source_bundle(result, mode="collection")}]
 

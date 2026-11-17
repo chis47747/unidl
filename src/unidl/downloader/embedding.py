@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -255,8 +256,43 @@ def current_download_runtime() -> DownloadRuntime | None:
     return DownloadRuntime.current()
 
 
+_proxy_environment: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "unidl_downloader_proxy_environment", default=None,
+)
+
+
+@contextlib.contextmanager
+def proxy_scope(custom_proxy: str | None, use_system_proxy: bool = True):
+    """Preserve downloader proxy options without changing the host environment."""
+    overrides = None
+    if custom_proxy:
+        overrides = dict.fromkeys(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"), custom_proxy)
+    elif not use_system_proxy:
+        overrides = {"NO_PROXY": "*", "no_proxy": "*"}
+    token = _proxy_environment.set(overrides)
+    try:
+        yield
+    finally:
+        _proxy_environment.reset(token)
+
+
+def _apply_child_proxy_environment(kwargs: dict) -> None:
+    overrides = _proxy_environment.get()
+    if overrides:
+        env = kwargs.get("env")
+        kwargs["env"] = {**(os.environ if env is None else env), **overrides}
+
+
+class DownloaderThreadPoolExecutor(ThreadPoolExecutor):
+    """Carry the submitting download's context to each worker invocation."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
 def managed_popen(*args, **kwargs) -> subprocess.Popen:
     """Start a downloader child registered to the active delivery runtime."""
+    _apply_child_proxy_environment(kwargs)
     runtime = current_download_runtime()
     if runtime is None:
         return subprocess.Popen(*args, **kwargs)
@@ -273,6 +309,7 @@ def managed_run(*popenargs, **kwargs) -> subprocess.CompletedProcess:
     """``subprocess.run`` with runtime registration when embedded."""
     runtime = current_download_runtime()
     if runtime is None:
+        _apply_child_proxy_environment(kwargs)
         return subprocess.run(*popenargs, **kwargs)
     input_data = kwargs.pop("input", None)
     timeout = kwargs.pop("timeout", None)

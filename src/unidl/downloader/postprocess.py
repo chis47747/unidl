@@ -336,6 +336,7 @@ def decrypt_sections(
     event_callback: DecryptEventCallback | None = None,
     section_expected_kids: list[list[str]] | None = None,
     preserve_subtitles: bool = False,
+    keep_temp: bool = False,
 ) -> Path:
     if not section_paths:
         raise ValueError("No sections to decrypt.")
@@ -343,42 +344,49 @@ def decrypt_sections(
     if section_expected_kids is not None and len(section_expected_kids) != len(sections):
         raise ValueError("Section KID inventory does not match initialization section count.")
     output = Path(output_path) if output_path else _decrypted_output_path(sections[0])
-    decrypted_sections: list[Path] = []
-    for index, section in enumerate(sections):
-        # A zero tenc KID is a placeholder, not another licence requirement.
-        # Scope its fallback to this MAP's inventory; never choose the first
-        # key from the whole track. Real init/fragment KIDs still take priority.
-        section_kids = section_expected_kids[index] if section_expected_kids is not None else None
-        section_output = bounded_path(
-            section.with_name(f"{section.stem}.dec{section.suffix}"),
-            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
-        )
-        decrypted = decrypt_file(
-            section,
-            keys=keys,
-            decrypter=decrypter,
-            stream_type=stream_type,
-            output_path=section_output,
-            expected_kids=section_kids or expected_kids,
-            event_callback=event_callback,
-        )
-        if restamp_timestamps and stream_type == "video":
-            _mp4_normalize_large_sample_durations(decrypted)
-        decrypted_sections.append(decrypted)
-    if restamp_timestamps:
-        decrypted_sections = restamp_fragmented_mp4_sequence(
-            decrypted_sections,
-            start_decode_time=0,
-            section_durations=section_durations,
-            section_fragment_durations=section_fragment_durations,
-            normalize_large_composition_offsets=normalize_large_composition_offsets,
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work_context = nullcontext(None) if keep_temp else tempfile.TemporaryDirectory(
+        prefix=".unidl-sections-", dir=output.parent,
+    )
+    with work_context as work:
+        decrypted_sections: list[Path] = []
+        for index, section in enumerate(sections):
+            section_kids = section_expected_kids[index] if section_expected_kids is not None else None
+            section_output = bounded_path(
+                section.with_name(f"{section.stem}.dec{section.suffix}") if work is None
+                else Path(work) / f"{index:04d}{section.suffix}",
+                max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+            )
+            decrypted = decrypt_file(
+                section, keys=keys, decrypter=decrypter, stream_type=stream_type,
+                output_path=section_output, expected_kids=section_kids or expected_kids,
+                event_callback=event_callback,
+            )
+            if restamp_timestamps and stream_type == "video":
+                _mp4_normalize_large_sample_durations(decrypted)
+            decrypted_sections.append(decrypted)
+        if restamp_timestamps:
+            decrypted_sections = restamp_fragmented_mp4_sequence(
+                decrypted_sections, start_decode_time=0,
+                section_durations=section_durations,
+                section_fragment_durations=section_fragment_durations,
+                normalize_large_composition_offsets=normalize_large_composition_offsets,
+                in_place=not keep_temp,
+                **({"preserve_subtitles": True} if preserve_subtitles else {}),
+            )
+        if len(decrypted_sections) == 1:
+            if decrypted_sections[0] != output:
+                if keep_temp:
+                    shutil.copyfile(decrypted_sections[0], output)
+                else:
+                    # Work and output share a filesystem. Move, don't copy a
+                    # complete track just to publish one successful section.
+                    decrypted_sections[0].replace(output)
+            return output
+        return concat_media_files(
+            decrypted_sections, output,
             **({"preserve_subtitles": True} if preserve_subtitles else {}),
         )
-    if len(decrypted_sections) == 1:
-        if decrypted_sections[0] != output:
-            shutil.copyfile(decrypted_sections[0], output)
-        return output
-    return concat_media_files(decrypted_sections, output, **({"preserve_subtitles": True} if preserve_subtitles else {}))
 
 
 def restamp_fragmented_mp4_sequence(
@@ -388,6 +396,8 @@ def restamp_fragmented_mp4_sequence(
     section_fragment_durations: list[list[float]] | None = None,
     normalize_large_composition_offsets: bool = False,
     preserve_subtitles: bool = False,
+    in_place: bool = False,
+    output_dir: Path | None = None,
 ) -> list[Path]:
     restamped_sections: list[Path] = []
     next_decode_time = start_decode_time
@@ -395,7 +405,10 @@ def restamp_fragmented_mp4_sequence(
     for index, section_path in enumerate(section_paths):
         section = Path(section_path)
         output = bounded_path(
-            section.with_name(f"{section.stem}.time{section.suffix}"),
+            section if in_place else (
+                Path(output_dir) / f"{index:04d}.time{section.suffix}" if output_dir is not None
+                else section.with_name(f"{section.stem}.time{section.suffix}")
+            ),
             max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
         )
         fallback_duration = (
@@ -1573,6 +1586,7 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, pre
         raise RuntimeError("ffmpeg not found.")
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_output_free_space(_paths_total_size([Path(path) for path in inputs]), output, "section concat output")
     fd, temporary_name = tempfile.mkstemp(prefix=".unidl-concat-", suffix=output.suffix, dir=output.parent)
     os.close(fd)
     temporary = Path(temporary_name)
@@ -2589,9 +2603,13 @@ def _select_muxer(muxer: str, output: Path) -> str:
 
 def _mux_inputs_include_vvc(inputs: list[MuxInput]) -> bool:
     for item in inputs:
+        if item.media_type not in {None, "video"} or item.path.suffix.lower() in {
+            ".srt", ".vtt", ".ass", ".ssa", ".ttml", ".dfxp",
+        }:
+            continue
         if looks_like_h266(item.codecs, str(item.path), item.name):
             return True
-        if item.media_type in {None, "video"} and _probe_input_is_vvc(item.path):
+        if _probe_input_is_vvc(item.path):
             return True
     return False
 

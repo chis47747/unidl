@@ -22,13 +22,13 @@ import contextlib
 import copy
 import shlex
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import cli
 from .embedding import (
     DownloadArtifact,
     DownloadCancelled,
+    DownloaderThreadPoolExecutor,
     DownloadHooks,
     DownloadMessage,
     DownloadProgress,
@@ -376,16 +376,16 @@ def load_streams(options: ParseOptions) -> list[StreamInfo]:
     order is the one selection indexes refer to.
     """
     args = _namespace(options.argv())
-    cli._configure_proxy(args)
     headers = normalize_headers(args.header)
     args.append_url_params = args.append_url_params or cli.should_append_child_url_params(args.input)
-    streams = parse_source(
-        args.input,
-        headers=headers,
-        probe_direct=not args.no_probe,
-        fetch_child_playlists=args.details and not args.no_child_playlists,
-        base_url=args.base_url,
-    )
+    with cli._proxy_scope(args):
+        streams = parse_source(
+            args.input,
+            headers=headers,
+            probe_direct=not args.no_probe,
+            fetch_child_playlists=args.details and not args.no_child_playlists,
+            base_url=args.base_url,
+        )
     if args.append_url_params:
         cli._append_input_params(streams, args.input)
     cli._filter_ad_segments(streams, args.ad_keyword, args=args, colors=False)
@@ -407,7 +407,6 @@ def hydrate_streams(
     identities.
     """
     args = _namespace(options.argv())
-    cli._configure_proxy(args)
     headers = normalize_headers(args.header)
     detached = copy.deepcopy(list(streams))
 
@@ -423,11 +422,12 @@ def hydrate_streams(
     # provider masters are valid for only a few seconds.  Read independent
     # media playlists concurrently and preserve their original ladder order.
     workers = min(8, len(detached))
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            hydrated = list(pool.map(hydrate, detached))
-    else:
-        hydrated = [hydrate(stream) for stream in detached]
+    with cli._proxy_scope(args):
+        if workers > 1:
+            with DownloaderThreadPoolExecutor(max_workers=workers) as pool:
+                hydrated = list(pool.map(hydrate, detached))
+        else:
+            hydrated = [hydrate(stream) for stream in detached]
 
     if args.append_url_params or cli.should_append_child_url_params(args.input):
         cli._append_input_params(hydrated, args.input)

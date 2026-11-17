@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .console import Palette, color_enabled, paint
 from .downloader import KNOWN_OUTPUT_SUFFIXES, HlsCrypto, _fetch_bytes, _HostAdaptiveLimiter, _should_prefer_curl
-from .embedding import DownloadCancelled, LiveRecordingStopped, current_download_runtime
+from .embedding import DownloadCancelled, DownloaderThreadPoolExecutor, LiveRecordingStopped, current_download_runtime
 from .ism_live import stream_ism_timescale, stream_uses_ism_timeline_index
 from .live_rules import (
     live_media_retry_attempts,
@@ -247,7 +247,7 @@ def record_live_stream_group(
                         options.segment_key_observer(plan.state.stream, plan.segments)
                 for plan in planned:
                     _emit_state_progress(options, plan.state, len(plan.media_segments), "Recording")
-                pool = ThreadPoolExecutor(max_workers=len(planned))
+                pool = DownloaderThreadPoolExecutor(max_workers=len(planned))
                 futures = {}
                 try:
                     futures = {
@@ -2046,7 +2046,7 @@ def _download_live_segment_parts(
     host_limiter: _HostAdaptiveLimiter | None = None,
 ) -> dict[int, Exception]:
     failures: dict[int, Exception] = {}
-    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    pool = DownloaderThreadPoolExecutor(max_workers=max(1, workers))
     futures = {}
     try:
         for index in indexes:

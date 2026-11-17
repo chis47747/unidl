@@ -182,6 +182,8 @@ class TrackCheckpoint:
                         path.resolve().relative_to(self.root.parent.parent.resolve())
                         if path.stat().st_size != item["size"] or not path.is_file() or path.is_symlink():
                             return
+                        if item.get("signature") and _signature(path) != item["signature"]:
+                            return
                 temp_dir = Path(data["temp_dir"]) if data.get("temp_dir") else None
                 if temp_dir is not None:
                     temp_dir.resolve().relative_to(self.root.parent.parent.resolve())
@@ -221,12 +223,14 @@ class TrackCheckpoint:
                 self.path = None
                 self.result = None
 
-    def save(self, phase: str, path: Path, result: DownloadResult) -> None:
+    def save(self, phase: str, path: Path, result: DownloadResult, *, sections_only: bool = False) -> None:
         if not self.enabled:
             return
+        if sections_only and (phase != "downloaded" or not result.sections):
+            raise ValueError("Section-only checkpoints require downloaded sections")
         # Never publish an absent/zero-length audio or video as a finished track.
-        paths = [Path(path)] if Path(path).is_file() else []
-        if not paths and (phase != "downloaded" or not result.parts):
+        paths = [Path(path)] if not sections_only and Path(path).is_file() else []
+        if not paths and (phase != "downloaded" or not (result.parts or result.sections)):
             raise OSError(f"Missing {phase} track output")
         if paths and paths[0].stat().st_size == 0 and result.stream.media_type != "subtitle":
             raise OSError(f"Empty {phase} track output")
@@ -250,15 +254,22 @@ class TrackCheckpoint:
                 for field in ("parts", "sections"):
                     values = getattr(result, field) or []
                     auxiliary[field] = [
-                        {"path": str(item.resolve()), "size": item.stat().st_size}
+                        {"path": str(item.resolve()), "size": item.stat().st_size,
+                         **({"signature": _signature(item)} if sections_only and field == "sections" else {})}
                         for item in values
                     ] if phase == "downloaded" else []
                 # When assembly is intentionally skipped, the verified parts are
                 # themselves the download checkpoint; no fabricated media file.
-                if not files and auxiliary["parts"]:
-                    first = Path(auxiliary["parts"][0]["path"])
+                if not files and (auxiliary["sections"] or auxiliary["parts"]):
                     target = directory / "parts-anchor"
-                    _link_or_copy(first, target)
+                    if auxiliary["sections"]:
+                        # Do not duplicate a multi-GB first section on volumes
+                        # without hard-link support. Fingerprinted inventories
+                        # are the data; this tiny anchor only commits a generation.
+                        target.write_bytes(b"UniDL section checkpoint\n")
+                    else:
+                        first = Path(auxiliary["parts"][0]["path"])
+                        _link_or_copy(first, target)
                     files = [{"name": target.name, "signature": _signature(target)}]
                 self._source_name = self._source_name or result.path.name
                 payload = {

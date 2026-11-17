@@ -2962,7 +2962,10 @@ class Engine:
         Headless callers retain the empty result on any unmatched constraint.
         """
         result = self.auto_select_result(
-            tracks.selectable_streams,
+            [
+                stream for stream in tracks.selectable_streams
+                if not self.cea708_block_reason(playback, settings, stream)
+            ],
             settings,
             audio_only=playback.audio_only,
             strict=playback.strict_track_selection,
@@ -2981,6 +2984,16 @@ class Engine:
         if self.hybrid_enabled(settings, playback=playback, tracks=tracks):
             tracks.selected = self.ensure_hybrid_tracks(tracks, tracks.selected)
         return tracks.selected
+
+    @staticmethod
+    def cea708_block_reason(playback: Playback, settings: Settings, stream: StreamInfo) -> str:
+        from ..downloader.captions import cea708_unavailable
+
+        return cea708_unavailable(
+            stream,
+            live=playback.is_live and getattr(playback.live_window, "mode", None) != "vod",
+            raw=Engine.original_track_output(settings) or settings.get("sub_format", "srt") == "raw",
+        )
 
     def hydrate_selected_track_kids(
         self,

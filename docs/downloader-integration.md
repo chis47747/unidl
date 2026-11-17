@@ -393,9 +393,29 @@ needs them. With resume enabled, the assembled track is validated and its
 checkpoint is atomically made independent of those parts before removal. A
 decryption failure can therefore retry the assembly without downloading it
 again. Older downloaded checkpoints are reduced in the same way on retry.
-Fragment-only decryption, section/timestamp processing and live recording keep
-their required inputs. `keep_temp` and disabled automatic cleanup retain files
-as requested.
+Fragment-only decryption and live recording keep their required inputs.
+`keep_temp` and disabled automatic cleanup retain files as requested.
+
+For finite HLS fMP4 with multiple `EXT-X-MAP` sections, normal Python/aria2
+downloads assemble the sections directly without an additional whole-track
+copy. Core publishes a fingerprinted section-only checkpoint before removing
+redundant parts; an older assembled checkpoint is migrated on retry. A tiny
+generation marker avoids copying the first section on filesystems without
+hard links. Failed decryption/concat can resume from the intact source sections
+without downloading them again.
+
+Clear decryption and timestamp working copies use a private temporary scope.
+Timestamp correction atomically replaces each generated clear section rather
+than retaining a second full set. The scope is removed on success, failure or
+cancellation; source sections stay until the complete clear-track checkpoint
+has been published. A one-section result is moved into place, and concat checks
+free space before starting. Key scope, caption/timing corrections, media bytes,
+explicit retention settings and live recording behavior are unchanged.
+
+For this multi-section HLS path on one local filesystem with normal cleanup,
+budget roughly three copies of the selected media plus headroom during
+decryption/section concat, then roughly two during final mux. This is a peak
+budget, not a guarantee for debug retention or additional processing.
 
 For an ordinary encrypted DASH VOD with a single KID per track, on one local
 filesystem with hard-link support and normal cleanup, the main peak is roughly
