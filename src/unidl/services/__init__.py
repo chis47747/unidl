@@ -9,16 +9,20 @@ tests.
 
 import logging
 import sys
+from collections import defaultdict
 from importlib import import_module
 from types import ModuleType
 
-from ..core.compiled_service import CompiledServiceError, register_compiled_services
+from ..core.compiled_service import register_compiled_services
+from ..core.diagnostics import safe_log_text
 from ..core.service import Service, registry
-from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, discover_sources, service_roots
+from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, ServiceSource, discover_sources, service_roots
 
-__all__ = ["compiled_service_errors"]
+__all__ = ["compiled_service_errors", "service_load_errors"]
 
 _COMPILED_SERVICE_ERRORS: dict[str, str] = {}
+_SERVICE_LOAD_ERRORS: dict[str, str] = {}
+_LOG = logging.getLogger(__name__)
 
 
 def _register_module_services(module: ModuleType) -> None:
@@ -61,26 +65,38 @@ def load_all(config=None) -> int:
         text = str(root)
         if text not in package_paths and hasattr(package_paths, "append"):
             package_paths.append(text)
+    packages: dict[str, list[ServiceSource]] = defaultdict(list)
+    _SERVICE_LOAD_ERRORS.clear()
+    _COMPILED_SERVICE_ERRORS.clear()
     for source in discover_sources(home=home):
-        if source.implementation == COMPILED_ONLY_IMPLEMENTATION:
-            _COMPILED_SERVICE_ERRORS.pop(source.service_id, None)
-            try:
-                register_compiled_services(
-                    f"{__name__}.{source.package}",
-                    manifest_path=source.manifest or source.path,
-                )
-            except CompiledServiceError as exc:
-                _COMPILED_SERVICE_ERRORS[source.service_id] = str(exc)
-                logging.getLogger(__name__).warning(
-                    "compiled-only service %s is unavailable: %s", source.service_id, exc
-                )
-        else:
-            module = import_module(f"{__name__}.{source.package}")
-            _register_module_services(module)
-    # Declaration validation only needs class metadata and setting keys.  The
-    # config-dependent device option lists are built lazily when a service is
-    # opened; resolving every local WVD/PRD here made startup needlessly slow.
-    registry.validate()
+        packages[source.package].append(source)
+    for package, sources in packages.items():
+        declared = next((source for source in sources if source.manifest is not None), sources[0])
+        if declared.error:
+            _SERVICE_LOAD_ERRORS[declared.service_id] = declared.error
+            _LOG.warning("service %s is unavailable: %s", declared.service_id, declared.error)
+            continue
+        compiled = declared.implementation == COMPILED_ONLY_IMPLEMENTATION
+        fullname = f"{__name__}.{package}"
+        prefix = fullname + "."
+        existing = {name for name in sys.modules.copy() if name == fullname or name.startswith(prefix)}
+        try:
+            with registry.registration_scope():
+                if compiled:
+                    register_compiled_services(fullname, manifest_path=declared.manifest or declared.path)
+                else:
+                    _register_module_services(import_module(fullname))
+        except (Exception, SystemExit) as exc:
+            # A submodule might have loaded successfully and registered a
+            # class before its parent failed. Retry must rerun that decorator.
+            for name in sys.modules.copy():
+                if name not in existing and (name == fullname or name.startswith(prefix)):
+                    sys.modules.pop(name, None)
+            reason = safe_log_text(f"{type(exc).__name__}: {exc}").splitlines()[0]
+            errors = _COMPILED_SERVICE_ERRORS if compiled else _SERVICE_LOAD_ERRORS
+            for source in sources:
+                errors[source.service_id] = reason
+            _LOG.warning("service %s is unavailable: %s", package, reason)
     return len(registry.all())
 
 
@@ -88,3 +104,9 @@ def compiled_service_errors() -> dict[str, str]:
     """Return compiled-only services that failed without stopping UniDL."""
 
     return dict(_COMPILED_SERVICE_ERRORS)
+
+
+def service_load_errors() -> dict[str, str]:
+    """Return source and manifest failures without exposing unusable services."""
+
+    return dict(_SERVICE_LOAD_ERRORS)

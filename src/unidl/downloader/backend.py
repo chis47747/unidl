@@ -55,7 +55,6 @@ from ..core.secureio import (
 from . import api
 from .captions import CAPTION, is_caption
 from .embedding import DownloaderThreadPoolExecutor, DownloadRuntime, proxy_scope
-from .http_client import close_http2_clients, get_global_http_client
 from .models import SegmentInfo, StreamInfo
 from .utils import looks_like_h266
 
@@ -77,19 +76,27 @@ class NativeDownloaderBackend:
 
     def __init__(self) -> None:
         self._runtime_lock = threading.RLock()
-        self._active_runtime: DownloadRuntime | None = None
+        self._active_runtimes: set[DownloadRuntime] = set()
 
     def shutdown_active_download(self) -> None:
         """Signal a hard stop without blocking the caller on resource cleanup."""
         with self._runtime_lock:
-            runtime = self._active_runtime
-        if runtime is not None:
+            runtimes = tuple(self._active_runtimes)
+        for runtime in runtimes:
             runtime.request_shutdown()
 
     def _forget_runtime(self, runtime: DownloadRuntime) -> None:
         with self._runtime_lock:
-            if self._active_runtime is runtime:
-                self._active_runtime = None
+            self._active_runtimes.discard(runtime)
+
+    def interrupt_live_capture(self) -> bool:
+        """Wake live capture without cancelling its enclosing delivery."""
+        with self._runtime_lock:
+            runtimes = tuple(self._active_runtimes)
+        started = False
+        for runtime in runtimes:
+            started = runtime.interrupt_live_capture() or started
+        return started
 
     def parse(self, request: ParseRequest) -> ParsedManifest:
         source = self._materialize(request)
@@ -803,9 +810,7 @@ class NativeDownloaderBackend:
 
         runtime = DownloadRuntime()
         with self._runtime_lock:
-            self._active_runtime = runtime
-        runtime.register_closer(get_global_http_client().close)
-        runtime.register_closer(close_http2_clients)
+            self._active_runtimes.add(runtime)
         decryptor_close = getattr(options.hls_decryptor, "close", None)
         if callable(decryptor_close):
             runtime.register_closer(decryptor_close)
@@ -835,10 +840,8 @@ class NativeDownloaderBackend:
                     hooks=download_hooks,
                 )
         except (api.DownloadCancelled, KeyboardInterrupt):
-            self._forget_runtime(runtime)
             return DeliveryResult(DeliveryStatus.CANCELLED, tuple(artifacts), exit_code=130)
         except SystemExit as exc:
-            self._forget_runtime(runtime)
             value = exc.code
             if value is None:
                 exit_code = 0
@@ -859,7 +862,6 @@ class NativeDownloaderBackend:
                 exit_code=exit_code,
             )
         except Exception as exc:  # implementation exceptions become Core data
-            self._forget_runtime(runtime)
             if hooks.cancellation.cancelled or runtime.stopped:
                 return DeliveryResult(DeliveryStatus.CANCELLED, tuple(artifacts), exit_code=130)
             return DeliveryResult(
@@ -872,7 +874,8 @@ class NativeDownloaderBackend:
                 ),
                 exit_code=1,
             )
-        self._forget_runtime(runtime)
+        finally:
+            self._forget_runtime(runtime)
         if exit_code == 130 or hooks.cancellation.cancelled or runtime.stopped:
             return DeliveryResult(DeliveryStatus.CANCELLED, tuple(artifacts), exit_code=130)
         if exit_code != 0:

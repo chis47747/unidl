@@ -188,12 +188,18 @@ class _MultiChoiceEditor(_Editor):
         options.highlighted = min(previous or 0, len(self.setting.options))
 
     def _toggle_index(self, index: int | None) -> None:
-        if index is None or index <= 0:
+        if index is None or not 0 < index <= len(self.setting.options):
             return
         option = self.setting.options[index - 1]
         if option.value in self.selected:
             self.selected.remove(option.value)
+        elif option.exclusive:
+            self.selected = [option.value]
         else:
+            self.selected = [
+                value for value in self.selected
+                if not any(item.value == value and item.exclusive for item in self.setting.options)
+            ]
             self.selected.append(option.value)
         self._rebuild_options()
         self.query_one("#multi-setting-options", OptionList).highlighted = index

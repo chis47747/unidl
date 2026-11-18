@@ -37,9 +37,8 @@ id_ed25519
 # here: visible is not the same as shareable. Sessions, keys and CDM devices are
 # the three things in this tree that must never leave the machine.
 .unidl-core/
-# The lab's root YAML is a clean, portable template and may be committed.
+# The root YAML is mutable local configuration. Commit only the example.
 unidl.yaml
-!unidl.yaml
 cache/
 downloads/
 subtitles/

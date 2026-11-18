@@ -1,17 +1,20 @@
-"""BBC iPlayer catalogue and clear media-selector playback models."""
+"""BBC account sign-in, programme catalogue and clear playback models."""
 
 from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import ssl
 import tempfile
-from dataclasses import dataclass, field, replace
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse, urlunsplit
+from urllib.parse import parse_qs, quote_plus, urlparse, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
 import requests
@@ -118,6 +121,217 @@ _FISCAL_SEASON = re.compile(r"(\d{4})/(\d{2})\s*:\s*episode\s+\d+", re.I)
 _NUMBER = re.compile(r"(?:^|:\s*)(\d+)\.\s*|episode\s+(\d+)", re.I)
 
 
+TOKEN_FILE = "bbc_tv_session.json"
+ACCOUNT = "https://account.bbc.com"
+GENERATE_CODE = f"{ACCOUNT}/oidc/v1/device/generateCode"
+DEVICE_TOKEN = f"{ACCOUNT}/oidc/v1/device/device_token"
+REFRESH = f"{ACCOUNT}/api/v4/user-token-refresh"
+USER_CORE = f"{ACCOUNT}/external/v3/user?filterId=productTVProfileAdmin"
+CLIENT_ID = "iPlayerTV"
+CLIENT_SECRET = "S2HospbhSF8fFuEr"
+
+
+class AuthError(RuntimeError):
+    """BBC account sign-in could not complete."""
+
+
+class SessionExpired(AuthError):
+    """The saved account needs a new TV-code sign-in."""
+
+
+@dataclass(frozen=True)
+class Session:
+    access_token: str = field(default="", repr=False)
+    refresh_token: str = field(default="", repr=False)
+    expires_at: float = 0
+    display_name: str = ""
+    age_bracket: str = ""
+    personalised: bool = False
+
+    @classmethod
+    def from_cache(cls, value: Any) -> Session:
+        value = value if isinstance(value, dict) else {}
+        return cls(
+            access_token=_string(value.get("access_token")),
+            refresh_token=_string(value.get("refresh_token")),
+            expires_at=_number(value.get("expires_at")),
+            display_name=_string(value.get("display_name")),
+            age_bracket=_string(value.get("age_bracket")),
+            personalised=value.get("personalised") is True,
+        )
+
+    @property
+    def signed_in(self) -> bool:
+        return bool(self.refresh_token or self.access_token)
+
+    def is_fresh(self) -> bool:
+        return bool(self.access_token and self.expires_at > time.time() + 60)
+
+    def to_cache(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Challenge:
+    user_code: str
+    device_code: str = field(repr=False)
+    verification_url: str
+    expires_in: float
+    interval: float
+    expires_at: float
+
+
+class AccountClient:
+    def __init__(
+        self,
+        session: requests.Session,
+        state: Session | None = None,
+        on_save: Callable[[Session], None] | None = None,
+    ):
+        self.session = session
+        self.session.headers.update({"User-Agent": USER_AGENT_TV, "Accept": "application/json"})
+        self.state = state or Session()
+        self.on_save = on_save
+
+    def start(self) -> Challenge:
+        status, data = self._request("POST", GENERATE_CODE, data={"client_id": CLIENT_ID})
+        self._require_success(status, data)
+        code = _string(data.get("user_code"))
+        device = _string(data.get("device_code"))
+        url = _string(data.get("verification_uri") or data.get("verification_url"))
+        expires = _number(data.get("expires_in"))
+        interval = _number(data.get("interval"))
+        parsed = urlsplit(url)
+        if not code or not device or expires <= 0 or parsed.scheme != "https" or parsed.hostname not in {
+            "bbc.com", "www.bbc.com", "account.bbc.com",
+        }:
+            raise AuthError("BBC returned an incomplete TV sign-in code")
+        return Challenge(code, device, url, expires, max(1, interval or 10), time.time() + expires)
+
+    def poll(self, challenge: Challenge) -> Session | None:
+        if time.time() >= challenge.expires_at:
+            raise AuthError("The BBC TV code expired; select TV code to request a new one")
+        status, data = self._request(
+            "POST", DEVICE_TOKEN,
+            data={"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, "code": challenge.device_code},
+        )
+        error = data.get("error")
+        if error == "authorization_pending":
+            return None
+        if error == "slow_down":
+            challenge.interval += 5
+            return None
+        self._require_success(status, data)
+        self._accept_tokens(data, require_refresh=True)
+        try:
+            self.profile()
+        except AuthError:
+            pass
+        return self.state
+
+    def refresh(self) -> Session:
+        if not self.state.refresh_token:
+            raise SessionExpired("BBC session expired; sign in with a TV code again")
+        status, data = self._request(
+            "POST", REFRESH,
+            headers={"csrf": "1", "app-identifier": CLIENT_ID, "device-user-agent": USER_AGENT_TV},
+            json={
+                "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+                "grant_type": "refresh_token", "refresh_token": self.state.refresh_token, "state": "Attempt1",
+            },
+        )
+        if status in {400, 401, 403}:
+            raise SessionExpired("BBC rejected the saved session; sign in with a TV code again")
+        self._require_success(status, data)
+        self._accept_tokens(data)
+        return self.state
+
+    def profile(self) -> None:
+        status, data = self._request("GET", USER_CORE, headers={"Authorization": f"Bearer {self.state.access_token}"})
+        self._require_success(status, data)
+        record = data.get("data")
+        attributes = record.get("attributes") if isinstance(record, dict) else None
+        if not isinstance(attributes, dict):
+            raise AuthError("BBC account returned incomplete profile metadata")
+        permissions = attributes.get("permissions")
+        permissions = permissions if isinstance(permissions, dict) else {}
+        age = attributes.get("age")
+        age = age if isinstance(age, dict) else {}
+        self._save(replace(
+            self.state,
+            display_name=_string(attributes.get("displayName")) or self.state.display_name,
+            age_bracket=_string(age.get("ageBracket")) or self.state.age_bracket,
+            personalised=permissions.get("allowPersonalisation", self.state.personalised) is True,
+        ))
+
+    def headers_for(self, url: str) -> dict[str, str]:
+        host = urlsplit(url).hostname
+        if host not in {"ibl.api.bbc.co.uk", "graph.ibl.api.bbc.co.uk", "www.live.bbctvapps.co.uk"}:
+            return {}
+        if not self.state.signed_in:
+            return {}
+        if not self.state.is_fresh():
+            self.refresh()
+        token = self.state.access_token
+        if host == "www.live.bbctvapps.co.uk":
+            envelope = {
+                "token": token, "personalised": self.state.personalised, "guest": False,
+                "ageBracket": self.state.age_bracket, "displayName": self.state.display_name, "fallback": False,
+            }
+            token = base64.b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode()
+        return {"Authorization": f"Bearer {token}"}
+
+    def _accept_tokens(self, data: dict[str, Any], *, require_refresh: bool = False) -> None:
+        access = _string(data.get("access_token"))
+        refresh = _string(data.get("refresh_token")) or ("" if require_refresh else self.state.refresh_token)
+        expires = _number(data.get("expires_in"))
+        if not access or not refresh or expires <= 0:
+            raise AuthError("BBC returned incomplete account tokens")
+        previous = Session() if require_refresh else self.state
+        self._save(replace(previous, access_token=access, refresh_token=refresh, expires_at=time.time() + expires))
+
+    def _save(self, state: Session) -> None:
+        if self.on_save is not None:
+            self.on_save(state)
+        self.state = state
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        try:
+            response = self.session.request(method, url, timeout=20, allow_redirects=False, **kwargs)
+            data = response.json()
+        except requests.RequestException as exc:
+            raise AuthError(f"BBC account request failed ({type(exc).__name__})") from None
+        except ValueError:
+            raise AuthError("BBC account returned an invalid JSON response") from None
+        if not isinstance(data, dict):
+            raise AuthError("BBC account returned an unexpected response")
+        return response.status_code, data
+
+    @staticmethod
+    def _require_success(status: int, data: Mapping[str, Any]) -> None:
+        if status == 200 and not data.get("error"):
+            return
+        message = {
+            "expired_token": "The BBC TV code expired; request a new one",
+            "access_denied": "BBC TV sign-in was declined",
+            "invalid_grant": "BBC TV sign-in is no longer valid; request a new code",
+            "invalid_client": "BBC rejected this television sign-in client",
+        }.get(_string(data.get("error")), f"BBC account request was refused (HTTP {status})")
+        raise AuthError(message)
+
+
+def _string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _number(value: Any) -> float:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 class IPlayerError(RuntimeError):
     """The BBC API or media selector returned no usable result."""
 
@@ -184,6 +398,7 @@ class Episode:
     parent_id: str = ""
     image_url: str = ""
     poster_url: str = ""
+    banner_url: str = ""
 
     @property
     def label(self) -> str:
@@ -225,6 +440,7 @@ class Channel:
     region: str = ""
     image_url: str = ""
     poster_url: str = ""
+    banner_url: str = ""
 
     @property
     def url(self) -> str:
@@ -241,6 +457,7 @@ class Source:
     encrypted: bool = False
     image_url: str = ""
     poster_url: str = ""
+    banner_url: str = ""
 
     def line(self) -> str:
         return " · ".join(
@@ -269,6 +486,7 @@ class IPlayerApi:
         *,
         resolution: Any = "auto",
         region: str = "london",
+        authorization: Callable[[str], dict[str, str]] | None = None,
     ):
         self.profiles = normalize_source_profiles(resolution)
         if self.profiles == ("auto",):
@@ -278,6 +496,7 @@ class IPlayerApi:
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", USER_AGENT)
         self.region = region
+        self.authorization = authorization
         self._tv_playback_cache: dict[str, dict[str, Any]] = {}
         self._manifest_height_cache: dict[str, int] = {}
         self._subtitle_url_cache: dict[str, str] = {}
@@ -382,6 +601,7 @@ class IPlayerApi:
             parent_id=item.parent_id or enriched.parent_id,
             image_url=item.image_url or enriched.image_url,
             poster_url=item.poster_url or enriched.poster_url,
+            banner_url=item.banner_url or enriched.banner_url,
         )
 
     def _episode_in_programme(self, programme_id: str, episode_id: str, parent_id: str = "") -> dict[str, Any] | None:
@@ -441,6 +661,7 @@ class IPlayerApi:
                 region=selected_region,
                 image_url=image_url,
                 poster_url=poster_url,
+                banner_url=_banner_image(raw),
             )
             channels.append(self._scheduled_channel(channel) if include_schedule else channel)
         return channels
@@ -470,6 +691,7 @@ class IPlayerApi:
             synopsis=_text(current_ep.get("synopsis"), "small", "default"),
             episode_id=str(current_ep.get("id") or ""),
             poster_url=programme_poster or programme_image or channel.poster_url,
+            banner_url=_banner_image(current_ep) or channel.banner_url,
         )
 
     def regional_variants(self, channel: Channel) -> list[Channel]:
@@ -567,11 +789,13 @@ class IPlayerApi:
             raise IPlayerError("BBC metadata contained no playable version id")
         image_url = item.image_url
         poster_url = item.poster_url
+        banner_url = item.banner_url
         listing = None if live or isinstance(item, Channel) else self._episode_listing(item.id)
         if listing is not None:
             listing_image, listing_poster = _images(listing)
             image_url = listing_image or image_url
             poster_url = listing_poster or poster_url
+            banner_url = _banner_image(listing) or banner_url
         chapters = () if listing is None else tuple(self._chapters_from_listing(listing, vpids))
         stop_at_first = live or self.profiles == ("auto",)
         found: list[Source] = []
@@ -582,7 +806,9 @@ class IPlayerApi:
                 if result is None or result.manifest in seen:
                     continue
                 seen.add(result.manifest)
-                found.append(replace(result, chapters=chapters, image_url=image_url, poster_url=poster_url))
+                found.append(replace(
+                    result, chapters=chapters, image_url=image_url, poster_url=poster_url, banner_url=banner_url,
+                ))
                 break
             if found and stop_at_first:
                 return found
@@ -847,6 +1073,10 @@ class IPlayerApi:
         return response.content
 
     def _json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if self.authorization is not None:
+            headers = dict(kwargs.get("headers") or {})
+            headers.update(self.authorization(url))
+            kwargs["headers"] = headers
         try:
             response = self.session.request(method, url, timeout=20, **kwargs)
             response.raise_for_status()
@@ -984,6 +1214,7 @@ def _episode(raw: dict[str, Any], default_season: int | None = None) -> Episode:
         parent_id=str(raw.get("parent_id") or raw.get("parentId") or ""),
         image_url=image_url,
         poster_url=poster_url,
+        banner_url=_banner_image(raw),
     )
 
 
@@ -1049,7 +1280,7 @@ def _image_entry_url(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
-        return str(
+        return _image_entry_url(
             value.get("url")
             or value.get("templatedUrl")
             or value.get("templateUrl")
@@ -1057,7 +1288,7 @@ def _image_entry_url(value: Any) -> str:
             or value.get("href")
             or value.get("standard")
             or ""
-        ).strip()
+        )
     return ""
 
 
@@ -1071,7 +1302,7 @@ def _images(raw: dict[str, Any] | None) -> tuple[str, str]:
     if isinstance(images, str):
         standard = images.strip()
     elif isinstance(images, dict):
-        standard = str(
+        standard = _image_entry_url(
             images.get("standard")
             or images.get("landscape")
             or images.get("promotional")
@@ -1080,8 +1311,8 @@ def _images(raw: dict[str, Any] | None) -> tuple[str, str]:
             or images.get("templatedUrl")
             or images.get("templateUrl")
             or ""
-        ).strip()
-        portrait = str(images.get("vertical") or images.get("portrait") or "").strip()
+        )
+        portrait = _image_entry_url(images.get("vertical") or images.get("portrait"))
         kind = str(images.get("type") or images.get("kind") or "").strip().lower()
         if kind in {"portrait", "vertical", "poster"} and standard and not portrait:
             portrait = standard
@@ -1102,6 +1333,13 @@ def _images(raw: dict[str, Any] | None) -> tuple[str, str]:
         fallback = raw.get("image_url") or raw.get("imageUrl") or raw.get("image")
         standard = _image_entry_url(fallback)
     return standard, portrait
+
+
+def _banner_image(raw: dict[str, Any] | None) -> str:
+    images = raw.get("images") if isinstance(raw, dict) else None
+    if isinstance(images, dict):
+        return _image_entry_url(images.get("banner"))
+    return ""
 
 
 _SOURCE_PROFILE_ALIASES = {
@@ -1277,6 +1515,12 @@ def _int(value: Any) -> int | None:
 
 
 __all__ = [
+    "AccountClient",
+    "AuthError",
+    "Challenge",
+    "Session",
+    "SessionExpired",
+    "TOKEN_FILE",
     "SECURE_SELECTOR",
     "USER_AGENT",
     "USER_AGENT_UHD",

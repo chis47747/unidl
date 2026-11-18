@@ -31,6 +31,7 @@ from .credentials import Credential, CredentialSlot, mask_account
 from .flow import SCOPE_ROOT, Ask, Back, Choice, Field, FlowContext
 from .helpers import Helper, HelperReport, HelperResolver, HelperRunner, load_module
 from .naming import save_name_for
+from .network import NetworkSession
 from .partner import PartnerAuthorization, PartnerAuthorizationResult
 from .playback import DrmInfo, Playback, SubtitleReference
 from .settings import (
@@ -296,7 +297,7 @@ class ServiceContext:
         account behind them. ``cookies=False`` is for the request that must be
         anonymous, like minting a guest token.
         """
-        session = requests.Session()
+        session = NetworkSession()
         if user_agent:
             session.headers["User-Agent"] = user_agent
         if headers:
@@ -1586,6 +1587,19 @@ class ServiceRegistry:
                 raise KeyError(f"cannot replace unknown service {service_id!r}")
             self._services[service_id] = service
         return service
+
+    @contextmanager
+    def registration_scope(self):
+        """Commit a whole package's registrations only after validation."""
+        with self._lock:
+            previous = self._services.copy()
+            try:
+                yield
+                if self._services != previous:
+                    self.validate()
+            except BaseException:
+                self._services = previous
+                raise
 
     @contextmanager
     def replacement_scope(self, modules: set[str]):

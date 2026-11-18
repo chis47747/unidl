@@ -28,7 +28,14 @@ from .embedding import (
     managed_popen,
     managed_run,
 )
-from .http_client import HttpClientError, get_global_http_client, http2_download_to_file, httpx_http2_available
+from .http_client import (
+    HttpClientError,
+    get_global_http_client,
+    http2_download_to_file,
+    httpx_http2_available,
+    redirect_headers,
+    same_origin,
+)
 from .loader import DEFAULT_USER_AGENT
 from .models import SegmentInfo, StreamInfo
 from .postprocess import copy_gzip_mp4_init, split_fragmented_mp4_init_media
@@ -181,6 +188,7 @@ class _RangeProbeResult:
     supported: bool
     size: int | None = None
     url: str | None = None
+    crossed_origin: bool = False
 
 
 _HLS_KEY_CACHE: dict[str, bytes] = {}
@@ -985,13 +993,14 @@ def _split_single_large_remote_segment(
 
     known_size = (segment.byte_range[1] + 1) if segment.byte_range else stream.size_bytes
     segment_url_changed = False
-    probe_result = _probe_range_support(segment.url, headers=headers, timeout=request_timeout, expected_size=known_size)
-    if probe_result.url and probe_result.url != segment.url:
-        original_url = segment.url
-        segment = replace(segment, url=probe_result.url)
+    probe_headers = redirect_headers(segment.url, segment.url, headers or {}, crossed_origin=segment.restrict_request_headers)
+    probe_result = _probe_range_support(segment.url, headers=probe_headers, timeout=request_timeout, expected_size=known_size)
+    if probe_result.url and (probe_result.url != segment.url or probe_result.crossed_origin):
+        segment = replace(
+            segment, url=probe_result.url,
+            restrict_request_headers=segment.restrict_request_headers or probe_result.crossed_origin,
+        )
         segment_url_changed = True
-        if stream.url == original_url:
-            stream.url = probe_result.url
         stream.extra["range_redirect_url"] = probe_result.url
     if not probe_result.supported:
         stream.extra["remote_range_supported"] = False
@@ -1032,6 +1041,7 @@ def _split_single_large_remote_segment(
                 program_date_time=segment.program_date_time,
                 timeline_time=segment.timeline_time,
                 timeline_presentation_time=segment.timeline_presentation_time,
+                restrict_request_headers=segment.restrict_request_headers,
             )
         )
         index += 1
@@ -1350,11 +1360,13 @@ def _json_dvr_sequence_available(
     try:
         for _ in range(5):
             with get_global_http_client().request("GET", current_url, headers=request_headers, timeout=timeout) as response:
-                redirect_url, data = _json_dvr_probe_response(response, current_url)
+                response_url = getattr(response, "url", current_url)
+                redirect_url, data = _json_dvr_probe_response(response, response_url)
                 if redirect_url:
                     if redirect_url in redirect_chain:
                         return False
                     redirect_chain.append(redirect_url)
+                    request_headers = _handoff_headers(current_url, redirect_url, request_headers, response)
                     current_url = redirect_url
                     continue
                 return _json_dvr_probe_has_media(response, data)
@@ -1593,7 +1605,8 @@ def _fetch_probe_range_bytes(
                 return response.read()
             redirect_url = _text_url_redirect_from_response(response)
             if redirect_url and redirects_remaining > 0:
-                return _fetch_probe_range_bytes(redirect_url, byte_range, headers=headers, request_timeout=request_timeout, redirects_remaining=redirects_remaining - 1)
+                safe_headers = _handoff_headers(url, redirect_url, request_headers, response)
+                return _fetch_probe_range_bytes(redirect_url, byte_range, headers=safe_headers, request_timeout=request_timeout, redirects_remaining=redirects_remaining - 1)
     except Exception as exc:
         raise DownloadError(f"Failed to fetch init range {start}-{end}: {_error_text(exc)}", url=url) from exc
     raise DownloadError(f"Range probe {start}-{end} was not honored.", url=url)
@@ -1622,10 +1635,10 @@ def _probe_range_support(
                 return _RangeProbeResult(True, _content_range_total(response.get_header("Content-Range")) or expected_size, url)
             redirect_url = _text_url_redirect_from_response(response)
             if redirect_url and redirects_remaining > 0:
-                nested = _probe_range_support(redirect_url, headers=headers, timeout=timeout, expected_size=expected_size, redirects_remaining=redirects_remaining - 1)
-                if nested.url:
-                    return nested
-                return _RangeProbeResult(nested.supported, nested.size, redirect_url)
+                crossed = bool(getattr(response, "crossed_origin", False)) or not same_origin(url, redirect_url)
+                safe_headers = _handoff_headers(url, redirect_url, request_headers, response)
+                nested = _probe_range_support(redirect_url, headers=safe_headers, timeout=timeout, expected_size=expected_size, redirects_remaining=redirects_remaining - 1)
+                return replace(nested, url=nested.url or redirect_url, crossed_origin=crossed or nested.crossed_origin)
     except Exception:
         return _RangeProbeResult(False)
     return _RangeProbeResult(False)
@@ -1643,6 +1656,10 @@ def _text_url_redirect_from_response(response) -> str | None:
         return None
     data = response.read(8193)
     return _text_url_redirect_from_bytes(data, response.headers, base_url=getattr(response, "url", ""))
+
+
+def _handoff_headers(source: str, target: str, headers: dict[str, str], response) -> dict[str, str]:
+    return redirect_headers(source, target, headers, crossed_origin=bool(getattr(response, "crossed_origin", False)))
 
 
 def _text_url_redirect_from_bytes(data: bytes, headers: dict[str, str] | None = None, *, base_url: str = "") -> str | None:
@@ -3220,7 +3237,9 @@ def _is_range_not_honored_error(exc: BaseException | None) -> bool:
 
 
 def _segment_request_headers(segment: SegmentInfo, base_headers: dict[str, str], resume_offset: int = 0) -> dict[str, str]:
-    request_headers = dict(base_headers)
+    request_headers = redirect_headers(
+        segment.url, segment.url, base_headers, crossed_origin=segment.restrict_request_headers,
+    ) if segment.restrict_request_headers else dict(base_headers)
     if segment.byte_range:
         start, end = segment.byte_range
         start += max(0, resume_offset)
@@ -3442,13 +3461,14 @@ def _fetch_bytes(
             try:
                 data, response = _native_fetch_bytes(current_segment.url, request_headers, request_timeout, limiter)
                 redirect_url = (
-                    _text_url_redirect_from_bytes(data, response.headers, base_url=current_segment.url)
+                    _text_url_redirect_from_bytes(data, response.headers, base_url=getattr(response, "url", current_segment.url))
                     if _segment_may_return_text_url_redirect(current_segment)
                     else None
                 )
                 if redirect_url:
                     if permit:
                         permit.success()
+                    base_headers = _handoff_headers(current_segment.url, redirect_url, base_headers, response)
                     current_segment = _follow_text_url_redirect(current_segment, redirect_url, redirect_chain)
                     continue
                 if (

@@ -67,6 +67,7 @@ from .delivery import (
 )
 from .diagnostics import DebugRecorder, activate, safe_log_text
 from .manifest_sources import manifest_json, merge_source_metadata, subtitle_source_identity, with_subtitle_sources
+from .network import network_get
 from .output_paths import render_episode_folder
 from .playback import Playback, normalize_live_record_limit
 from .secureio import atomic_write_bytes, atomic_write_text, locked_path, private_directory, private_file, safe_filename
@@ -785,6 +786,10 @@ class Engine:
         if callable(shutdown):
             shutdown()
 
+    def interrupt_live_capture(self) -> bool:
+        interrupt = getattr(self.downloader, "interrupt_live_capture", None)
+        return bool(callable(interrupt) and interrupt())
+
     # ------------------------------------------------------------------- keys
     def fetch_manifest(self, playback: Playback) -> bytes | None:
         if playback.inline_manifest:
@@ -794,7 +799,7 @@ class Engine:
         if not is_url(str(playback.manifest_url)):
             return source_path(str(playback.manifest_url)).read_bytes()
         proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
-        response = requests.get(playback.manifest_url, headers=playback.headers, proxies=proxies, timeout=30)
+        response = network_get(playback.manifest_url, headers=playback.headers, proxies=proxies, timeout=30)
         response.raise_for_status()
         return response.content
 
@@ -889,7 +894,7 @@ class Engine:
                 else:
                     headers["Range"] = f"bytes=0-{maximum_size - 1}"
                 try:
-                    with requests.get(
+                    with network_get(
                         segment.url,
                         headers=headers,
                         proxies=proxies,
@@ -954,7 +959,7 @@ class Engine:
                 else:
                     headers["Range"] = "bytes=0-65535"
                 try:
-                    response = requests.get(
+                    response = network_get(
                         initialization.url,
                         headers=headers,
                         proxies=proxies,
@@ -1003,7 +1008,7 @@ class Engine:
             else:
                 headers["Range"] = "bytes=0-65535"
             try:
-                with requests.get(
+                with network_get(
                     initialization.url,
                     headers=headers,
                     proxies=proxies,
@@ -1087,7 +1092,7 @@ class Engine:
                     # complete segment size in Content-Range.
                     headers["Range"] = "bytes=0-1048575"
                 try:
-                    with requests.get(
+                    with network_get(
                         segment.url,
                         headers=headers,
                         proxies=proxies,
@@ -1333,7 +1338,7 @@ class Engine:
             return payload.decode("utf-8-sig", errors="replace")
         proxies = {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
         try:
-            response = requests.get(url, headers=playback.headers, proxies=proxies, timeout=30)
+            response = network_get(url, headers=playback.headers, proxies=proxies, timeout=30)
             response.raise_for_status()
         except requests.RequestException as exc:
             raise CdmError(f"Could not fetch playlist: {exc}") from exc
@@ -3585,7 +3590,7 @@ class Engine:
                         raise ValueError("data attachment is invalid") from exc
                     mime = mime or header[5:].split(";", 1)[0]
                 elif parsed.scheme in {"http", "https"} and parsed.netloc:
-                    with requests.get(source, headers=dict(attachment.headers), proxies=(
+                    with network_get(source, headers=dict(attachment.headers), proxies=(
                         {"http": playback.proxy, "https": playback.proxy} if playback.proxy else None
                     ), timeout=(5.0, 30.0), stream=True) as response:
                         response.raise_for_status()
@@ -3642,9 +3647,8 @@ class Engine:
             raise ValueError("a delivery plan needs at least one selected track")
         overrides = _delivery_overrides(playback.extra_args)
         debug = bool(settings.get("debug", False)) and _service_debug_logging_enabled(service)
-        download_proxy = (
-            playback.proxy if settings.get("proxy_downloads", True) else None
-        )
+        proxy_downloads = bool(settings.get("proxy_downloads", True))
+        download_proxy = playback.proxy if proxy_downloads else None
         direct_audio_no_probe = (
             playback.audio_only
             and playback.drm is None
@@ -3675,6 +3679,7 @@ class Engine:
             ParsePolicy(
                 headers=dict(playback.headers),
                 proxy=download_proxy,
+                use_system_proxy=proxy_downloads,
                 details=hls_details,
                 no_probe=direct_audio_no_probe,
                 base_url=playback.manifest_base_url,
@@ -4079,7 +4084,8 @@ class Engine:
         # is for a slow proxy in front of an open CDN, not for a geofenced manifest.
         # Everything above stays on the proxy: the manifest this engine reads for DRM
         # init data, the playlists, and the service's licence request.
-        download_proxy = playback.proxy if settings.get("proxy_downloads", True) else None
+        proxy_downloads = bool(settings.get("proxy_downloads", True))
+        download_proxy = playback.proxy if proxy_downloads else None
         direct_audio_no_probe = (
             playback.audio_only
             and playback.drm is None
@@ -4120,6 +4126,7 @@ class Engine:
             input=self.playback_input(playback),
             headers=dict(playback.headers),
             proxy=download_proxy,
+            use_system_proxy=proxy_downloads,
             base_url=playback.manifest_base_url,
             save_name=playback.save_name,
             save_dir=str(

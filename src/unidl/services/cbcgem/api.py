@@ -5,15 +5,20 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from mimetypes import guess_type
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 
 import requests
+
+from ...core.attachments import Attachment
+from ...core.chapters import Chapter
 
 BASE_URL = "https://services.radio-canada.ca"
 USER_AGENT = (
@@ -25,12 +30,26 @@ MEDIA_INDEX_PATH = "/media/meta/v1/index.ashx"
 MEDIA_VALIDATION_PATH = "/media/validation/v2"
 LIVE_APP_CODE = "medianetlive"
 
-# Seconds shaved off expires_in so we refresh before the server rejects us.
 _EXPIRY_SKEW = 3600
 _REQUEST_TIMEOUT = 30
 _LICENSE_TIMEOUT = 30
+_DEVICE_TIMEOUT = 10
+_DEVICE_CLIENT_ID = "65824cc0-e69f-4298-afc8-1dad7edec765"
+_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+_AUTH_HOST = "login.cbc.radio-canada.ca"
+_TV_ACTIVATION_PAGE = "https://gem.cbc.ca/androidtv"
+_TV_ACTIVATION_QUERY = {"azpcontext": "cbcgem", "ui_locales": "en", "fromApp": "ott-androidtv-app"}
 
 _TITLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SHOW_SELECTION_RE = re.compile(r"s\d+(?:e\d+)?", re.I)
+_CATALOG_ROUTES = {
+    "section": "section",
+    "collection": "collection",
+    "category": "category",
+    "categorie": "category",
+    "catégorie": "category",
+}
+_LIVE_ROUTES = {"live-event", "liveevent", "evenement-en-direct", "événement-en-direct"}
 _GEM_HOST = re.compile(r"(?:^|\.)gem\.cbc\.ca$", re.I)
 _TOUTV_HOST = re.compile(r"(?:^|\.)ici\.tou\.tv$", re.I)
 
@@ -45,25 +64,28 @@ class RadioCanadaAuthRequired(RadioCanadaError):
 
 def _jwt_expiry(token: str) -> int:
     try:
+        return int(_jwt_payload(token).get("exp") or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _jwt_payload(token: str) -> dict[str, Any]:
+    try:
         middle = str(token or "").split(".")[1]
         payload = json.loads(
             base64.urlsafe_b64decode(middle + "=" * (-len(middle) % 4))
         )
-        return int(payload.get("exp") or 0) if isinstance(payload, dict) else 0
-    except (IndexError, ValueError, TypeError, json.JSONDecodeError):
-        return 0
+        return payload if isinstance(payload, dict) else {}
+    except (IndexError, ValueError, TypeError):
+        return {}
 
-
-# --------------------------------------------------------------------------- tenants
 
 
 @dataclass(frozen=True)
 class Tenant:
-    """CBC Gem Radio-Canada OTT identity."""
 
     key: str
     label: str
-    client_id: str
     token_file: str
     settings_path: str
     profile_path: str
@@ -83,7 +105,6 @@ class Tenant:
 GEM = Tenant(
     key="gem",
     label="CBC Gem",
-    client_id="fc05b0ee-3865-4400-a3cc-3da82c330c23",
     token_file="cbc_token.json",
     settings_path="/ott/catalog/v1/gem/settings",
     profile_path="/ott/subscription/v2/gem/Subscriber/profile",
@@ -99,12 +120,9 @@ TENANTS: dict[str, Tenant] = {
 }
 
 
-# --------------------------------------------------------------------------- session
-
-
 @dataclass
 class SessionState:
-    """ROPC tokens plus optional claims token for media calls."""
+    """Session tokens plus an optional claims token for media calls."""
 
     access_token: str = ""
     refresh_token: str = ""
@@ -113,10 +131,10 @@ class SessionState:
     claims_expiration_time: float = 0.0
     username: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    tv_code: bool = False
 
     @classmethod
     def from_cache(cls, data: dict[str, Any] | None) -> SessionState:
-        """Accept native fields or the legacy ``data`` + ``expiration_time`` envelope."""
         raw = data if isinstance(data, dict) else {}
         nested = raw.get("data")
         if isinstance(nested, dict) and (
@@ -138,7 +156,6 @@ class SessionState:
             try:
                 expiration = float(raw_expiration)
             except (TypeError, ValueError):
-                # ISO and malformed values are not accepted as live tokens.
                 expiration = 0.0
             if expiration == 0 and raw.get("expires_in"):
                 try:
@@ -166,10 +183,10 @@ class SessionState:
             claims_expiration_time=claims_expiration,
             username=str(raw.get("username") or body.get("username") or ""),
             raw=dict(body) if body else {},
+            tv_code=raw.get("auth_method") == "tv_code",
         )
 
     def to_cache(self) -> dict[str, Any]:
-        """Write the legacy envelope so older tools and migrations stay compatible."""
         body = dict(self.raw) if self.raw else {}
         if self.access_token:
             body["access_token"] = self.access_token
@@ -181,6 +198,8 @@ class SessionState:
         }
         if self.username:
             out["username"] = self.username
+        if self.tv_code:
+            out["auth_method"] = "tv_code"
         if self.claims_token:
             out["claims_token"] = self.claims_token
             if self.claims_expiration_time:
@@ -191,40 +210,69 @@ class SessionState:
         return bool(self.access_token) and self.expiration_time > (time.time() + leeway)
 
     def refreshable(self) -> bool:
-        return bool(self.refresh_token)
+        return self.tv_code and bool(self.refresh_token)
 
     def claims_usable(self, leeway: int = 60) -> bool:
         if not self.claims_token:
             return False
-        # Older caches may contain an opaque claims token. Keep accepting it and
-        # let the claims-specific 401 recovery below establish a dated token.
         return not self.claims_expiration_time or self.claims_expiration_time > (
             time.time() + leeway
         )
 
     def apply_grant(self, grant: dict[str, Any]) -> None:
+        id_token = self.raw.get("id_token")
         self.raw = dict(grant)
+        if id_token and not self.raw.get("id_token"):
+            self.raw["id_token"] = id_token
         self.access_token = str(grant.get("access_token") or "")
         self.refresh_token = str(grant.get("refresh_token") or self.refresh_token)
         try:
             expires_in = int(grant.get("expires_in") or 0)
         except (TypeError, ValueError):
             expires_in = 0
-        # Match legacy: refresh an hour early when the token lives longer than that.
-        skew = _EXPIRY_SKEW if expires_in > _EXPIRY_SKEW else max(60, expires_in // 10)
+        skew = min(_EXPIRY_SKEW, expires_in // 10)
         self.expiration_time = time.time() + max(0, expires_in - skew)
         self.claims_token = ""
         self.claims_expiration_time = 0.0
 
 
-# --------------------------------------------------------------------------- catalogue models
+@dataclass(frozen=True)
+class DeviceAuthConfig:
+    scope: str
+    tenant_id: str
+    login_policy: str
+    policies: tuple[str, ...]
+
+    @property
+    def device_url(self) -> str:
+        return f"https://{_AUTH_HOST}/oauth2/v2.0/device"
+
+    def refresh_url(self, id_token: str) -> str:
+        # The SDK refreshes against the policy named in the device grant's ID token.
+        claims = _jwt_payload(id_token)
+        policy = str(claims.get("acr") or claims.get("tfp") or "")
+        active = next((p for p in self.policies if p.casefold() == policy.casefold()), self.login_policy)
+        return f"https://{_AUTH_HOST}/{self.tenant_id}/{active}/oauth2/v2.0/token"
+
+
+@dataclass
+class DeviceCode:
+    config: DeviceAuthConfig = field(repr=False)
+    device_code: str = field(repr=False)
+    user_code: str = field(repr=False)
+    verification_url: str
+    direct_url: str = field(repr=False)
+    expires_in: int
+    interval: int
+    expires_at: float
+    next_poll_at: float
 
 
 @dataclass(frozen=True)
 class ParsedInput:
     title_id: str
     tenant_hint: str | None = None  # "gem" | "toutv" | None
-    kind: str = "show"  # show | section | collection
+    kind: str = "show"  # show | section | collection | category | live
     selection: str = ""  # sXX / sXXeYY when a catalogue URL selects one item
 
 
@@ -239,6 +287,8 @@ class Episode:
     duration: float | None = None
     synopsis: str = ""
     cover_url: str = ""
+    attachments: tuple[Attachment, ...] = ()
+    selection: str = ""
 
     @property
     def label(self) -> str:
@@ -268,6 +318,7 @@ class MovieItem:
     duration: float | None = None
     synopsis: str = ""
     cover_url: str = ""
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def label(self) -> str:
@@ -290,11 +341,12 @@ class Show:
     synopsis: str = ""
     cover_url: str = ""
     external_url: str = ""
+    attachments: tuple[Attachment, ...] = ()
 
 
 @dataclass(frozen=True)
 class SearchHit:
-    kind: str  # show | season | media | section | collection
+    kind: str  # show, season, media, section, collection, category, live
     title: str
     url: str
     info_title: str = ""
@@ -302,11 +354,12 @@ class SearchHit:
     media_id: str = ""
     synopsis: str = ""
     cover_url: str = ""
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def show_id(self) -> str:
         parts = self.url.strip("/").split("/")
-        if self.kind in {"section", "collection"} and len(parts) > 1:
+        if self.kind in {"section", "collection", "category", "live"} and len(parts) > 1:
             return parts[1]
         return parts[0] if parts else ""
 
@@ -364,6 +417,8 @@ class LiveChannel:
     ends_at: datetime | None = None
     synopsis: str = ""
     cover_url: str = ""
+    attachments: tuple[Attachment, ...] = ()
+    event_slug: str = ""
 
     @property
     def label(self) -> str:
@@ -409,6 +464,8 @@ class Source:
     cover_url: str = ""
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    chapters: tuple[Chapter, ...] = ()
+    attachments: tuple[Attachment, ...] = ()
 
     def note(self) -> str:
         drm = "Widevine" if self.protected else "clear"
@@ -422,11 +479,7 @@ class Source:
         return " · ".join(bits)
 
 
-# --------------------------------------------------------------------------- parsing
-
-
 def parse_input(text: str, *, default_tenant: str | None = None) -> ParsedInput | None:
-    """Resolve a Gem / TOU.TV show, episode, section or collection URL."""
     raw = (text or "").strip()
     if not raw:
         return None
@@ -434,18 +487,22 @@ def parse_input(text: str, *, default_tenant: str | None = None) -> ParsedInput 
     tenant_hint = default_tenant
     if "://" in raw or raw.lower().startswith("www.") or "/" in raw:
         candidate = raw if "://" in raw else f"https://{raw}"
-        parsed = urlparse(candidate)
-        host = (parsed.hostname or "").lower()
-        if host:
-            if _GEM_HOST.search(host):
-                tenant_hint = "gem"
-            elif _TOUTV_HOST.search(host):
-                tenant_hint = "toutv"
-            else:
-                return None
+        try:
+            parsed = urlparse(candidate)
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return None
+        if not host or parsed.scheme not in {"http", "https"}:
+            return None
+        if _GEM_HOST.search(host):
+            tenant_hint = "gem"
+        elif _TOUTV_HOST.search(host):
+            tenant_hint = "toutv"
+        else:
+            return None
 
         path = (parsed.path or "").strip("/")
-        parts = [p for p in path.split("/") if p]
+        parts = [unquote(p) for p in path.split("/") if p]
         while parts and parts[0].lower() in {"en", "fr"}:
             parts.pop(0)
         if not parts:
@@ -453,20 +510,22 @@ def parse_input(text: str, *, default_tenant: str | None = None) -> ParsedInput 
 
         kind = "show"
         route = parts[0].lower()
-        if route in {"section", "collection"}:
-            kind = route
+        if route in _CATALOG_ROUTES:
+            kind = _CATALOG_ROUTES[route]
+            parts.pop(0)
+        elif route in _LIVE_ROUTES:
+            kind = "live"
             parts.pop(0)
         elif route in {"media", "show"}:
             parts.pop(0)
         if not parts:
             return None
 
-        # Catalogue URLs append a selected season or episode after the show slug.
-        title_id = parts[0].split("?")[0].split("#")[0]
+        title_id = parts[0]
         if not _TITLE_ID_RE.fullmatch(title_id):
             return None
-        selection = parts[1].split("?")[0].split("#")[0] if len(parts) > 1 else ""
-        if selection and not re.fullmatch(r"s\d+(?:e\d+)?", selection, re.I):
+        selection = parts[1] if len(parts) > 1 else ""
+        if kind != "show" or not _SHOW_SELECTION_RE.fullmatch(selection):
             selection = ""
         return ParsedInput(title_id, tenant_hint, kind, selection)
 
@@ -483,11 +542,13 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def _safe_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return number if number >= 0 else None
+    return number if 0 <= number and math.isfinite(number * 1000) else None
 
 
 def _metadata(item: dict[str, Any]) -> dict[str, Any]:
@@ -518,6 +579,106 @@ def _duration(item: dict[str, Any]) -> float | None:
     return _safe_float(metadata.get("duration") or item.get("duration"))
 
 
+def _artwork(value: Any, name: str, kind: str) -> Attachment | None:
+    if isinstance(value, dict):
+        value = value.get("url")
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            return None
+    except ValueError:
+        return None
+    mime = guess_type(parsed.path)[0]
+    return Attachment(url=url, name=name, kind=kind, mime_type=mime or "")
+
+
+def artwork_for(item: dict[str, Any]) -> tuple[Attachment, ...]:
+    images = item.get("images")
+    images = images if isinstance(images, dict) else {}
+    candidates = (
+        (images.get("card"), "Cover", "poster"),
+        (images.get("background"), "Background", "artwork"),
+        (images.get("logo"), "Title logo", "image"),
+        (images.get("thumbnail"), "Thumbnail", "thumbnail"),
+        (images.get("generic") or item.get("genericImage"), "Channel artwork", "artwork"),
+    )
+    return tuple(
+        attachment
+        for value, name, kind in candidates
+        if (attachment := _artwork(value, name, kind)) is not None
+    )
+
+
+def _selected_artwork(
+    attachments: tuple[Attachment, ...], cover_url: str, metas: dict[str, Any]
+) -> tuple[Attachment, ...]:
+    artwork: dict[str, Attachment] = {}
+    for item in attachments:
+        artwork.setdefault(item.url, item)
+    if cover := _artwork(cover_url, "Cover", "poster"):
+        artwork.setdefault(cover.url, cover)
+    for field_name in ("imagePlayerLargeA", "imagePlayerNormalC"):
+        if image := _artwork(metas.get(field_name), "Player artwork", "thumbnail"):
+            artwork.setdefault(image.url, image)
+            break
+    return tuple(artwork.values())
+
+
+def _index_duration(metas: dict[str, Any], fallback: float | None) -> float | None:
+    for value in (metas.get("length"), metas.get("Av-Duree"), fallback):
+        seconds = _safe_float(value)
+        if seconds:
+            return seconds
+    return None
+
+
+def chapters_from_metas(
+    metas: dict[str, Any], duration: float | None = None,
+) -> tuple[Chapter, ...]:
+    """Read the media index's comma-separated HH:MM:SS and seconds markers."""
+    duration = _index_duration(metas, duration)
+    limit = round(duration * 1000) if duration else None
+    starts: set[int] = set()
+    markers = metas.get("Chapitres")
+    if isinstance(markers, str):
+        for marker in markers.split(","):
+            match = re.fullmatch(
+                r"(\d{1,4}):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?",
+                marker.strip(),
+            )
+            if match is None:
+                continue
+            hours, minutes, seconds = map(int, match.groups()[:3])
+            milliseconds = int((match.group(4) or "").ljust(3, "0"))
+            start = (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
+            if start > 0 and (limit is None or start < limit):
+                starts.add(start)
+    credits = None
+    seconds = _safe_float(metas.get("CreditStartTime"))
+    if seconds:
+        start = round(seconds * 1000)
+        if start > 0 and (limit is None or start < limit):
+            credits = Chapter(start_ms=start, title="Credits", kind="credits")
+            starts.discard(start)
+    if starts:
+        chapters = [
+            Chapter(start_ms=start, title=f"Chapter {number:02d}")
+            for number, start in enumerate((0, *sorted(starts)), 1)
+        ]
+    elif credits:
+        chapters = [Chapter(start_ms=0, title="Main programme")]
+    else:
+        return ()
+    if credits:
+        chapters.append(credits)
+    return tuple(sorted(chapters, key=lambda chapter: chapter.start_ms))
+
+
 def _year(item: dict[str, Any]) -> str:
     metadata = _metadata(item)
     if metadata.get("productionYear"):
@@ -545,7 +706,6 @@ def _clean_episode_title(raw: str) -> str:
         left, right = text.split(".", 1)
         if left.strip().isdigit() or re.fullmatch(r"\d+", left.strip()):
             return right.strip() or text
-        # "S01E02. Name" style — keep the part after the first period when short.
         if re.fullmatch(r"[Ss]?\d+[Ee]\d+", left.strip()):
             return right.strip() or text
     return text
@@ -621,6 +781,7 @@ def show_from_payload(data: dict[str, Any], *, title_id: str) -> Show:
             duration=_duration(item),
             synopsis=str(item.get("description") or synopsis).strip(),
             cover_url=_image_url(item) or cover_url,
+            attachments=artwork_for(item),
         )
 
     extras: list[MovieItem] = []
@@ -665,6 +826,7 @@ def show_from_payload(data: dict[str, Any], *, title_id: str) -> Show:
             synopsis=synopsis,
             cover_url=cover_url,
             external_url=external_url,
+            attachments=artwork_for(data),
         )
 
     seasons: list[Season] = []
@@ -692,6 +854,8 @@ def show_from_payload(data: dict[str, Any], *, title_id: str) -> Show:
                     duration=_duration(item),
                     synopsis=str(item.get("description") or synopsis).strip(),
                     cover_url=_image_url(item) or cover_url,
+                    attachments=artwork_for(item),
+                    selection=_episode_selection(item.get("url")),
                 )
             )
         episodes.sort(key=lambda ep: (ep.number, ep.title))
@@ -708,6 +872,7 @@ def show_from_payload(data: dict[str, Any], *, title_id: str) -> Show:
         synopsis=synopsis,
         cover_url=cover_url,
         external_url=external_url,
+        attachments=artwork_for(data),
     )
 
 
@@ -721,8 +886,13 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _episode_selection(value: Any) -> str:
+    segment = str(value or "").partition("?")[0].rstrip("/").rsplit("/", 1)[-1].lower()
+    return segment if _SHOW_SELECTION_RE.fullmatch(segment) else ""
+
+
 def _live_channel(item: dict[str, Any], *, kind: str, feed_type: str = "") -> LiveChannel | None:
-    media_id = str(item.get("idMedia") or item.get("id") or "").strip()
+    media_id = str(item.get("idMedia") or item.get("formattedIdMedia") or item.get("id") or "").strip()
     if not media_id:
         return None
     programme = str(item.get("title") or "Live").strip() or "Live"
@@ -737,9 +907,9 @@ def _live_channel(item: dict[str, Any], *, kind: str, feed_type: str = "") -> Li
     permission = item.get("permission") if isinstance(item.get("permission"), dict) else {}
     tier = str(item.get("tier") or permission.get("tier") or "").strip()
     next_item = item.get("nextScheduleItem")
-    ends_at = None
+    ends_at = _parse_datetime(item.get("airDateEnd"))
     if isinstance(next_item, dict):
-        ends_at = _parse_datetime(next_item.get("airDate"))
+        ends_at = ends_at or _parse_datetime(next_item.get("airDate"))
         next_title = str(next_item.get("title") or "").strip()
         if next_title:
             detail = f"{detail} · Next: {next_title}" if detail else f"Next: {next_title}"
@@ -754,6 +924,8 @@ def _live_channel(item: dict[str, Any], *, kind: str, feed_type: str = "") -> Li
         ends_at=ends_at,
         synopsis=str(item.get("description") or "").strip(),
         cover_url=_image_url(item) or str(item.get("genericImage") or "").strip(),
+        attachments=artwork_for(item),
+        event_slug=str(item.get("url") or "").partition("?")[0].strip("/").rsplit("/", 1)[-1],
     )
 
 
@@ -800,9 +972,6 @@ def live_catalog_from_payload(data: dict[str, Any]) -> list[LiveCategory]:
                 )
             )
 
-    # ``liveFeeds`` is the web page's regional selector (label/value pairs), not
-    # a second channel list. ``freeTv.items`` already contains every selected
-    # region as a playable item, so consuming both would duplicate those feeds.
     free_tv = data.get("freeTv") if isinstance(data.get("freeTv"), dict) else {}
     add_category(free_tv, key="free-tv", kind="freeTv")
     for index, category in enumerate(data.get("streams") or []):
@@ -820,22 +989,25 @@ def live_catalog_from_payload(data: dict[str, Any]) -> list[LiveCategory]:
 
 
 def live_from_payload(data: dict[str, Any]) -> list[LiveChannel]:
-    """Compatibility flat view: unique entries from the synthetic All category."""
     categories = live_catalog_from_payload(data)
     return list(categories[0].channels) if categories else []
 
 
 def _catalog_hit(raw: dict[str, Any]) -> SearchHit | None:
     kind = str(raw.get("type") or "").strip().lower()
-    if kind not in {"show", "season", "media", "section", "collection"}:
+    if kind not in {"show", "season", "media", "section", "collection", "category", "live"}:
         return None
     original_url = str(raw.get("url") or "").strip().strip("/")
     parsed_url = urlparse(f"https://catalog.invalid/{original_url}")
     url = parsed_url.path.strip("/")
-    segments = url.split("/") if url else []
+    segments = [unquote(part) for part in url.split("/")] if url else []
+    if kind == "category" and len(segments) == 2 and _CATALOG_ROUTES.get(segments[0].lower()) == kind:
+        segments[0] = kind
+    if kind == "live" and len(segments) == 2 and segments[0].lower() in _LIVE_ROUTES:
+        segments[0] = "live-event"
     if not segments or not all(_TITLE_ID_RE.fullmatch(segment) for segment in segments):
         return None
-    if kind in {"section", "collection"}:
+    if kind in {"section", "collection", "category"}:
         if len(segments) != 2 or segments[0].lower() != kind:
             return None
     elif kind == "show" and len(segments) != 1:
@@ -847,16 +1019,21 @@ def _catalog_hit(raw: dict[str, Any]) -> SearchHit | None:
             return None
         if len(segments) == 2 and not re.fullmatch(r"s\d+e\d+", segments[1], re.I):
             return None
+    elif kind == "live" and not (
+        len(segments) == 1 or (len(segments) == 2 and segments[0] == "live-event")
+    ):
+        return None
     permission = raw.get("permission") if isinstance(raw.get("permission"), dict) else {}
     return SearchHit(
         kind=kind,
         title=str(raw.get("title") or url).strip() or url,
-        url=url,
+        url="/".join(segments),
         info_title=str(raw.get("infoTitle") or "").strip(),
         tier=str(raw.get("tier") or permission.get("tier") or "").strip(),
         media_id=str(raw.get("idMedia") or raw.get("formattedIdMedia") or "").strip(),
         synopsis=str(raw.get("description") or "").strip(),
         cover_url=_image_url(raw),
+        attachments=artwork_for(raw),
     )
 
 
@@ -887,7 +1064,7 @@ def catalog_from_payload(
         lineups = data.get("lineups")
         if isinstance(lineups, dict) and isinstance(lineups.get("results"), list):
             raw_lineups = [item for item in lineups["results"] if isinstance(item, dict)]
-    elif kind == "collection":
+    elif kind in {"collection", "category"}:
         for content in data.get("content") or []:
             if not isinstance(content, dict):
                 continue
@@ -926,11 +1103,7 @@ def catalog_from_payload(
     )
 
 
-# --------------------------------------------------------------------------- API client
-
-
 class RadioCanadaApi:
-    """HTTP client for CBC Gem."""
 
     def __init__(
         self,
@@ -1001,7 +1174,6 @@ class RadioCanadaApi:
                 req_headers["x-claims-token"] = self.state.claims_token
             response = send()
 
-        # Legacy accepted 426 (upgrade required) alongside 200 for some endpoints.
         if response.status_code not in (200, 426):
             raise RadioCanadaError(
                 f"{self.tenant.label} HTTP {response.status_code}: {response.text[:300]}"
@@ -1044,7 +1216,6 @@ class RadioCanadaApi:
         self.session.headers.pop("x-claims-token", None)
 
     def _recover_claims(self) -> None:
-        """Replace a refused claims token, once, without recursive 401 retries."""
 
         self._drop_claims_header()
         if self.state.usable(leeway=0):
@@ -1062,70 +1233,167 @@ class RadioCanadaApi:
             f"{self.tenant.label} claims token expired; sign in again"
         )
 
-    # ------------------------------------------------------------------- auth
 
-    def get_settings(self) -> tuple[str, str]:
-        data = self._request("GET", self.tenant.settings_path, params={"device": "web"})
+    def _device_settings(self) -> DeviceAuthConfig:
+        data = self._request("GET", self.tenant.settings_path, params={"device": "androidtv"})
         if not isinstance(data, dict):
             raise RadioCanadaError(f"{self.tenant.label} settings response is invalid")
         identity = data.get("identityManagement") if isinstance(data.get("identityManagement"), dict) else {}
-        ropc = identity.get("ropc") if isinstance(identity.get("ropc"), dict) else {}
-        auth_url = str(ropc.get("url") or "").strip()
-        scopes = str(ropc.get("scopes") or "").strip()
-        if not auth_url:
-            raise RadioCanadaError(f"{self.tenant.label} settings missing ROPC url")
-        return auth_url, scopes
+        device = identity.get("deviceAuthFlow")
+        pkce = identity.get("pkce")
+        audience = identity.get("ropc")
+        tenant = str(identity.get("tenant") or "").strip()
+        tenant_id = str(identity.get("tenantId") or "").strip()
+        app_id = str(audience.get("appId") or "").strip() if isinstance(audience, dict) else ""
+        policy = str(device.get("loginPolicyName") or "").strip() if isinstance(device, dict) else ""
+        base_scopes = str(identity.get("scopes") or "").split()
+        api_scopes = str(identity.get("apiScopes") or "").split()
+        if (
+            identity.get("tenantDomain") != _AUTH_HOST
+            or not all(re.fullmatch(r"[A-Za-z0-9_-]+", value) for value in (tenant, tenant_id, app_id, policy))
+            or not api_scopes
+        ):
+            raise RadioCanadaError(f"{self.tenant.label}: Android TV login configuration is incomplete")
+        policies = [policy]
+        fallback_policy = policy
+        for group in (device, pkce):
+            if isinstance(group, dict):
+                for key in ("loginPolicyName", "signupPolicyName"):
+                    name = str(group.get(key) or "").strip()
+                    if re.fullmatch(r"[A-Za-z0-9_-]+", name) and name not in policies:
+                        policies.append(name)
+                    if group is pkce and key == "loginPolicyName" and name in policies:
+                        fallback_policy = name
+        prefix = f"https://{tenant}.onmicrosoft.com/{app_id}/"
+        return DeviceAuthConfig(
+            " ".join([*base_scopes, *(prefix + scope for scope in api_scopes)]),
+            tenant_id,
+            fallback_policy,
+            tuple(policies),
+        )
 
-    def login(self, username: str, password: str) -> SessionState:
-        username = (username or "").strip()
-        password = password or ""
-        if not username or not password:
-            raise RadioCanadaAuthRequired(f"{self.tenant.label} email and password are required")
-        self._drop_claims_header()
-        auth_url, scopes = self.get_settings()
-        grant = self._request(
-            "POST",
-            auth_url,
-            data={
-                "client_id": self.tenant.client_id,
-                "grant_type": "password",
-                "username": username,
-                "password": password,
-                "scope": scopes,
+    def _device_post(self, url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        try:
+            response = self.session.post(
+                url, data=data, headers={"x-claims-token": None},
+                allow_redirects=False, timeout=_DEVICE_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise RadioCanadaError(f"{self.tenant.label}: TV code server connection failed") from exc
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        return response.status_code, payload if isinstance(payload, dict) else {}
+
+    def start_login(self) -> DeviceCode:
+        config = self._device_settings()
+        status, payload = self._device_post(
+            f"{config.device_url}/code",
+            {"client_id": _DEVICE_CLIENT_ID, "scope": config.scope},
+        )
+        if status != 200:
+            raise RadioCanadaError(f"{self.tenant.label}: could not request a TV code (HTTP {status})")
+        device_code = str(payload.get("device_code") or "").strip()
+        user_code = str(payload.get("user_code") or "").strip()
+        verification_url = str(payload.get("verification_uri") or "").strip()
+        expires_in = _safe_int(payload.get("expires_in"))
+        if not device_code or not user_code or expires_in <= 0 or not self._verification_url(verification_url):
+            raise RadioCanadaError(f"{self.tenant.label}: TV code response was incomplete")
+        direct_url = str(payload.get("verification_uri_complete") or "").strip()
+        now = time.monotonic()
+        interval = _safe_int(payload.get("interval"), 5)
+        if interval <= 0:
+            interval = 5
+        return DeviceCode(
+            config=config,
+            device_code=device_code,
+            user_code=user_code,
+            verification_url=_TV_ACTIVATION_PAGE,
+            direct_url=self._branded_verification_url(direct_url),
+            expires_in=expires_in,
+            interval=interval,
+            expires_at=now + expires_in,
+            next_poll_at=now + interval,
+        )
+
+    @staticmethod
+    def _verification_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            return parsed.scheme == "https" and parsed.netloc.casefold() == _AUTH_HOST
+        except ValueError:
+            return False
+
+    @classmethod
+    def _branded_verification_url(cls, url: str) -> str:
+        if not cls._verification_url(url):
+            return ""
+        parsed = urlparse(url)
+        pairs = [
+            (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key not in _TV_ACTIVATION_QUERY
+        ]
+        return parsed._replace(query=urlencode([*pairs, *_TV_ACTIVATION_QUERY.items()])).geturl()
+
+    def poll_login(self, code: DeviceCode) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if now >= code.expires_at:
+            raise RadioCanadaAuthRequired(f"{self.tenant.label}: TV code expired; request a new one")
+        if now < code.next_poll_at:
+            return None
+        code.next_poll_at = now + code.interval
+        status, payload = self._device_post(
+            f"{code.config.device_url}/token",
+            {
+                "client_id": _DEVICE_CLIENT_ID,
+                "scope": code.config.scope,
+                "device_code": code.device_code,
+                "grant_type": _DEVICE_GRANT,
             },
         )
-        if not isinstance(grant, dict) or not grant.get("access_token"):
-            raise RadioCanadaError(f"{self.tenant.label} login returned no access token")
+        error = payload.get("error")
+        if status == 200 and payload.get("access_token") and not error:
+            return payload
+        if error == "slow_down" or status == 429:
+            code.interval += 5
+            code.next_poll_at = time.monotonic() + code.interval
+            return None
+        if error == "authorization_pending":
+            return None
+        if error == "expired_token":
+            raise RadioCanadaAuthRequired(f"{self.tenant.label}: TV code expired; request a new one")
+        if error == "access_denied":
+            raise RadioCanadaAuthRequired(f"{self.tenant.label}: TV code approval was denied")
+        raise RadioCanadaError(f"{self.tenant.label}: TV code approval failed (HTTP {status})")
+
+    def complete_login(self, grant: dict[str, Any]) -> SessionState:
+        self.state = SessionState(tv_code=True)
         self.state.apply_grant(grant)
-        self.state.username = username
         self._refresh_claims()
         self._save()
         return self.state
 
     def refresh(self) -> SessionState:
-        if not self.state.refresh_token:
-            raise RadioCanadaAuthRequired(f"{self.tenant.label} has no refresh token")
-        # A stale session-wide header must not poison settings, OAuth or profile.
+        if not self.state.refreshable():
+            raise RadioCanadaAuthRequired(f"{self.tenant.label}: open Sign in to pair with a TV code")
         self._drop_claims_header()
-        auth_url, scopes = self.get_settings()
-        try:
-            grant = self._request(
-                "POST",
-                auth_url,
-                data={
-                    "client_id": self.tenant.client_id,
-                    "grant_type": "refresh_token",
-                    "refresh_token": self.state.refresh_token,
-                    "scope": scopes,
-                },
-            )
-        except RadioCanadaError as exc:
+        config = self._device_settings()
+        status, grant = self._device_post(
+            config.refresh_url(str(self.state.raw.get("id_token") or "")),
+            {
+                "client_id": _DEVICE_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": self.state.refresh_token,
+                "scope": config.scope,
+            },
+        )
+        if status != 200 or not grant.get("access_token") or grant.get("error"):
             raise RadioCanadaAuthRequired(
-                f"{self.tenant.label} token refresh failed: {exc}"
-            ) from exc
-        if not isinstance(grant, dict) or not grant.get("access_token"):
-            raise RadioCanadaAuthRequired(f"{self.tenant.label} refresh returned no access token")
+                f"{self.tenant.label}: TV session refresh failed (HTTP {status}); sign in again with a TV code"
+            )
         self.state.apply_grant(grant)
+        self._save()
         self._refresh_claims()
         self._save()
         return self.state
@@ -1151,12 +1419,7 @@ class RadioCanadaApi:
         self.session.headers["x-claims-token"] = claims
         return claims
 
-    def ensure_session(
-        self,
-        *,
-        username: str | None = None,
-        password: str | None = None,
-    ) -> SessionState:
+    def ensure_session(self) -> SessionState:
         if self.state.usable():
             if not self.state.claims_usable():
                 self._refresh_claims()
@@ -1165,28 +1428,46 @@ class RadioCanadaApi:
                 self.session.headers["x-claims-token"] = self.state.claims_token
             return self.state
         if self.state.refreshable():
-            try:
-                return self.refresh()
-            except RadioCanadaError:
-                if not username or not password:
-                    raise
-        if username and password:
-            return self.login(username, password)
+            return self.refresh()
         raise RadioCanadaAuthRequired(
-            f"not signed in to {self.tenant.label} - open Sign in or set credentials"
+            f"not signed in to {self.tenant.label} - open Sign in to pair with a TV code"
         )
 
-    # --------------------------------------------------------------- catalogue
 
     def show(self, title_id: str) -> Show:
+        slug, _, selection = title_id.partition("/")
+        if not _TITLE_ID_RE.fullmatch(slug) or (selection and not _SHOW_SELECTION_RE.fullmatch(selection)):
+            raise RadioCanadaError(f"{self.tenant.label}: invalid programme path")
+        path = self.tenant.show_url(slug)
+        if selection:
+            path = f"{path}/{selection.lower()}"
         data = self._request(
             "GET",
-            self.tenant.show_url(title_id),
+            path,
             params={"device": "web"},
         )
         if not isinstance(data, dict):
             raise RadioCanadaError(f"{self.tenant.label} show response is invalid")
-        return show_from_payload(data, title_id=title_id)
+        return show_from_payload(data, title_id=slug)
+
+    def live_event(self, event_id: str) -> LiveChannel:
+        if not _TITLE_ID_RE.fullmatch(event_id):
+            raise RadioCanadaError(f"{self.tenant.label}: invalid live event")
+        path = f"/ott/catalog/v2/{self.tenant.key}/liveevent"
+        if not event_id.isdecimal():
+            for channel in self.live_channels():
+                if channel.event_slug.casefold() == event_id.casefold():
+                    return channel
+            redirect = self._request("GET", f"{path}/{event_id}/resolve", params={"device": "web"})
+            event_id = str(redirect.get("internalId") or "") if isinstance(redirect, dict) else ""
+            if not re.fullmatch(r"[0-9]+", event_id):
+                raise RadioCanadaError(f"{self.tenant.label}: live event could not be resolved")
+        data = self._request("GET", f"{path}/{event_id}", params={"device": "web"})
+        event = data.get("event") if isinstance(data, dict) else None
+        channel = _live_channel(event, kind="stream") if isinstance(event, dict) else None
+        if channel is None:
+            raise RadioCanadaError(f"{self.tenant.label}: live event has no playable feed")
+        return channel
 
     def live_channels(self) -> list[LiveChannel]:
         categories = self.live_catalog()
@@ -1205,7 +1486,7 @@ class RadioCanadaApi:
     def catalog(self, kind: str, catalog_id: str) -> CatalogPage:
         wanted_kind = str(kind or "").strip().lower()
         wanted_id = str(catalog_id or "").strip()
-        if wanted_kind not in {"section", "collection"} or not _TITLE_ID_RE.fullmatch(wanted_id):
+        if wanted_kind not in {"section", "collection", "category"} or not _TITLE_ID_RE.fullmatch(wanted_id):
             raise RadioCanadaError(f"{self.tenant.label}: invalid catalogue route")
         data = self._request(
             "GET",
@@ -1251,8 +1532,6 @@ class RadioCanadaApi:
             page += 1
         return SearchResult(hits, total or len(hits))
 
-    # ---------------------------------------------------------------- playback
-
     def stream(
         self,
         media_id: str,
@@ -1271,15 +1550,13 @@ class RadioCanadaApi:
         ends_at: datetime | None = None,
         app_code: str | None = None,
         is_live: bool = False,
-        username: str | None = None,
-        password: str | None = None,
+        fetch_chapters: bool = False,
+        fetch_attachments: bool = False,
+        attachments: tuple[Attachment, ...] = (),
     ) -> Source:
         code = app_code or (LIVE_APP_CODE if is_live else self.tenant.app_code)
-        # The legacy client intentionally allowed public linear playback without
-        # an account. LiveToVod still arrives with ``is_live=False`` and remains
-        # authenticated even though it uses the same appCode.
         if not (is_live and code == LIVE_APP_CODE):
-            self.ensure_session(username=username, password=password)
+            self.ensure_session()
         index = self._request(
             "GET",
             MEDIA_INDEX_PATH,
@@ -1367,11 +1644,13 @@ class RadioCanadaApi:
             is_live=is_live,
             app_code=code,
             media_type=media_type,
-            duration=duration,
+            duration=duration if is_live else _index_duration(metas, duration),
             synopsis=synopsis,
             cover_url=cover_url,
             starts_at=starts_at,
             ends_at=ends_at,
+            chapters=chapters_from_metas(metas, duration) if fetch_chapters and not is_live else (),
+            attachments=_selected_artwork(attachments, cover_url, metas) if fetch_attachments else (),
         )
 
     def widevine_license(

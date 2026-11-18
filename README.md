@@ -205,7 +205,9 @@ recording and use Stop/Back/Esc to finish it.
 
 ## Configuration and data
 
-`unidl.yaml` is the static configuration surface. Relative paths are resolved
+`unidl.yaml` is the local configuration surface. Copy `unidl.example.yaml` to
+`unidl.yaml` if you want a starter template. Keep the working file out of Git.
+Relative paths are resolved
 from the directory containing that file, so a checkout can be moved safely.
 Interactive preferences are stored in `settings.json` under `paths.home`.
 Credentials, cookies, tokens, CDMs, vaults, logs, command files and exports are

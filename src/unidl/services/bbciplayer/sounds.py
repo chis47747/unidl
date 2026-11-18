@@ -1,9 +1,4 @@
-"""BBC Sounds catalogue and clear audio playback.
-
-Sounds remains a different catalogue from iPlayer television: RMS endpoints,
-no DRM and no video. The registered service is BBC iPlayer; this module is the
-audio client used for `/sounds/` URLs, live radio, and Sounds search hits.
-"""
+"""BBC Sounds catalogue and clear audio playback."""
 
 from __future__ import annotations
 
@@ -43,7 +38,6 @@ class AudioSource:
     url: str
     bitrate: int = 0
     encoding: str = "AAC"
-    #: a progressive MP3 file rather than a manifest, which needs no re-encoding
     direct_file: bool = False
 
     @property
@@ -53,7 +47,6 @@ class AudioSource:
 
 @dataclass
 class SoundsItem:
-    """A programme episode or a live station, flattened out of the API payload."""
 
     id: str
     programme: str
@@ -132,14 +125,11 @@ def parse_input(text: str) -> ParsedInput | None:
         return None
 
     if _PID.fullmatch(raw):
-        # a bare pid is ambiguous; the episode endpoint is the common case and
-        # fails cleanly, at which point the caller can try it as a container
         return ParsedInput("episode", raw)
     return None
 
 
 def is_sounds_target(text: str) -> bool:
-    """True when the input is explicitly a Sounds URL or a ``live:`` station id."""
     raw = (text or "").strip()
     if not raw:
         return False
@@ -160,7 +150,6 @@ class SoundsApi:
         if proxy:
             self.session.proxies.update({"http": proxy, "https": proxy})
 
-    # ------------------------------------------------------------------ fetch
     def _json(self, url: str, **kwargs: Any) -> dict:
         try:
             response = self.session.get(url, timeout=TIMEOUT, **kwargs)
@@ -177,7 +166,6 @@ class SoundsApi:
         if module_id is not None:
             modules = [module for module in modules if module.get("id") == module_id]
         else:
-            # the play area first, then whatever else the page carries
             modules = sorted(modules, key=lambda module: module.get("id") != "aod_play_area")
         found = []
         for module in modules:
@@ -186,7 +174,6 @@ class SoundsApi:
                     found.append(item)
         return found
 
-    # --------------------------------------------------------------- catalogue
     def episode(self, pid: str) -> SoundsItem:
         items = self._playables(self._json(ENDPOINTS["episode"].format(pid=pid)))
         if not items:
@@ -235,13 +222,7 @@ class SoundsApi:
             self._item(item, live=True) for item in self._playables(payload, module_id="listen_live") if item.get("id")
         ]
 
-    # ---------------------------------------------------------------- playback
     def source_for(self, item: SoundsItem) -> AudioSource:
-        """The best stream for an episode.
-
-        A progressive download is preferred where the API offers one: it is
-        already an MP3, so taking it avoids a re-encode and whatever that costs.
-        """
         url, bitrate = self._download_variant(item.raw)
         if url:
             return AudioSource(url=url, bitrate=bitrate, encoding="MP3", direct_file=True)
@@ -266,7 +247,6 @@ class SoundsApi:
             raise SoundsError("BBC Sounds returned no playable live stream")
         return source
 
-    # ------------------------------------------------------------------ shapes
     def _item(self, raw: dict, *, live: bool = False) -> SoundsItem:
         titles = raw.get("titles") or {}
         network = raw.get("network") or {}
@@ -378,11 +358,6 @@ class SoundsApi:
 
     @staticmethod
     def _best_connection(media: list[dict] | None) -> AudioSource | None:
-        """Highest bitrate audio, over HTTPS, preferring HLS.
-
-        The media selector returns video entries too on some mediasets, so the
-        kind is filtered rather than assumed.
-        """
 
         def bitrate_of(entry: dict) -> int:
             try:

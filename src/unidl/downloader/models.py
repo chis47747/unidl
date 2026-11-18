@@ -22,6 +22,9 @@ class SegmentInfo:
     discontinuity_after: bool = False
     timeline_time: int | None = None
     timeline_presentation_time: float | None = None
+    # Internal: a URL handoff from a different origin must not regain the
+    # original request's credentials when a range is later fetched directly.
+    restrict_request_headers: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {

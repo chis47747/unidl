@@ -36,10 +36,17 @@ current ANSI progress display because `console_progress` defaults to enabled.
 
 The TUI exposes a stateful **Pause / Resume** control that holds the same
 delivery job: workers wait between segments or live refreshes, the screen stays
-put, and Resume continues. Back, the first Quit and skip still signal the Core
-cancellation token. Resume on a finished/cancelled row still retries from
-verified parts. The TUI never types into a CLI prompt to achieve either
-operation.
+put, and Resume continues. Back on an active VOD cancels delivery and returns
+one page; Skip cancels only that title. Resume can reuse verified parts.
+Back during live capture interrupts the next read, then finishes the output
+from completed batches before returning one page.
+
+Service requests made through `ctx.session()`, Core preparation and native
+delivery can interrupt stalled socket reads on cancellation. Services with
+their own transport should use bounded timeouts and a cancellation mechanism;
+leaving a page cannot interrupt arbitrary third-party synchronous code.
+Confirmed Quit in the terminal app gives workers a bounded cleanup window;
+if they do not exit, UniDL restores the terminal and stops the process.
 
 Several provider profiles can still produce one native delivery plan. A service
 opts in with `Playback.merge_manifests` and supplies fully authorized variants

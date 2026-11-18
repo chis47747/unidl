@@ -7,13 +7,13 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
-from .embedding import current_download_runtime
+from .embedding import DownloaderThreadPoolExecutor, current_download_runtime
 from .http_client import HttpClientError, get_global_http_client
 from .loader import DEFAULT_USER_AGENT
 from .models import SegmentInfo, StreamInfo
@@ -465,7 +465,7 @@ def download_sabr_ump_dvr_stream(
                 fetch_and_write_missing_head()
         else:
             next_fetch_sequence = pending_sequence
-            executor = ThreadPoolExecutor(max_workers=parallel_batches)
+            executor = DownloaderThreadPoolExecutor(max_workers=parallel_batches)
             inflight: dict[Any, tuple[int, int]] = {}
 
             def submit_more() -> None:

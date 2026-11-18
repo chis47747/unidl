@@ -373,26 +373,27 @@ def _folder_items(config) -> list[Item]:
 
 
 def _compiled_service_items() -> list[Item]:
-    """Report compiled-only services that could not load on this runtime."""
+    """Report unavailable extensions without stopping startup."""
 
-    try:
-        from ..services import compiled_service_errors
+    from ..services import compiled_service_errors, service_load_errors
 
-        failures = compiled_service_errors()
-    except (ImportError, AttributeError):
-        failures = {}
+    failures = {service_id: (reason, False) for service_id, reason in service_load_errors().items()}
+    failures.update({service_id: (reason, True) for service_id, reason in compiled_service_errors().items()})
     return [
         Item(
             group="assets",
-            label=f"Compiled service · {service_id}",
+            label=f"{'Compiled service' if compiled else 'Service'} · {service_id}",
             ok=False,
             detail=reason,
-            hint="Install the service package built for this Python ABI and platform",
-            without="that service's compiled implementation",
+            hint=(
+                "Install the service package built for this Python ABI and platform"
+                if compiled else "Check the service package, service.toml and its optional dependencies"
+            ),
+            without="that service",
             needed_by=(service_id,),
             level=ENHANCEMENT,
         )
-        for service_id, reason in sorted(failures.items())
+        for service_id, (reason, compiled) in sorted(failures.items())
     ]
 
 

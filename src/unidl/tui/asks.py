@@ -770,7 +770,10 @@ class TextWidget(ManualStep, AskWidget):
         )
 
     def on_mount(self) -> None:
-        self.query_one(Input).focus()
+        # Fast navigation can remove the field before the mount callback runs.
+        field = next(iter(self.query(Input)), None)
+        if field is not None:
+            field.focus()
 
     def action_open_link(self) -> None:
         opener = getattr(self.screen, "open_manual_link", None)

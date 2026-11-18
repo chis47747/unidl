@@ -23,11 +23,14 @@ offline; it never downloads or executes an update automatically.
    exist yet, an account-scoped token is needed for the first upload. After the
    first release, rotate it and create a project-scoped token for subsequent
    releases.
-2. Build and validate from the checkout:
+2. Create the version tag from the intended commit, then build and validate
+   from that tag. The build helper exports only the tag's public inputs into
+   a clean directory and checks the wheel and source archive before copying
+   them to the output directory:
 
    ~~~console
-   uv build --clear
-   uvx --from twine twine check dist/*
+   python tools/build_public_release.py vX.Y.Z --out-dir dist/vX.Y.Z
+   uvx --from twine twine check dist/vX.Y.Z/*
    ~~~
 
 3. Provide the token only through the current shell environment, never in a
@@ -36,7 +39,7 @@ offline; it never downloads or executes an update automatically.
    ~~~console
    read -r -s UV_PUBLISH_TOKEN
    export UV_PUBLISH_TOKEN
-   uv publish dist/*
+   uv publish dist/vX.Y.Z/*
    unset UV_PUBLISH_TOKEN
    ~~~
 

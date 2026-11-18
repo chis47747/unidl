@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.6.7] - 2026-11-18
+
+### Shutdown and interface
+
+- Fixed terminal exit leaving UniDL running when downloads or service requests were stalled. Interrupted active reads during cancellation and gave workers a bounded cleanup window.
+- Fixed a crash when an input was removed before it received focus.
+- Isolated missing dependencies and broken manifests from application startup. Prevented damaged compiled services from falling back to adjacent source files.
+
+### Download networking
+
+- Made native downloads use the configured proxy and connect directly when download proxying was disabled.
+- Isolated connection pools per task so finishing one download no longer interrupted another.
+- Dropped credentials and custom sensitive headers on cross-origin redirects while retaining standard headers such as Range.
+
+### Services
+
+- Added 7plus, 9Now, and ICI TOU.TV to the public release.
+- Updated BBC iPlayer and CBC Gem sign-in, browsing, and playback handling.
+
+### Packaging
+
+- Built and audited the wheel and source distribution from an exact Git release tag.
+- Kept the working configuration out of Git and packages and added a separate `unidl.example.yaml`.
+
 ## [2.6.6] - 2026-11-18
 
 ### Embedded captions

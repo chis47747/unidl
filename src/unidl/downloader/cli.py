@@ -84,6 +84,7 @@ from .embedding import (
     DownloadHooks,
     DownloadMessage,
     DownloadProgress,
+    DownloadRuntime,
     LiveKeyProvider,
     LiveKeyRequest,
     LiveRecordingStopped,
@@ -831,7 +832,8 @@ def _list_impl(args: argparse.Namespace) -> int:
 
 def _download(args: argparse.Namespace) -> int:
     """Run one delivery and always settle its staged work directory."""
-    with _proxy_scope(args), contextlib.ExitStack() as stack:
+    runtime = current_download_runtime() or DownloadRuntime()
+    with runtime.activate(), _proxy_scope(args), contextlib.ExitStack() as stack:
         args._unidown_cache_stack = stack
         try:
             result = _download_impl(args)
@@ -5407,6 +5409,21 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
         panel.enabled = False
     progress_display = panel.progress_for_stream if panel.enabled else (_silent_live_progress if len(live_streams) > 1 else None)
     progress_callback = _embedding_live_progress(args, progress_display)
+    runtime = current_download_runtime()
+    stop_capture = _embedding_recording_stop_callback(args)
+
+    def delivery_sink(sink):
+        if runtime is None or sink is None:
+            return sink
+
+        def emit(batch):
+            # Pipe/mux subprocesses belong to the delivery, not the capture
+            # transport. Back must not kill the writer for completed batches.
+            with runtime.bind():
+                sink(batch)
+
+        return emit
+
     options = LiveRecordOptions(
         limit_seconds=limit_seconds,
         wait_seconds=args.live_wait_time,
@@ -5425,9 +5442,9 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
         progress=progress_callback,
         cancel_requested=_embedding_cancel_callback(args),
         pause_requested=_embedding_pause_callback(args),
-        stop_recording_requested=_embedding_recording_stop_callback(args),
-        segment_sink=pipe_session.write_batch if pipe_session else None,
-        group_segment_sink=pipe_session.write_group if pipe_session else None,
+        stop_recording_requested=stop_capture,
+        segment_sink=delivery_sink(pipe_session.write_batch if pipe_session else None),
+        group_segment_sink=delivery_sink(pipe_session.write_group if pipe_session else None),
         segment_key_observer=(
             None
             if args.no_decrypt
@@ -5450,25 +5467,25 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
     try:
         track_name_total = 2 if pipe_session and len(live_streams) == 1 else len(live_streams)
         names = [_track_save_name(args.save_name, args.save_pattern, stream, offset, track_name_total) for offset, stream in enumerate(live_streams, start=1)]
-        if len(live_streams) > 1:
-            group_results = record_live_stream_group(
-                live_streams,
-                output_dir,
-                names,
-                headers,
-                options,
-            )
-            results = list(enumerate(group_results, start=1))
-        else:
-            for offset, stream in enumerate(live_streams, start=1):
-                name = names[offset - 1]
-                results.append((offset, record_live_stream(stream, output_dir, name, headers, options)))
+        capture = runtime.live_capture(stop_capture) if runtime is not None and stop_capture else contextlib.nullcontext()
+        with capture:
+            if len(live_streams) > 1:
+                group_results = record_live_stream_group(live_streams, output_dir, names, headers, options)
+                results = list(enumerate(group_results, start=1))
+            else:
+                for offset, stream in enumerate(live_streams, start=1):
+                    name = names[offset - 1]
+                    results.append((offset, record_live_stream(stream, output_dir, name, headers, options)))
     finally:
         panel.close()
         _set_active_live_progress_panel(previous_progress_panel)
 
+    if stop_capture is not None and stop_capture() and not any(result.segments_count for _, result in results):
+        raise DownloadCancelled("recording stopped before the first complete batch")
     tracks: list[_DownloadedTrack] = []
     for offset, result in sorted(results, key=lambda item: item[0]):
+        if not result.segments_count and stop_capture is not None and stop_capture():
+            continue  # Back before the first complete batch has nothing to mux.
         current_path = result.path
         track_file_skipped = _live_pipe_track_file_skipped(pipe_session, result.stream, args) and not current_path.exists()
         if _is_sabr_stream(result.stream):

@@ -11,9 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import BinaryIO
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.request import getproxies, proxy_bypass
 
 from ..core.diagnostics import current_recorder
-from .embedding import current_download_runtime
+from ..core.network import NetworkCancellation, SocketLease, network_checkpoint
+from .embedding import current_download_runtime, current_proxy_policy
 
 try:  # Optional fast path for environments that ship httpx with HTTP/2 support.
     import httpx as _httpx
@@ -49,12 +51,44 @@ class _Origin:
     port: int
 
 
+_REDIRECT_HEADERS = frozenset({"accept", "accept-encoding", "accept-language", "user-agent", "range", "if-range"})
+
+
+def redirect_headers(
+    source: str, target: str, headers: dict[str, str], *, crossed_origin: bool = False,
+) -> dict[str, str]:
+    """Carry only portable headers if a redirect leaves the trusted origin."""
+    if not crossed_origin and same_origin(source, target):
+        return dict(headers)
+    return {name: value for name, value in headers.items() if name.lower() in _REDIRECT_HEADERS}
+
+
+def same_origin(source: str, target: str) -> bool:
+    return _origin_from_url(source) == _origin_from_url(target)
+
+
+def _request_proxy(url: str) -> str | None:
+    explicit, use_system = current_proxy_policy()
+    if explicit:
+        return explicit
+    if not use_system:
+        return None
+    parsed = urlsplit(url)
+    proxies = getproxies()
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    if not proxies or proxy_bypass(host):
+        return None
+    proxy = proxies.get(parsed.scheme) or proxies.get("all")
+    return f"http://{proxy}" if proxy and "://" not in proxy else proxy
+
+
 class HttpResponse:
-    def __init__(self, client: NativeHttpClient, origin: _Origin, connection: http.client.HTTPConnection, response: http.client.HTTPResponse, url: str):
+    def __init__(self, client: NativeHttpClient, origin: _Origin, connection: http.client.HTTPConnection, response: http.client.HTTPResponse, url: str, sock: socket.socket):
         self._client = client
         self._origin = origin
         self._connection = connection
         self._response = response
+        self._socket = sock
         self.url = url
         self.status = response.status
         self.reason = response.reason
@@ -68,9 +102,10 @@ class HttpResponse:
         if set_cookies:
             headers["Set-Cookie"] = "\n".join(set_cookies)
         self.headers = headers
+        self.crossed_origin = False
         self._closed = False
         self._eof = response.length == 0 or response.status in {204, 304}
-        self._reusable = (response.getheader("Connection") or "").lower() != "close"
+        self._reusable = not response.will_close
 
     def __enter__(self) -> HttpResponse:
         return self
@@ -85,7 +120,9 @@ class HttpResponse:
     def read(self, size: int = -1) -> bytes:
         if self._closed:
             return b""
-        data = self._response.read() if size < 0 else self._response.read(size)
+        with self._client._interrupt.activate(), SocketLease(self._socket):
+            data = self._response.read() if size < 0 else self._response.read(size)
+            network_checkpoint()
         if not data or size < 0:
             self._eof = True
         return data
@@ -96,7 +133,9 @@ class HttpResponse:
         self._closed = True
         if self._eof and self._reusable:
             try:
-                self._response.read()
+                with self._client._interrupt.activate(), SocketLease(self._socket):
+                    self._response.read()
+                    network_checkpoint()
             except Exception:
                 self._client._discard(self._connection)
                 return
@@ -107,6 +146,104 @@ class HttpResponse:
         finally:
             self._client._discard(self._connection)
 
+class _InterruptibleStream:
+    """Wrap httpcore's sync I/O, including the read waiting for headers."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def read(self, *args, **kwargs):
+        with SocketLease(self.get_extra_info("socket")):
+            data = self.stream.read(*args, **kwargs)
+            network_checkpoint()
+            return data
+
+    def write(self, *args, **kwargs):
+        with SocketLease(self.get_extra_info("socket")):
+            return self.stream.write(*args, **kwargs)
+
+    def start_tls(self, *args, **kwargs):
+        with SocketLease(self.get_extra_info("socket"), duplicate=True):
+            return _InterruptibleStream(self.stream.start_tls(*args, **kwargs))
+
+    def get_extra_info(self, info):
+        return self.stream.get_extra_info(info)
+
+    def close(self):
+        self.stream.close()
+
+
+class _InterruptibleBackend:
+    def __init__(self, backend):
+        self.backend = backend
+
+    def connect_tcp(self, *args, **kwargs):
+        network_checkpoint()
+        return _InterruptibleStream(self.backend.connect_tcp(*args, **kwargs))
+
+    def connect_unix_socket(self, *args, **kwargs):
+        network_checkpoint()
+        return _InterruptibleStream(self.backend.connect_unix_socket(*args, **kwargs))
+
+    def sleep(self, seconds):
+        self.backend.sleep(seconds)
+
+
+class _HttpxResponse:
+    """Expose the same streaming interface as the direct HTTP transport."""
+
+    def __init__(self, response, *, decode_content: bool, interrupt: NetworkCancellation):
+        self._response = response
+        self._interrupt = interrupt
+        self._chunks = response.iter_bytes() if decode_content else response.iter_raw()
+        self._buffer = bytearray()
+        self.url = str(response.url)
+        self.status = response.status_code
+        self.reason = response.reason_phrase
+        self.headers = {name.title(): value for name, value in response.headers.items()}
+        self.crossed_origin = False
+        self.headers[":http-version"] = response.http_version
+        cookies = response.headers.get_list("set-cookie")
+        if cookies:
+            self.headers["Set-Cookie"] = "\n".join(cookies)
+
+    def __enter__(self) -> _HttpxResponse:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self.close()
+
+    def get_header(self, name: str, default: str | None = None) -> str | None:
+        return self._response.headers.get(name, default)
+
+    def read(self, size: int = -1) -> bytes:
+        with self._interrupt.activate():
+            network_checkpoint()
+            return self._read(size)
+
+    def _read(self, size: int) -> bytes:
+        if self._response.is_closed and not self._buffer:
+            return b""
+        try:
+            if size < 0:
+                for chunk in self._chunks:
+                    self._buffer.extend(chunk)
+                size = len(self._buffer)
+            else:
+                while len(self._buffer) < size:
+                    chunk = next(self._chunks, None)
+                    if chunk is None:
+                        break
+                    self._buffer.extend(chunk)
+        except _httpx.HTTPError as exc:
+            raise HttpClientError(str(exc) or exc.__class__.__name__) from exc
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
+
+    def close(self) -> None:
+        self._response.close()
+
 
 @dataclass(slots=True)
 class Http2DownloadResponse:
@@ -116,17 +253,15 @@ class Http2DownloadResponse:
     url: str
 
 
-_HTTPX_HTTP2_TLS = threading.local()
-_HTTPX_CLIENTS_LOCK = threading.Lock()
-_HTTPX_CLIENTS: set[object] = set()
-
-
 class NativeHttpClient:
     def __init__(self, max_idle_per_origin: int = 32):
         self._max_idle_per_origin = max(1, max_idle_per_origin)
         self._pools: dict[_Origin, deque[http.client.HTTPConnection]] = defaultdict(deque)
         self._connections: set[http.client.HTTPConnection] = set()
+        self._httpx_clients: dict[tuple[str | None, bool], _httpx.Client] = {}
         self._lock = threading.Lock()
+        self._closing = False
+        self._interrupt = NetworkCancellation()
         self._tls_context = ssl.create_default_context()
 
     def request(
@@ -137,18 +272,21 @@ class NativeHttpClient:
         timeout: float = 30,
         max_redirects: int = 8,
         body: bytes | None = None,
-    ) -> HttpResponse:
+        *,
+        http2: bool = False,
+    ) -> HttpResponse | _HttpxResponse:
         method = method.upper()
         current_url = _encoded_http_url(url)
         request_headers = dict(headers or {})
         current_body = body
+        crossed_origin = False
         for _ in range(max(0, max_redirects) + 1):
             recorder = current_recorder()
             if recorder is not None:
                 recorder.record_request(method, current_url, request_headers, current_body)
             started = time.monotonic()
             try:
-                response = self._request_once(method, current_url, request_headers, timeout, current_body)
+                response = self._request_once(method, current_url, request_headers, timeout, current_body, http2=http2)
             except Exception as exc:
                 if recorder is not None:
                     recorder.record_response(
@@ -175,16 +313,27 @@ class NativeHttpClient:
                         detail = "HTTP Error 420: Netflix geo check failed"
                     response.close()
                     raise HttpClientError(detail)
+                response.crossed_origin = crossed_origin
                 return response
             location = response.get_header("Location")
             response.close()
             if not location:
-                raise HttpClientError(f"Redirect response from {current_url} has no Location header.")
-            current_url = urljoin(current_url, _encoded_http_url(location))
-            if response.status == 303:
+                raise HttpClientError("Redirect response has no Location header.")
+            next_url = urljoin(current_url, _encoded_http_url(location))
+            if response.status == 303 and method != "HEAD":
                 method = "GET"
                 current_body = None
-        raise HttpClientError(f"Too many redirects while fetching {url}.")
+                request_headers = {
+                    name: value for name, value in request_headers.items()
+                    if name.lower() not in {"content-length", "content-type", "transfer-encoding"}
+                }
+            cross_origin = not same_origin(current_url, next_url)
+            if current_body and cross_origin:
+                raise HttpClientError("Refusing to redirect a request body to a different origin.")
+            request_headers = redirect_headers(current_url, next_url, request_headers)
+            crossed_origin |= cross_origin
+            current_url = next_url
+        raise HttpClientError("Too many HTTP redirects.")
 
     def fetch_bytes(self, url: str, headers: dict[str, str] | None = None, timeout: float = 30) -> bytes:
         with self.request("GET", url, headers=headers, timeout=timeout) as response:
@@ -204,8 +353,11 @@ class NativeHttpClient:
         low_speed_min_bytes: int = 0,
         should_stop: Callable[[], bool] | None = None,
         allow_range_status_200: bool = False,
-    ) -> tuple[int, HttpResponse]:
-        with self.request("GET", url, headers=headers, timeout=timeout) as response:
+        *,
+        http2: bool = False,
+    ) -> tuple[int, HttpResponse | _HttpxResponse]:
+        request_options = {"http2": True} if http2 else {}
+        with self.request("GET", url, headers=headers, timeout=timeout, **request_options) as response:
             if (
                 _header_value(headers or {}, "Range")
                 and response.status != 206
@@ -230,23 +382,78 @@ class NativeHttpClient:
                     progress(len(chunk))
             return total, response
 
-    def _request_once(self, method: str, url: str, headers: dict[str, str], timeout: float, body: bytes | None = None) -> HttpResponse:
+    def _request_once(
+        self, method: str, url: str, headers: dict[str, str], timeout: float, body: bytes | None = None,
+        *, http2: bool = False,
+    ) -> HttpResponse | _HttpxResponse:
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise HttpClientError(f"Unsupported URL for native HTTP backend: {url}")
+            raise HttpClientError("Unsupported URL for native HTTP backend.")
+        proxy = _request_proxy(url)
+        if proxy or http2:
+            return self._request_with_httpx(method, url, headers, timeout, body, proxy=proxy, http2=http2)
         origin = _origin_from_url(url)
         connection = self._acquire(origin, timeout)
         path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         try:
-            connection.request(method, path, body=body, headers=headers)
-            response = connection.getresponse()
+            with self._interrupt.activate():
+                network_checkpoint()
+                if connection.sock is None:
+                    connection.connect()
+                # getresponse() can detach a Connection: close socket, so keep
+                # this reference independently of the connection pool.
+                sock = connection.sock
+                with SocketLease(sock):
+                    connection.request(method, path, body=body, headers=headers)
+                    response = connection.getresponse()
         except Exception as exc:
             self._discard(connection)
             raise HttpClientError(str(exc) or exc.__class__.__name__) from exc
-        return HttpResponse(self, origin, connection, response, url)
+        return HttpResponse(self, origin, connection, response, url, sock)
+
+    def _request_with_httpx(self, method, url, headers, timeout, body, *, proxy, http2) -> _HttpxResponse:
+        if _httpx is None:
+            raise HttpClientError("The configured HTTP transport requires httpx.")
+        try:
+            with self._lock:
+                if self._closing:
+                    raise HttpClientError("HTTP client is closed.")
+                route = (proxy, http2)
+                client = self._httpx_clients.get(route)
+                if client is None:
+                    transport = _httpx.HTTPTransport(
+                        proxy=proxy, http2=http2, trust_env=False,
+                        limits=_httpx.Limits(max_connections=64, max_keepalive_connections=16),
+                    )
+                    # HTTPX currently has no public synchronous network-backend
+                    # parameter. This is a pool owned by this client, not a
+                    # process-wide patch; keep the normal transport if it changes.
+                    pool = getattr(transport, "_pool", None)
+                    backend = getattr(pool, "_network_backend", None)
+                    if backend is not None:
+                        pool._network_backend = _InterruptibleBackend(backend)
+                    client = _httpx.Client(transport=transport, follow_redirects=False, trust_env=False)
+                    self._httpx_clients[route] = client
+            # Building a raw request keeps transport cookies and auth out of
+            # requests made for another stream or to a redirect destination.
+            request = _httpx.Request(
+                method, url, headers=_httpx_safe_headers(headers) if http2 else headers, content=body,
+                extensions={"timeout": dict.fromkeys(("connect", "read", "write", "pool"), timeout)},
+            )
+            with self._interrupt.activate():
+                network_checkpoint()
+                response = client.send(request, stream=True)
+            return _HttpxResponse(response, decode_content=http2, interrupt=self._interrupt)
+        except (ValueError, ImportError) as exc:
+            raise HttpClientError("The configured HTTP transport is unavailable or invalid.") from exc
+        except _httpx.HTTPError as exc:
+            detail = exc.__class__.__name__ if proxy else (str(exc) or exc.__class__.__name__)
+            raise HttpClientError(detail) from exc
 
     def _acquire(self, origin: _Origin, timeout: float) -> http.client.HTTPConnection:
         with self._lock:
+            if self._closing:
+                raise HttpClientError("HTTP client is closed.")
             pool = self._pools.get(origin)
             while pool:
                 connection = pool.pop()
@@ -271,6 +478,8 @@ class NativeHttpClient:
         else:
             connection = _TunedHTTPConnection(origin.host, origin.port, timeout=timeout)
         with self._lock:
+            if self._closing:
+                raise HttpClientError("HTTP client is closed.")
             self._connections.add(connection)
         return connection
 
@@ -280,7 +489,7 @@ class NativeHttpClient:
         discard = False
         with self._lock:
             pool = self._pools[origin]
-            if len(pool) >= self._max_idle_per_origin:
+            if self._closing or len(pool) >= self._max_idle_per_origin:
                 discard = True
             else:
                 pool.append(connection)
@@ -296,11 +505,15 @@ class NativeHttpClient:
             pass
 
     def close(self) -> None:
+        self._interrupt.cancel()
         with self._lock:
+            self._closing = True
             pools = list(self._pools.values())
             self._pools.clear()
             connections = list(self._connections)
             self._connections.clear()
+            clients = list(self._httpx_clients.values())
+            self._httpx_clients.clear()
         # HTTPResponse owns a buffered socket reader. Closing the connection's
         # socket alone may leave that reader's reference alive, then block in
         # response.close() waiting for its read lock. Interrupt reads first.
@@ -319,40 +532,15 @@ class NativeHttpClient:
                 connection.close()
             except OSError:
                 pass
+        for client in clients:
+            try:
+                client.close()
+            except OSError:
+                pass
 
 
 def httpx_http2_available() -> bool:
     return _httpx is not None
-
-
-def close_http2_clients() -> None:
-    """Close HTTP/2 clients owned by downloader worker threads."""
-    with _HTTPX_CLIENTS_LOCK:
-        clients = list(_HTTPX_CLIENTS)
-        _HTTPX_CLIENTS.clear()
-    for client in clients:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-
-def _get_httpx_http2_client():
-    if _httpx is None:
-        raise HttpClientError("httpx with HTTP/2 support is not available.")
-    client = getattr(_HTTPX_HTTP2_TLS, "client", None)
-    if client is None or bool(getattr(client, "is_closed", False)):
-        client = _httpx.Client(
-            http2=True,
-            follow_redirects=True,
-            limits=_httpx.Limits(max_connections=64, max_keepalive_connections=16),
-            timeout=None,
-            trust_env=False,
-        )
-        _HTTPX_HTTP2_TLS.client = client
-        with _HTTPX_CLIENTS_LOCK:
-            _HTTPX_CLIENTS.add(client)
-    return client
 
 
 def _httpx_safe_headers(headers: dict[str, str] | None) -> dict[str, str]:
@@ -375,70 +563,6 @@ def _httpx_safe_headers(headers: dict[str, str] | None) -> dict[str, str]:
     }
 
 
-def _httpx_download_to_file(
-    url: str,
-    output: BinaryIO,
-    headers: dict[str, str] | None = None,
-    timeout: float = 30,
-    chunk_size: int = 256 * 1024,
-    progress: Callable[[int], None] | None = None,
-    limiter: object | None = None,
-    low_speed_limit: int | None = None,
-    low_speed_time: float | None = None,
-    low_speed_min_bytes: int = 0,
-    should_stop: Callable[[], bool] | None = None,
-) -> tuple[int, Http2DownloadResponse]:
-    client = _get_httpx_http2_client()
-    request_headers = _httpx_safe_headers(headers)
-    request_timeout = _httpx.Timeout(timeout, connect=timeout, read=timeout, write=timeout, pool=timeout)
-    low_speed = _LowSpeedWatch(low_speed_limit, low_speed_time, low_speed_min_bytes)
-    try:
-        with client.stream("GET", url, headers=request_headers, timeout=request_timeout) as response:
-            if _header_value(headers or {}, "Range") and response.status_code != 206:
-                raise HttpClientError(f"Range request was not honored: HTTP {response.status_code} {response.reason_phrase}")
-            if response.status_code >= 400:
-                raise HttpClientError(f"HTTP Error {response.status_code}: {response.reason_phrase}")
-            total = 0
-            chunks = response.iter_bytes(chunk_size=chunk_size)
-            while True:
-                if should_stop and should_stop():
-                    raise HttpClientError("download superseded by another attempt")
-                low_speed.before_read()
-                try:
-                    chunk = next(chunks)
-                except StopIteration:
-                    break
-                if not chunk:
-                    continue
-                low_speed.add(len(chunk))
-                if limiter:
-                    limiter.consume(len(chunk))
-                output.write(chunk)
-                total += len(chunk)
-                if progress:
-                    progress(len(chunk))
-            response_headers = dict(response.headers)
-            http_version = response.extensions.get("http_version")
-            if isinstance(http_version, bytes):
-                response_headers[":http-version"] = http_version.decode("ascii", "ignore")
-            elif http_version:
-                response_headers[":http-version"] = str(http_version)
-            return total, Http2DownloadResponse(
-                status=response.status_code,
-                reason=response.reason_phrase,
-                headers=response_headers,
-                url=str(response.url),
-            )
-    except HttpClientError:
-        raise
-    except TimeoutError:
-        raise
-    except Exception as exc:
-        if _httpx is not None and isinstance(exc, _httpx.HTTPError):
-            raise HttpClientError(str(exc) or exc.__class__.__name__) from exc
-        raise
-
-
 def http2_download_to_file(
     url: str,
     output: BinaryIO,
@@ -454,7 +578,7 @@ def http2_download_to_file(
 ) -> tuple[int, Http2DownloadResponse]:
     url = _encoded_http_url(url)
     if _httpx is not None:
-        return _httpx_download_to_file(
+        total, response = get_global_http_client().download_to_file(
             url,
             output,
             headers=headers,
@@ -466,7 +590,11 @@ def http2_download_to_file(
             low_speed_time=low_speed_time,
             low_speed_min_bytes=low_speed_min_bytes,
             should_stop=should_stop,
+            http2=True,
         )
+        return total, Http2DownloadResponse(response.status, response.reason, response.headers, response.url)
+    if _request_proxy(url):
+        raise HttpClientError("HTTP/2 through a proxy requires httpx.")
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise HttpClientError(f"Unsupported URL for native HTTP/2 backend: {url}")
@@ -895,7 +1023,9 @@ def _create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_a
                 sock.settimeout(timeout)
             if source_address:
                 sock.bind(source_address)
-            sock.connect(sockaddr)
+            with SocketLease(sock):
+                sock.connect(sockaddr)
+                network_checkpoint()
             _tune_socket(sock)
             return sock
         except OSError as exc:
@@ -929,11 +1059,14 @@ class _TunedHTTPSConnection(http.client.HTTPSConnection):
             server_hostname = self._tunnel_host
         else:
             server_hostname = self.host
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+        with SocketLease(self.sock, duplicate=True):
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
 
 
 _GLOBAL_CLIENT = NativeHttpClient()
 
 
 def get_global_http_client() -> NativeHttpClient:
-    return _GLOBAL_CLIENT
+    """Return the active download's client, or the shared client for other callers."""
+    runtime = current_download_runtime()
+    return runtime.resource(NativeHttpClient) if runtime is not None else _GLOBAL_CLIENT

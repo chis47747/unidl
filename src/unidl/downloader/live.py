@@ -115,6 +115,14 @@ def _recording_stop_requested(options: LiveRecordOptions) -> bool:
     return callback is not None and callback()
 
 
+def _capture_was_interrupted(options: LiveRecordOptions) -> bool:
+    runtime = current_download_runtime()
+    return (
+        runtime is not None and runtime.stopped and _recording_stop_requested(options)
+        and not (options.cancel_requested and options.cancel_requested())
+    )
+
+
 def _wait_if_paused(options: LiveRecordOptions) -> None:
     paused = options.pause_requested
     if paused is None:
@@ -221,7 +229,6 @@ def record_live_stream_group(
     _ensure_live_json_init_segments(streams)
     names = filenames or []
     states = [_new_live_state(stream, output_dir, names[index] if index < len(names) else None, options) for index, stream in enumerate(streams)]
-    _refresh_sabr_live_states(states, options, headers=headers)
     wait_seconds = options.wait_seconds or _default_group_wait_seconds(states)
     record_limit = _effective_record_limit(options)
     failed = False
@@ -234,6 +241,9 @@ def record_live_stream_group(
         _emit_state_progress(options, state, 0, "Waiting")
 
     try:
+        if not _recording_stop_requested(options):
+            _refresh_sabr_live_states(states, options, headers=headers)
+            wait_seconds = options.wait_seconds or _default_group_wait_seconds(states)
         while True:
             _checkpoint(options)
             if _recording_stop_requested(options):
@@ -275,7 +285,7 @@ def record_live_stream_group(
                             ),
                             options.check_segments_count,
                             host_limiter,
-                            _should_assemble_live_output(options, plan.state.stream),
+                            False,
                             live_media_retry_grace_enabled(plan.state.stream),
                         ): plan
                         for plan in planned
@@ -292,6 +302,10 @@ def record_live_stream_group(
                 group_batches: list[LiveSegmentBatch] = []
                 for plan in planned:
                     parts = completed_parts[id(plan.state)]
+                    # Commit only after all tracks arrived. Cancelling one
+                    # read must not leave the faster track a batch ahead.
+                    if _should_assemble_live_output(options, plan.state.stream):
+                        _assemble_live_parts(plan.state.output_path, parts)
                     _apply_group_batch(options, plan, parts, emit_segment_sink=options.group_segment_sink is None)
                     group_batches.append(_live_segment_batch(plan, parts))
                 if options.group_segment_sink:
@@ -322,15 +336,17 @@ def record_live_stream_group(
     except LiveRecordingStopped:
         pass  # Back while a new key is pending: finish the already captured batches.
     except DownloadCancelled:
-        interrupted = True
-        raise
+        if not _capture_was_interrupted(options):
+            interrupted = True
+            raise
     except KeyboardInterrupt:
         interrupted = True
         if not options.stop_on_interrupt:
             raise
     except Exception:
-        failed = True
-        raise
+        if not _capture_was_interrupted(options):
+            failed = True
+            raise
     finally:
         status = "Error" if failed else ("Stopped" if interrupted else "Done")
         for state in states:
@@ -373,12 +389,6 @@ def record_live_stream(
     part_paths: list[Path] = []
     downloaded_segments: list[SegmentInfo] = []
     current_stream = stream
-    _refresh_sabr_live_stream_segments(
-        current_stream,
-        first_sequence=None,
-        take_count=max(1, int(options.take_count or 1)),
-        headers=headers,
-    )
     edge_index: int | None = None
     wait_seconds = options.wait_seconds or _default_wait_seconds(current_stream)
     record_limit = _effective_record_limit(options)
@@ -402,6 +412,11 @@ def record_live_stream(
             print(f"{paint('Record limit:', Palette.blue, colors)} {_format_seconds(record_limit)}")
 
     try:
+        if not _recording_stop_requested(options):
+            _refresh_sabr_live_stream_segments(
+                current_stream, first_sequence=None, take_count=max(1, int(options.take_count or 1)), headers=headers,
+            )
+            wait_seconds = options.wait_seconds or _default_wait_seconds(current_stream)
         while True:
             _checkpoint(options)
             if _recording_stop_requested(options):
@@ -530,8 +545,9 @@ def record_live_stream(
     except LiveRecordingStopped:
         pass  # The new undecodable batch is excluded; existing media still finishes.
     except DownloadCancelled:
-        interrupted = True
-        raise
+        if not _capture_was_interrupted(options):
+            interrupted = True
+            raise
     except KeyboardInterrupt:
         interrupted = True
         if not options.progress:
@@ -539,8 +555,9 @@ def record_live_stream(
         if not options.stop_on_interrupt:
             raise
     except Exception:
-        failed = True
-        raise
+        if not _capture_was_interrupted(options):
+            failed = True
+            raise
     finally:
         status = "Error" if failed else ("Stopped" if interrupted else "Done")
         _emit_live_progress(
@@ -2025,11 +2042,15 @@ def _append_segments(
     if check_segments_count:
         _check_parts_count(part_paths, len(segments))
     if assemble_output:
-        with output_path.open("ab") as output:
-            for part_path in part_paths:
-                with part_path.open("rb") as part:
-                    shutil.copyfileobj(part, output, length=1024 * 1024)
+        _assemble_live_parts(output_path, part_paths)
     return part_paths
+
+
+def _assemble_live_parts(output_path: Path, parts: list[Path]) -> None:
+    with output_path.open("ab") as output:
+        for part_path in parts:
+            with part_path.open("rb") as part:
+                shutil.copyfileobj(part, output, length=1024 * 1024)
 
 
 def _download_live_segment_parts(

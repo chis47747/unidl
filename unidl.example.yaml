@@ -1,0 +1,10 @@
+# Optional starting point: copy this file to unidl.yaml. Relative paths are
+# resolved from that file. Never commit the working configuration.
+paths:
+  home: .
+  downloads: ./downloads
+  temp: ./tmp
+
+# Add your own device paths in the local unidl.yaml, or use the resource manager.
+cdm:
+  devices: {}

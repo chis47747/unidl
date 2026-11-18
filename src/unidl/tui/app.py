@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -61,6 +62,7 @@ QUIT_CONFIRM_WINDOW = 1.5
 # Python worker still needs a moment to unwind its ``finally`` blocks.  Keep the
 # whole application wait bounded so an uncooperative service cannot trap exit.
 SESSION_SHUTDOWN_TIMEOUT = 5.0
+PROCESS_SHUTDOWN_TIMEOUT = 8.0
 
 #: Below this many rows the roomy spacing is given up - see the "short screen"
 #: block at the end of :mod:`unidl.tui.theme`. Twenty-eight leaves three rows of
@@ -325,6 +327,9 @@ class UnidlApp(App):
         self.add_mode(self.DEFAULT_MODE, self.get_default_screen)
 
     def exit(self, *args, **kwargs):  # noqa: D102 - Textual lifecycle override
+        arm_deadline = getattr(self, "_arm_exit_deadline", None)
+        if arm_deadline is not None:
+            arm_deadline()
         self.abort_sessions()
         return super().exit(*args, **kwargs)
 
@@ -983,6 +988,54 @@ class UnidlApp(App):
         self.push_screen(AddKeysScreen(service_id=service_id, initial=initial), _after)
 
 
+def _exit_deadline():
+    """Arm the terminal entry point's last resort for uninterruptible plug-ins."""
+    restore_tty = None
+    if os.name == "posix" and sys.stdin is not None:
+        import termios
+
+        try:
+            fd = sys.stdin.fileno()
+            attrs = termios.tcgetattr(fd)
+        except (OSError, ValueError, termios.error):
+            pass
+        else:
+            def restore_tty():
+                termios.tcsetattr(fd, termios.TCSAFLUSH, attrs)
+
+    def force_exit():
+        try:
+            if restore_tty is not None:
+                try:
+                    restore_tty()
+                except (OSError, ValueError, termios.error):
+                    pass
+            _restore_terminal_state(clear_input=True)
+        finally:
+            os._exit(130)
+
+    # Only run() installs this callback. Embedded apps and headless UI tests
+    # retain ownership of their process; Back and pause never arm this timer.
+    timer = threading.Timer(PROCESS_SHUTDOWN_TIMEOUT, force_exit)
+    timer.daemon = True
+    lock = threading.Lock()
+    armed = False
+
+    def arm():
+        nonlocal armed
+        # Python can deliver a second Ctrl+C while arm is already running.
+        if armed or not lock.acquire(blocking=False):
+            return
+        try:
+            if not armed:
+                armed = True
+                timer.start()
+        finally:
+            lock.release()
+
+    return arm, timer.cancel
+
+
 def run(config_path: Path | None = None, *, config: Config | None = None) -> None:
     from .. import services
 
@@ -1003,9 +1056,9 @@ def run(config_path: Path | None = None, *, config: Config | None = None) -> Non
     # this process started. Reset once before Textual enters application mode so
     # its input parser always starts from a known terminal state.
     _restore_terminal_state()
+    app._arm_exit_deadline, cancel_exit_deadline = _exit_deadline()
 
     def _request_shutdown() -> None:
-        app.abort_sessions()
         # Calling the normal Textual exit path lets on_unmount drain the
         # controller-owned workers while keeping the event loop alive.
         app.exit(return_code=130)
@@ -1021,7 +1074,8 @@ def run(config_path: Path | None = None, *, config: Config | None = None) -> Non
     finally:
         try:
             app.abort_sessions()
-            app.wait_for_sessions(SESSION_SHUTDOWN_TIMEOUT)
+            if app.wait_for_sessions(SESSION_SHUTDOWN_TIMEOUT):
+                cancel_exit_deadline()
         finally:
             # Helpers may restore shared console modes as they exit. Reset
             # after worker cleanup, immediately before returning to the shell.

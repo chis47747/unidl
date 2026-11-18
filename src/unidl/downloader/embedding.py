@@ -19,10 +19,14 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
+
+from ..core.network import NetworkCancellation
 
 if TYPE_CHECKING:
     from .models import SegmentInfo, StreamInfo
+
+_Resource = TypeVar("_Resource")
 
 
 class LiveRecordingStopped(Exception):
@@ -58,8 +62,6 @@ class DownloadRuntime:
     transports and terminates registered process groups immediately.
     """
 
-    _active_lock = threading.RLock()
-    _active: dict[int, DownloadRuntime] = {}
     _current: contextvars.ContextVar[DownloadRuntime | None] = contextvars.ContextVar(
         "unidl_download_runtime",
         default=None,
@@ -67,12 +69,17 @@ class DownloadRuntime:
 
     def __init__(self) -> None:
         self._stop = threading.Event()
+        self._network = NetworkCancellation()
         self._lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._shutdown_thread: threading.Thread | None = None
         self._processes: dict[int, tuple[subprocess.Popen, bool]] = {}
         self._closers: dict[int, Callable[[], None]] = {}
         self._next_closer = 0
+        self._resources: dict[object, object] = {}
+        self._capture: DownloadRuntime | None = None
+        self._capture_started = False
+        self._closed = False
 
     @property
     def stopped(self) -> bool:
@@ -87,39 +94,76 @@ class DownloadRuntime:
         return self._stop.wait(max(0.0, float(timeout)))
 
     @contextlib.contextmanager
-    def activate(self):
-        """Make this runtime visible to downloader worker threads.
-
-        ``ThreadPoolExecutor`` workers do not inherit context variables.  The
-        active-runtime fallback therefore remains process-local and is used
-        only when exactly one embedded download is active, which is UniDL's
-        normal delivery model; the context variable is preferred on the owner
-        thread.
-        """
+    def bind(self):
+        """Use the existing owner without closing it on context exit."""
+        previous = self._current.get()
         token = self._current.set(self)
-        with self._active_lock:
-            self._active[id(self)] = self
         try:
-            yield self
+            # Preserve the session/job scopes but switch from capture to the
+            # delivery's scope for callbacks that write completed batches.
+            previous_scope = previous._network.suspend() if previous and previous is not self else contextlib.nullcontext()
+            with previous_scope, self._network.activate():
+                yield
         finally:
-            self.close()
             self._current.reset(token)
-            with self._active_lock:
-                self._active.pop(id(self), None)
+
+    @contextlib.contextmanager
+    def activate(self):
+        """Bind one delivery to the calling context and its explicit workers."""
+        if self._current.get() is self:
+            yield
+            return
+        with self.bind():
+            try:
+                yield self
+            finally:
+                self.close()
+
+    @contextlib.contextmanager
+    def live_capture(self, stop_requested):
+        """Keep capture I/O separate from the output and final mux resources."""
+        child = DownloadRuntime()
+        with self._lock:
+            self._capture = child
+            self._capture_started = True
+        token = self.register_closer(child.shutdown)
+        try:
+            if stop_requested():
+                child.request_shutdown()
+            with child.activate():
+                yield
+        finally:
+            with self._lock:
+                self._capture = None
+            self.unregister_closer(token)
+
+    def interrupt_live_capture(self) -> bool:
+        with self._lock:
+            child = self._capture
+            started = self._capture_started
+        if child is not None:
+            child.request_shutdown()
+        return started
 
     @classmethod
     def current(cls) -> DownloadRuntime | None:
-        runtime = cls._current.get()
-        if runtime is not None:
-            return runtime
-        with cls._active_lock:
-            if len(cls._active) == 1:
-                return next(iter(cls._active.values()))
-        return None
+        return cls._current.get()
+
+    def resource(self, factory: Callable[[], _Resource]) -> _Resource:
+        """Get the task's instance of a closable transport, creating it once."""
+        with self._lock:
+            if self.stopped or self._closed:
+                raise DownloadCancelled("download transport is closed")
+            if factory in self._resources:
+                return self._resources[factory]
+            instance = factory()
+            self.register_closer(instance.close)
+            self._resources[factory] = instance
+            return instance
 
     def register_process(self, process: subprocess.Popen, *, process_group: bool = False) -> subprocess.Popen:
         with self._lock:
-            if self.stopped:
+            if self.stopped or self._closed:
                 should_stop = True
             else:
                 self._processes[id(process)] = (process, process_group)
@@ -139,7 +183,7 @@ class DownloadRuntime:
         with self._lock:
             self._next_closer += 1
             token = self._next_closer
-            if not self.stopped:
+            if not self.stopped and not self._closed:
                 self._closers[token] = closer
                 return token
         try:
@@ -162,6 +206,10 @@ class DownloadRuntime:
         the delivery owner joins it in close() before releasing this runtime.
         """
         self._stop.set()
+        self._network.cancel()
+        # A capture can own curl as well as sockets. Don't leave its children
+        # queued behind an unrelated slow delivery closer on a hard quit.
+        self.interrupt_live_capture()
         with self._lock:
             if self._shutdown_thread is not None:
                 return
@@ -181,6 +229,8 @@ class DownloadRuntime:
         it (including its process group on POSIX).
         """
         self._stop.set()
+        self._network.cancel()
+        self.interrupt_live_capture()
         self.close(grace=grace)
 
     def close(self, *, grace: float = 0.15) -> None:
@@ -197,17 +247,14 @@ class DownloadRuntime:
 
     def _close_resources_locked(self, *, grace: float) -> None:
         with self._lock:
+            self._closed = True
             closers = list(self._closers.values())
             self._closers.clear()
+            self._resources.clear()
             processes = list(self._processes.values())
         # Do not let a slow transport closer delay signalling child processes.
         for process, process_group in processes:
             self._signal_process(process, process_group)
-        for closer in closers:
-            try:
-                closer()
-            except Exception:
-                pass
         deadline = time.monotonic() + max(0.0, float(grace))
         while time.monotonic() < deadline:
             if all(process.poll() is not None for process, _group in processes):
@@ -216,6 +263,11 @@ class DownloadRuntime:
         for process, process_group in processes:
             if process.poll() is None:
                 self._signal_process(process, process_group, force=True)
+        for closer in closers:
+            try:
+                closer()
+            except Exception:
+                pass
         for process, _group in processes:
             try:
                 process.wait(timeout=0.15)
@@ -259,6 +311,13 @@ def current_download_runtime() -> DownloadRuntime | None:
 _proxy_environment: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "unidl_downloader_proxy_environment", default=None,
 )
+_proxy_policy: contextvars.ContextVar[tuple[str | None, bool]] = contextvars.ContextVar(
+    "unidl_downloader_proxy_policy", default=(None, False),
+)
+
+
+def current_proxy_policy() -> tuple[str | None, bool]:
+    return _proxy_policy.get()
 
 
 @contextlib.contextmanager
@@ -267,12 +326,15 @@ def proxy_scope(custom_proxy: str | None, use_system_proxy: bool = True):
     overrides = None
     if custom_proxy:
         overrides = dict.fromkeys(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"), custom_proxy)
+        overrides.update({"NO_PROXY": "", "no_proxy": ""})
     elif not use_system_proxy:
         overrides = {"NO_PROXY": "*", "no_proxy": "*"}
     token = _proxy_environment.set(overrides)
+    policy_token = _proxy_policy.set((custom_proxy, use_system_proxy))
     try:
         yield
     finally:
+        _proxy_policy.reset(policy_token)
         _proxy_environment.reset(token)
 
 

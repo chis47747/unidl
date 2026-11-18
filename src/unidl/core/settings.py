@@ -37,6 +37,8 @@ class Option:
     value: Any
     label: str = ""
     help: str = ""
+    # In a multi-select, this choice cannot coexist with other options.
+    exclusive: bool = False
 
     def display(self) -> str:
         return self.label or str(self.value)

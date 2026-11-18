@@ -30,9 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-import requests
-
 from .i18n import tr
+from .network import NetworkSession
 from .secureio import private_directory
 from .vault import (
     KeyRecord,
@@ -149,7 +148,7 @@ class ApiVault:
         self.no_push = no_push
         self.enabled = enabled
         self.timeout = timeout
-        self.session = requests.Session()
+        self.session = NetworkSession()
         self.session.headers.update({"Accept": "application/json", "User-Agent": "unidl"})
         if token:
             self.session.headers["Authorization"] = f"Bearer {token}"
@@ -290,7 +289,7 @@ class HttpVault:
         #: the server may hand out a session id to carry between calls. This one
         #: answers ``null``; keeping it costs nothing and one that uses it works.
         self.session_id: Any = None
-        self.session = requests.Session()
+        self.session = NetworkSession()
         self.session.headers.update({"Accept": "application/json", "User-Agent": "unidl"})
 
     def describe(self) -> str:

@@ -45,6 +45,7 @@ from typing import Any
 import requests
 
 from .drm import PLAYREADY, WIDEVINE, CdmError
+from .network import NetworkSession
 
 _HEX = re.compile(r"[^0-9a-fA-F]")
 
@@ -199,7 +200,7 @@ class RemoteCdm:
         self.log = log or (lambda _message: None)
         self.base = f"{config.host.rstrip('/')}/{config.device_name}"
         self.session_id: str = ""
-        self.http = requests.Session()
+        self.http = NetworkSession()
         self.http.headers.update(
             {"Content-Type": "application/json", "X-Secret-Key": config.secret}
         )

@@ -3,13 +3,13 @@ from __future__ import annotations
 import gzip
 import http.client
 import subprocess  # noqa: F401 - retained as the module's patch seam for hosts/tests
-import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
+from ..core.network import network_retry_delay
 from .embedding import current_download_runtime
 from .http_client import HttpClientError, get_global_http_client
 from .utils import is_file_url, is_url, source_path
@@ -45,7 +45,7 @@ def _runtime_sleep(seconds: float) -> None:
     """Wake retry backoff when an embedded delivery is shutting down."""
     runtime = current_download_runtime()
     if runtime is None:
-        time.sleep(max(0.0, float(seconds)))
+        network_retry_delay(max(0.0, float(seconds)))
     elif runtime.wait(seconds):
         runtime.checkpoint()
 

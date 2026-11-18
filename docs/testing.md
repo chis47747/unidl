@@ -76,7 +76,7 @@ the job, and rotating KIDs trigger only the service's proven init-data path.
 Build both artifacts before publishing:
 
 ~~~console
-uv build
+python tools/build_public_release.py vX.Y.Z --out-dir dist/vX.Y.Z
 ~~~
 
 Inspect the wheel and source archive for accidental credentials, device files,

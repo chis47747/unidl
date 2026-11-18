@@ -1,13 +1,4 @@
-"""CBC Gem: Radio-Canada English OTT.
-
-Authorization:  email/password ROPC + claims token.
-Geofence:       Canada.
-Playback:       DASH + Widevine (DRMToday ``x-dt-auth-token``).
-Catalogue:
-    URL         gem.cbc.ca/<slug>
-    Search      public catalog v2 search (shows and exact media hits)
-    Live        free TV and linear streams
-"""
+"""CBC Gem: Radio-Canada English OTT."""
 
 from __future__ import annotations
 
@@ -16,9 +7,10 @@ from collections.abc import Iterator
 from datetime import datetime
 
 from ...core.cdm import CdmError
-from ...core.credentials import CredentialSlot, mask_account
-from ...core.flow import Ask, Back, Choice, FlowContext
+from ...core.credentials import mask_account
+from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
 from ...core.playback import DrmInfo, Playback
+from ...core.qr import QrPresentation
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
 from . import api
@@ -26,7 +18,6 @@ from . import api
 
 @registry.register
 class CBCGem(Service):
-    """CBC Gem Canada via services.radio-canada.ca."""
 
     ID = "cbc"
     NAME = "CBC Gem"
@@ -34,7 +25,7 @@ class CBCGem(Service):
     ALIASES = ("cbcgem", "gem", "gem.cbc.ca", "cbc.ca")
     TITLE_RE = r"(?:www\.)?gem\.cbc\.ca/"
     DESCRIPTION = (
-        "CBC Gem: Radio-Canada OTT account login, search, show URLs, live streams, "
+        "CBC Gem: Radio-Canada OTT TV code login, search, show URLs, live streams, "
         "DASH + Widevine (x-dt-auth-token)."
     )
     TENANT = api.GEM
@@ -46,58 +37,71 @@ class CBCGem(Service):
     SUPPORTS_SEARCH = True
     SUPPORTS_LIVE = True
     GEOFENCE = ("CA",)
-    CREDENTIALS = [CredentialSlot("default", "CBC Gem account")]
 
     def __init__(self, ctx):
         super().__init__(ctx)
         self._api: api.RadioCanadaApi | None = None
 
-    # -------------------------------------------------------------------- auth
 
     def auth_status(self) -> AuthStatus:
         module = self.API
         state = module.SessionState.from_cache(self.ctx.tokens.read(self.TOKEN_FILE))
         who = mask_account(state.username) if state.username else self.TENANT.label
-        detail = "token cache"
         if state.usable():
+            detail = "TV code session" if state.tv_code else "existing session · pair again when it expires"
             if not state.claims_usable():
-                detail = "claims refresh required"
-            return AuthStatus(True, who, detail=detail)
+                detail += " · claims refresh required"
+            return AuthStatus(True, who, detail=detail, anonymous_ok=True)
         if state.refreshable():
-            return AuthStatus(True, who, detail="refresh required")
-        cred = self.ctx.credential("default")
-        if cred.complete:
-            return AuthStatus(
-                False,
-                f"credentials ready · {mask_account(cred.username)}",
-                detail="will sign in on demand",
-                anonymous_ok=True,
-            )
+            return AuthStatus(True, who, detail="TV session refresh required", anonymous_ok=True)
         return AuthStatus(
             False,
-            f"no {self.TENANT.label} account configured",
+            "sign in with a TV code",
             detail="live channels remain available",
             anonymous_ok=True,
+            logout_available=bool(state.access_token or state.refresh_token or state.claims_token),
         )
 
     def login(self, ctx: FlowContext) -> Iterator[Ask]:
-        cred = yield from self.sign_in_details(
-            ctx,
-            title=f"Sign in to {self.NAME}",
-            username_label=f"{self.NAME} email",
-            password_label=f"{self.NAME} password",
-        )
-        if not cred.complete:
-            return
-        client = self._new_client()
+        client = self._new_client(for_login=True)
         try:
-            ctx.status(f"Signing in to {self.NAME}")
-            client.login(cred.username, cred.password)
+            ctx.status(f"Requesting a {self.NAME} TV code")
+            code = client.start_login()
+        except self.API.RadioCanadaError as exc:
+            ctx.error(str(exc))
+            return
+
+        def poll():
+            try:
+                return client.poll_login(code)
+            except self.API.RadioCanadaError as exc:
+                return exc
+
+        open_url = code.direct_url or code.verification_url
+        lines: list[str | tuple[str, str]] = [("Open", open_url), ("TV code", code.user_code)]
+        if code.direct_url and code.direct_url != code.verification_url:
+            lines.append(("Enter code manually", code.verification_url))
+        lines.append("Confirm on the official page. UniDL will continue automatically.")
+        grant = yield ctx.wait_for(
+            f"Sign in to {self.NAME} with a TV code",
+            lines,
+            poll=poll,
+            timeout=code.expires_in,
+            interval=code.interval,
+            qr=QrPresentation(payload=open_url),
+        )
+        if isinstance(grant, self.API.RadioCanadaError):
+            ctx.error(str(grant))
+            return
+        if not grant:
+            return
+        try:
+            client.complete_login(grant)
         except self.API.RadioCanadaError as exc:
             ctx.error(str(exc))
             return
         self._api = client
-        ctx.log(f"signed in as {mask_account(cred.username)}", "ok")
+        ctx.log(f"{self.NAME} TV code sign-in completed", "ok")
 
     def logout(self) -> None:
         self.ctx.tokens.remove(self.TOKEN_FILE)
@@ -107,33 +111,20 @@ class CBCGem(Service):
     def _save_state(self, state: api.SessionState) -> None:
         self.ctx.tokens.write(self.TOKEN_FILE, state.to_cache())
 
-    def _new_client(self) -> api.RadioCanadaApi:
+    def _new_client(self, *, for_login: bool = False) -> api.RadioCanadaApi:
         module = self.API
         return module.RadioCanadaApi(
             self.ctx.session(user_agent=module.USER_AGENT, cookies=False),
             self.TENANT,
-            state=module.SessionState.from_cache(self.ctx.tokens.read(self.TOKEN_FILE)),
+            state=None if for_login else module.SessionState.from_cache(self.ctx.tokens.read(self.TOKEN_FILE)),
             on_save=self._save_state,
         )
 
     def client(self, ctx: FlowContext | None = None) -> api.RadioCanadaApi:
-        if (
-            self._api is not None
-            and self._api.state.usable()
-            and self._api.state.claims_usable()
-        ):
-            return self._api
-        client = self._new_client()
-        cred = self.ctx.credential("default")
-        username = cred.username if cred.complete else None
-        password = cred.password if cred.complete else None
+        client = self._public_client()
         if ctx is not None:
             ctx.status(f"Checking {self.NAME} session")
-        try:
-            client.ensure_session(username=username, password=password)
-        except self.API.RadioCanadaError:
-            raise
-        self._api = client
+        client.ensure_session()
         return client
 
     def _licence_client(self) -> api.RadioCanadaApi:
@@ -164,17 +155,71 @@ class CBCGem(Service):
         return self._api
 
     def _stream(self, client: api.RadioCanadaApi, media_id: str, **kwargs) -> api.Source:
-        """Resolve playback while preserving credential fallback after refresh errors."""
-        if not kwargs.get("is_live"):
-            credential = self.ctx.credential("default")
-            if credential.complete:
-                kwargs["username"] = credential.username
-                kwargs["password"] = credential.password
+        kwargs["fetch_chapters"] = not kwargs.get("is_live") and self.fetch_chapters_enabled()
+        kwargs["fetch_attachments"] = self.fetch_attachments_enabled()
         return client.stream(media_id, **kwargs)
 
-    # --------------------------------------------------------------- browsing
+    def home(self, ctx: FlowContext) -> Iterator[Ask]:
+        selected = ""
+        while True:
+            status = self._auth_status_quietly()
+            options = [
+                Choice("VOD - open a URL or content ID", "url"),
+                Choice("Live TV", "live"),
+                Choice("Search", "search"),
+                Choice("Settings", "settings"),
+                Choice("Sign in again with TV code" if status.logged_in else "Sign in with TV code", "login", detail=status.label),
+            ]
+            if status.logged_in or status.logout_available:
+                options.append(Choice("Sign out", "logout", detail=status.label))
+            cursor = next((i for i, option in enumerate(options) if option.value == selected), 0)
+            selected = yield ctx.pick("", options, cursor=cursor, scope=SCOPE_ROOT)
+            try:
+                if selected == "url":
+                    yield from self._prompt(ctx)
+                elif selected == "search":
+                    yield from self._prompt(ctx, search=True)
+                elif selected == "live":
+                    yield from self.live(ctx)
+                elif selected == "settings":
+                    yield ctx.settings_request()
+                elif selected == "login":
+                    yield from self.begin_login(ctx)
+                elif selected == "logout":
+                    self.logout()
+                    ctx.log("signed out", "ok")
+            except Back:
+                pass
+            except (self.API.RadioCanadaError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+
+    def _prompt(
+        self, ctx: FlowContext, target: str | None = None, *, search: bool = False,
+    ) -> Iterator[Ask]:
+        page = ctx.text("Search" if search else "Enter URL or content ID")
+        if target is None:
+            target = yield page
+        while wanted := str(target or "").strip():
+            page.default = wanted
+            try:
+                if search:
+                    yield from self._search_results(ctx, wanted)
+                else:
+                    yield from self._open_target(ctx, wanted)
+            except Back:
+                pass
+            except (self.API.RadioCanadaError, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            target = yield page
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        yield from self._prompt(ctx, target)
+
+    def _open_target(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = self.API.parse_input(target, default_tenant=self.TENANT.key)
         if parsed is None:
             ctx.error(
@@ -189,11 +234,16 @@ class CBCGem(Service):
         try:
             client = self._public_client()
             ctx.status(f"Loading {parsed.title_id}")
-            if parsed.kind in {"section", "collection"}:
+            if parsed.kind == "live":
+                yield from self._emit_live(ctx, client, client.live_event(parsed.title_id))
+                return
+            if parsed.kind in {"section", "collection", "category"}:
                 page = client.catalog(parsed.kind, parsed.title_id)
                 yield from self._catalog_page(ctx, client, page)
                 return
-            show = client.show(parsed.title_id)
+            show = client.show(
+                f"{parsed.title_id}/{parsed.selection}" if parsed.selection else parsed.title_id
+            )
         except self.API.RadioCanadaError as exc:
             ctx.error(str(exc))
             return
@@ -205,16 +255,7 @@ class CBCGem(Service):
                 title=show.title,
                 url=f"{show.id}/{parsed.selection}",
             )
-            try:
-                yield from self._search_media(ctx, client, show, hit)
-            except Back:
-                if show.kind != "movie":
-                    yield from self._series(
-                        ctx,
-                        client,
-                        show,
-                        preferred_season=int(episode_match.group(1)),
-                    )
+            yield from self._search_media(ctx, client, show, hit)
             return
         if season_match and show.kind != "movie":
             yield from self._series(
@@ -227,6 +268,9 @@ class CBCGem(Service):
         yield from self._dispatch_show(ctx, client, show)
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        yield from self._prompt(ctx, query, search=True)
+
+    def _search_results(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
         wanted = str(query or "").strip()
         if not wanted:
             return
@@ -244,21 +288,23 @@ class CBCGem(Service):
             f"search matches · {result.total}; available · {len(result.hits)}",
             "info",
         )
+        page = ctx.pick(
+            f"{self.NAME} · {wanted}",
+            [Choice(item.title, item, detail=item.detail) for item in result.hits],
+        )
         while True:
-            try:
-                hit = yield ctx.pick(
-                    f"{self.NAME} · {wanted}",
-                    [Choice(item.title, item, detail=item.detail) for item in result.hits],
-                )
-            except Back:
+            hit = yield page
+            if hit is None:
                 return
+            page.cursor = result.hits.index(hit)
             try:
-                client = self._public_client()
-                yield from self._catalog_item(ctx, client, hit)
+                yield from self._catalog_item(ctx, public, hit)
             except Back:
                 continue
-            except self.API.RadioCanadaError as exc:
+            except (self.API.RadioCanadaError, OSError) as exc:
                 ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def _catalog_page(
         self,
@@ -270,40 +316,37 @@ class CBCGem(Service):
         if not lineups:
             ctx.warn(f"{page.title}: no browsable items")
             return
+        lineup_page = ctx.pick(page.title, [Choice(item.label, item) for item in lineups])
+        item_pages: dict[int, Pick] = {}
         while True:
-            try:
-                if len(lineups) == 1:
-                    lineup = lineups[0]
-                else:
-                    lineup = yield ctx.pick(
-                        page.title,
-                        [Choice(item.label, item) for item in lineups],
-                    )
-                if lineup is None:
-                    return
-            except Back:
+            lineup = lineups[0] if len(lineups) == 1 else (yield lineup_page)
+            if lineup is None:
                 return
+            index = lineup_page.cursor = lineups.index(lineup)
+            if index not in item_pages:
+                item_pages[index] = ctx.pick(
+                    f"{page.title}  ·  {lineup.title}",
+                    [Choice(entry.title, entry, detail=entry.detail) for entry in lineup.items],
+                )
+            item_page = item_pages[index]
             while True:
                 try:
-                    item = yield ctx.pick(
-                        f"{page.title}  ·  {lineup.title}",
-                        [
-                            Choice(entry.title, entry, detail=entry.detail)
-                            for entry in lineup.items
-                        ],
-                    )
+                    item = yield item_page
                 except Back:
-                    if len(lineups) == 1:
-                        return
                     break
                 if item is None:
-                    if len(lineups) == 1:
-                        return
                     break
+                item_page.cursor = lineup.items.index(item)
                 try:
                     yield from self._catalog_item(ctx, client, item)
                 except Back:
                     continue
+                except (self.API.RadioCanadaError, OSError) as exc:
+                    ctx.error(str(exc))
+                if not ctx.interactive:
+                    return
+            if len(lineups) == 1:
+                return
 
     def _catalog_item(
         self,
@@ -312,11 +355,15 @@ class CBCGem(Service):
         item: api.SearchHit,
     ) -> Iterator[Ask]:
         ctx.status(f"Loading {item.title}")
-        if item.kind in {"section", "collection"}:
+        if item.kind == "live":
+            yield from self._emit_live(ctx, client, client.live_event(item.show_id))
+            return
+        if item.kind in {"section", "collection", "category"}:
             page = client.catalog(item.kind, item.show_id)
             yield from self._catalog_page(ctx, client, page)
             return
-        show = client.show(item.show_id)
+        selection = item.selection if item.kind in {"season", "media"} else ""
+        show = client.show(f"{item.show_id}/{selection}" if selection else item.show_id)
         if item.kind == "media":
             yield from self._search_media(ctx, client, show, item)
             return
@@ -370,16 +417,23 @@ class CBCGem(Service):
         hit: api.SearchHit,
     ) -> Iterator[Ask]:
         season_number, episode_number = hit.season_episode
+        episodes = [item for season in show.seasons for item in season.episodes]
+        selection = hit.selection.casefold()
         episode = next(
-            (
-                item
-                for season in show.seasons
-                if season_number is None or season.number == season_number
-                for item in season.episodes
-                if episode_number is not None and item.number == episode_number
-            ),
+            (item for item in episodes if selection and item.selection == selection),
             None,
         )
+        if episode is None and hit.media_id:
+            episode = next((item for item in episodes if item.media_id == hit.media_id), None)
+        if episode is None and episode_number is not None:
+            episode = next(
+                (
+                    item
+                    for season in show.seasons if season.number == season_number
+                    for item in season.episodes if item.number == episode_number
+                ),
+                None,
+            )
         if episode is None and not hit.media_id:
             yield from self._dispatch_show(ctx, client, show)
             return
@@ -401,6 +455,8 @@ class CBCGem(Service):
                 or show.synopsis,
                 cover_url=(episode.cover_url if episode is not None else hit.cover_url)
                 or show.cover_url,
+                attachments=(episode.attachments if episode is not None else hit.attachments)
+                + show.attachments,
                 app_code=(
                     self.API.LIVE_APP_CODE
                     if episode is not None
@@ -424,36 +480,38 @@ class CBCGem(Service):
         if not categories:
             ctx.warn(f"{self.NAME} returned no live streams")
             return
+        category_page = ctx.pick(
+            f"{self.NAME} Live",
+            [Choice(item.label, item, detail=item.feed_type) for item in categories],
+        )
+        channel_pages: dict[int, Pick] = {}
         while True:
-            try:
-                category = yield ctx.pick(
-                    f"{self.NAME} Live",
-                    [
-                        Choice(item.label, item, detail=item.feed_type)
-                        for item in categories
-                    ],
-                )
-            except Back:
-                return
+            category = yield category_page
             if category is None:
                 return
+            index = category_page.cursor = categories.index(category)
+            if index not in channel_pages:
+                channel_pages[index] = ctx.pick(
+                    f"{self.NAME} Live  ·  {category.title}",
+                    [Choice(item.label, item, detail=item.menu_detail) for item in category.channels],
+                )
+            channel_page = channel_pages[index]
             while True:
                 try:
-                    channel = yield ctx.pick(
-                        f"{self.NAME} Live  ·  {category.title}",
-                        [
-                            Choice(item.label, item, detail=item.menu_detail)
-                            for item in category.channels
-                        ],
-                    )
+                    channel = yield channel_page
                 except Back:
                     break
                 if channel is None:
                     break
+                channel_page.cursor = category.channels.index(channel)
                 try:
                     yield from self._emit_live(ctx, client, channel)
                 except Back:
                     continue
+                except OSError as exc:
+                    ctx.error(str(exc))
+                if not ctx.interactive:
+                    return
 
     def _movies(
         self, ctx: FlowContext, client: api.RadioCanadaApi, show: api.Show
@@ -463,24 +521,17 @@ class CBCGem(Service):
             ctx.warn(f"{show.title}: no playable items")
             return
         ctx.log(f"{show.title}: movie · {len(items)} item(s)", "ok")
+        page = ctx.pick(
+            show.title,
+            [Choice(item.label, item, detail=item.media_type) for item in items],
+            multi=True,
+        )
         while True:
-            try:
-                if len(items) == 1:
-                    chosen = items
-                else:
-                    picked = yield ctx.pick(
-                        show.title,
-                        [Choice(item.label, item, detail=item.media_type) for item in items],
-                        multi=True,
-                    )
-                    chosen = list(picked or [])
-            except Back:
-                return
+            chosen = items if len(items) == 1 else list((yield page) or [])
             if not chosen:
                 return
-            if len(chosen) > 1:
-                ctx.batch(len(chosen))
             try:
+                self._remember_batch(ctx, page, chosen)
                 for item in chosen:
                     try:
                         ctx.status(f"Resolving {item.title}")
@@ -493,12 +544,13 @@ class CBCGem(Service):
                             duration=item.duration,
                             synopsis=item.synopsis or show.synopsis,
                             cover_url=item.cover_url or show.cover_url,
+                            attachments=item.attachments + show.attachments,
                             is_live=False,
                             app_code=(
                                 self.API.LIVE_APP_CODE if item.is_live_to_vod else None
                             ),
                         )
-                    except self.API.RadioCanadaError as exc:
+                    except (self.API.RadioCanadaError, OSError) as exc:
                         ctx.error(f"{item.title}: {exc}")
                         continue
                     yield from self._emit(ctx, client, source)
@@ -506,7 +558,7 @@ class CBCGem(Service):
                 if len(items) == 1:
                     raise
                 continue
-            if len(items) == 1:
+            if len(items) == 1 or not ctx.interactive:
                 return
 
     def _extras(
@@ -516,21 +568,17 @@ class CBCGem(Service):
         if not items:
             self._empty_show(ctx, show)
             return
+        page = ctx.pick(
+            f"{show.title}  ·  extras",
+            [Choice(item.label, item, detail=item.media_type) for item in items],
+            multi=True,
+        )
         while True:
-            try:
-                picked = yield ctx.pick(
-                    f"{show.title}  ·  extras",
-                    [Choice(item.label, item, detail=item.media_type) for item in items],
-                    multi=True,
-                )
-            except Back:
-                return
-            chosen = list(picked or [])
+            chosen = list((yield page) or [])
             if not chosen:
                 return
-            if len(chosen) > 1:
-                ctx.batch(len(chosen))
             try:
+                self._remember_batch(ctx, page, chosen)
                 for item in chosen:
                     try:
                         ctx.status(f"Resolving {item.title}")
@@ -544,13 +592,26 @@ class CBCGem(Service):
                             duration=item.duration,
                             synopsis=item.synopsis or show.synopsis,
                             cover_url=item.cover_url or show.cover_url,
+                            attachments=item.attachments + show.attachments,
                         )
-                    except self.API.RadioCanadaError as exc:
+                    except (self.API.RadioCanadaError, OSError) as exc:
                         ctx.error(f"{item.title}: {exc}")
                         continue
                     yield from self._emit(ctx, client, source)
             except Back:
                 continue
+            if not ctx.interactive:
+                return
+
+    @staticmethod
+    def _remember_batch(
+        ctx: FlowContext, page: Pick, chosen: list[api.MovieItem] | list[api.Episode],
+    ) -> None:
+        page.preselected = [i for i, choice in enumerate(page.choices) if choice.value in chosen]
+        if page.preselected:
+            page.cursor = page.preselected[0]
+        if len(chosen) > 1:
+            ctx.batch(len(chosen))
 
     def _series(
         self,
@@ -573,79 +634,86 @@ class CBCGem(Service):
             (season for season in seasons if season.number == preferred_season),
             None,
         )
+        if initial is not None or len(seasons) == 1:
+            season = initial or seasons[0]
+            yield from self._episodes(ctx, client, show, season, self._episode_page(ctx, show, season))
+            return
+
+        page = ctx.pick(f"{show.title}  ·  seasons", [Choice(s.label, s) for s in seasons])
+        episode_pages: dict[int, Pick] = {}
         while True:
-            try:
-                if initial is not None:
-                    season = initial
-                    initial = None
-                elif len(seasons) == 1:
-                    season = seasons[0]
-                else:
-                    season = yield ctx.pick(
-                        f"{show.title}  ·  seasons",
-                        [Choice(s.label, s) for s in seasons],
-                    )
-                    if season is None:
-                        return
-            except Back:
+            season = yield page
+            if season is None:
                 return
-            while True:
-                try:
-                    season_label = (
-                        "Specials" if season.number == 0 else f"Season {season.number}"
-                    )
-                    picked = yield ctx.pick(
-                        f"{show.title}  ·  {season_label}",
-                        [Choice(ep.label, ep) for ep in season.episodes],
-                        multi=True,
-                        hint="space to tick, enter to confirm",
-                    )
-                except Back:
-                    if len(seasons) == 1:
-                        return
-                    break
-                chosen = list(picked or [])
-                if not chosen:
-                    if len(seasons) == 1:
-                        return
-                    break
-                if len(chosen) > 1:
-                    ctx.batch(len(chosen))
-                try:
-                    for ep in chosen:
-                        try:
-                            ctx.status(f"Resolving {ep.label}")
-                            source = self._stream(
-                                client,
-                                ep.media_id,
-                                title=show.title,
-                                year=ep.year or show.year,
-                                season=ep.season or season.number,
-                                episode=ep.number or None,
-                                episode_name=ep.title,
-                                series_title=show.title,
-                                media_type=ep.media_type,
-                                duration=ep.duration,
-                                synopsis=ep.synopsis or show.synopsis,
-                                cover_url=ep.cover_url or show.cover_url,
-                                app_code=(
-                                    self.API.LIVE_APP_CODE
-                                    if ep.media_type.lower() == "livetovod"
-                                    else None
-                                ),
-                            )
-                        except self.API.RadioCanadaError as exc:
-                            ctx.error(f"{ep.label}: {exc}")
-                            continue
-                        yield from self._emit(ctx, client, source)
-                except Back:
-                    continue
-            if len(seasons) == 1:
+            index = page.cursor = seasons.index(season)
+            if index not in episode_pages:
+                episode_pages[index] = self._episode_page(ctx, show, season)
+            try:
+                yield from self._episodes(ctx, client, show, season, episode_pages[index])
+            except Back:
+                continue
+            if not ctx.interactive:
+                return
+
+    @staticmethod
+    def _episode_page(ctx: FlowContext, show: api.Show, season: api.Season) -> Pick:
+        label = "Specials" if season.number == 0 else f"Season {season.number}"
+        return ctx.pick(
+            f"{show.title}  ·  {label}",
+            [Choice(ep.label, ep) for ep in season.episodes],
+            multi=True,
+            hint="space to tick, enter to confirm",
+        )
+
+    def _episodes(
+        self, ctx: FlowContext, client: api.RadioCanadaApi, show: api.Show,
+        season: api.Season, page: Pick,
+    ) -> Iterator[Ask]:
+        while True:
+            chosen = list((yield page) or [])
+            if not chosen:
+                return
+            try:
+                self._remember_batch(ctx, page, chosen)
+                for ep in chosen:
+                    try:
+                        ctx.status(f"Resolving {ep.label}")
+                        source = self._stream(
+                            client,
+                            ep.media_id,
+                            title=show.title,
+                            year=ep.year or show.year,
+                            season=ep.season or season.number,
+                            episode=ep.number or None,
+                            episode_name=ep.title,
+                            series_title=show.title,
+                            media_type=ep.media_type,
+                            duration=ep.duration,
+                            synopsis=ep.synopsis or show.synopsis,
+                            cover_url=ep.cover_url or show.cover_url,
+                            attachments=ep.attachments + show.attachments,
+                            app_code=(
+                                self.API.LIVE_APP_CODE
+                                if ep.media_type.lower() == "livetovod" else None
+                            ),
+                        )
+                    except (self.API.RadioCanadaError, OSError) as exc:
+                        ctx.error(f"{ep.label}: {exc}")
+                        continue
+                    yield from self._emit(ctx, client, source)
+            except Back:
+                continue
+            if not ctx.interactive:
                 return
 
     def _emit_live(
         self, ctx: FlowContext, client: api.RadioCanadaApi, channel: api.LiveChannel
     ) -> Iterator[Ask]:
+        if channel.feed_type.casefold() == "liveevent" and channel.starts_at is not None:
+            if channel.starts_at > datetime.now(channel.starts_at.tzinfo):
+                scheduled = channel.starts_at.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+                ctx.warn(f"{channel.title}: scheduled for {scheduled}")
+                return
         try:
             ctx.status(f"Resolving {channel.title}")
             source = self._stream(
@@ -656,6 +724,7 @@ class CBCGem(Service):
                 media_type=channel.feed_type,
                 synopsis=channel.synopsis,
                 cover_url=channel.cover_url,
+                attachments=channel.attachments,
                 starts_at=channel.starts_at,
                 ends_at=channel.ends_at,
                 is_live=True,
@@ -698,6 +767,8 @@ class CBCGem(Service):
                 is_live=source.is_live,
                 note=note,
                 drm=drm,
+                chapters=list(source.chapters),
+                attachments=list(source.attachments),
             )
         )
 

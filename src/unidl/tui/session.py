@@ -57,6 +57,7 @@ from ..core.flow import (
     run_flow,
 )
 from ..core.i18n import tr
+from ..core.network import NetworkCancellation, network_checkpoint
 from ..core.partner import (
     PartnerAuthorization,
     PartnerAuthorizationError,
@@ -754,6 +755,8 @@ class SessionController:
         #: stopped: a single long-lived event stays set afterwards and silently discards
         #: everything picked later in the session.
         self.cancel_event = threading.Event()
+        self._service_network = NetworkCancellation()
+        self._job_network: NetworkCancellation | None = None
         #: Set while transfer workers wait in place. Distinct from cancel: the
         #: delivery screen stays up and Resume continues the same native job.
         self.pause_event = threading.Event()
@@ -872,6 +875,7 @@ class SessionController:
         self.batch_cancelled = True
         self.cancel_event.set()
         self.pause_event.clear()
+        self._interrupt_network(include_service=True)
         # The event is the cooperative path; the engine owns the hard-stop path
         # for sockets and external downloader processes.  Keep this call
         # idempotent because both Back and application shutdown may reach it.
@@ -915,6 +919,15 @@ class SessionController:
                 shutdown()
             except Exception as exc:  # noqa: BLE001 - cancellation must continue
                 self.post_log(f"download cleanup requested: {exc}", "warning")
+
+    def _interrupt_network(self, *, include_service: bool = False) -> None:
+        if include_service:
+            scope = getattr(self, "_service_network", None)
+            if scope is not None:
+                scope.cancel()
+        scope = getattr(self, "_job_network", None)
+        if scope is not None:
+            scope.cancel()
 
     def _worker_started(self) -> None:
         """Record a controller-owned executor worker entering user code."""
@@ -1312,8 +1325,13 @@ class SessionController:
         if self.cancel_requested:
             return True  # Quit/hard cancellation already owns the teardown.
         if not self._recording_back_requested:
-            self._recording_back_requested = True
             self.stop_recording_event.set()
+            stop_capture = getattr(self.engine, "interrupt_live_capture", None)
+            if callable(stop_capture) and stop_capture() is False:
+                # Still in preparation (e.g. bitrate probe or initial playlist).
+                # There is no recording to finalize; use the normal Back path.
+                return False
+            self._recording_back_requested = True
             self.pause_event.clear()
             self.batch_cancelled = True
             self.batch_total = None
@@ -1337,6 +1355,7 @@ class SessionController:
         self.cancel_event.set()
         self.pause_event.clear()
         self.batch_cancelled = True
+        self._interrupt_network()
         # Do not authorize/emit the rest of a cancelled batch just to fill its
         # counter. Once this job finishes, delivery can return to its parent.
         self.batch_total = None
@@ -1375,6 +1394,7 @@ class SessionController:
         self.cancel_event.set()
         self.pause_event.clear()
         self._skip_one = True
+        self._interrupt_network()
         self._shutdown_active_download()
         self._on_ui(self._cancel_delivery_asks)
         self.post_log("skipping this one; the rest of the queue carries on", "warning")
@@ -1901,7 +1921,13 @@ class SessionController:
             # ServiceScreen first.
             self._worker_started()
         try:
-            self._drive()
+            scope = getattr(self, "_service_network", None)
+            if scope is None:
+                self._drive()
+            else:
+                with scope.activate():
+                    if not self.aborted:
+                        self._drive()
         finally:
             self._worker_finished()
 
@@ -1997,6 +2023,8 @@ class SessionController:
         except Quit:
             return
         except Exception as exc:
+            if self.aborted or self.leaving:
+                return
             self.flow_error = True
             self.post_error(
                 f"{self.service.NAME} stopped with an error",
@@ -2271,6 +2299,7 @@ class SessionController:
         Shared by the first attempt and by a retry, so a retried row goes through
         exactly the path it did the first time rather than a second copy of it.
         """
+        network = self._job_network = NetworkCancellation()
         self.job_running = True
         self._transfer_active = False
         job.started_at = time.monotonic()
@@ -2288,7 +2317,11 @@ class SessionController:
         self.post_frame([])
         state, note = FAILED, "stopped unexpectedly"
         try:
-            state, note = self._process(playback, presenter, ctx)
+            with network.activate():
+                if self.aborted or self.cancel_requested:
+                    network.cancel()
+                network_checkpoint()
+                state, note = self._process(playback, presenter, ctx)
             if self.cancel_requested and state in (FAILED, SKIPPED):
                 state, note = CANCELLED, "cancelled"
         except (Back, Quit):
@@ -2304,8 +2337,10 @@ class SessionController:
         finally:
             self._transfer_active = False
             self._snapshot_job(playback)
-            self._release_playback(playback)
+            with network.activate():
+                self._release_playback(playback)
             self.job_running = False
+            self._job_network = None
             self._recording_active = False
             # Whatever happened, nothing is happening now. The status line says
             # what a job is *doing*, and it used to be cleared at each of the

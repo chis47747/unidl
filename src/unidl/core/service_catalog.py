@@ -34,7 +34,7 @@ SUPPORTED_IMPLEMENTATIONS = frozenset({SOURCE_IMPLEMENTATION, COMPILED_ONLY_IMPL
 # contain a service declaration.  ``__init__.py`` and the conventional
 # ``service.py`` are always parsed so multiline base lists remain supported.
 _SERVICE_CLASS_HINT = re.compile(
-    r"^\s*class\s+\w+\s*\([^)]*\b[A-Za-z_]\w*Service\b[^)]*\)", re.MULTILINE
+    r"^\s*class\s+\w+\s*\([^)]*\b(?:[A-Za-z_]\w*)?Service\b[^)]*\)", re.MULTILINE
 )
 _DISCOVERY_CACHE: dict[Path, tuple[tuple[tuple[str, int, int], ...], tuple[ServiceSource, ...]]] = {}
 
@@ -50,6 +50,7 @@ class ServiceSource:
     implementation: str = SOURCE_IMPLEMENTATION
     module: str = ""
     manifest: Path | None = None
+    error: str = ""
 
 
 def source_root() -> Path:
@@ -91,19 +92,26 @@ def service_roots(home: Path | None = None) -> list[Path]:
     return unique
 
 
-def _manifest_metadata(path: Path, package_name: str) -> ServiceSource | None:
+def _manifest_metadata(path: Path, package_name: str) -> ServiceSource:
     try:
         with path.open("rb") as stream:
             data = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    service_id = str(data.get("id", "") or "").strip().lower()
-    name = str(data.get("name", "") or "").strip()
-    implementation = str(data.get("implementation", SOURCE_IMPLEMENTATION) or SOURCE_IMPLEMENTATION).strip().lower()
-    if not service_id or not name or implementation not in SUPPORTED_IMPLEMENTATIONS:
-        return None
+    except (OSError, ValueError):
+        return ServiceSource(
+            package_name.lower(), package_name, package_name, path,
+            manifest=path, error="Cannot read or parse service.toml.",
+        )
+    raw_id, raw_name = data.get("id"), data.get("name")
+    raw_implementation = data.get("implementation", SOURCE_IMPLEMENTATION)
+    service_id = raw_id.strip().lower() if isinstance(raw_id, str) else ""
+    name = raw_name.strip() if isinstance(raw_name, str) else ""
+    implementation = raw_implementation.strip().lower() if isinstance(raw_implementation, str) else ""
+    valid_id = re.fullmatch(r"[a-z0-9][a-z0-9_-]*", service_id)
+    if not valid_id or not name or implementation not in SUPPORTED_IMPLEMENTATIONS:
+        return ServiceSource(
+            service_id if valid_id else package_name.lower(), name or package_name, package_name, path,
+            manifest=path, error="Invalid id, name or implementation in service.toml.",
+        )
     return ServiceSource(
         service_id,
         name,
@@ -191,8 +199,11 @@ def _discover_sources_in_root(directory: Path) -> list[ServiceSource]:
             candidates = entry.glob("*.py")
             candidates = tuple(candidates) + tuple(entry.glob("*.so")) + tuple(entry.glob("*.pyd"))
             manifest = entry / "service.toml"
-            if manifest.is_file():
-                manifest_stat = manifest.stat()
+            try:
+                manifest_stat = manifest.lstat()
+            except OSError:
+                pass
+            else:
                 signature_parts.append((str(manifest), manifest_stat.st_mtime_ns, manifest_stat.st_size))
         elif entry.is_file() and entry.suffix.casefold() == ".py":
             signature_parts.append((str(entry), stat.st_mtime_ns, stat.st_size))
@@ -226,12 +237,25 @@ def _discover_sources_in_root(directory: Path) -> list[ServiceSource]:
             manifest = None
         else:
             continue
-        if manifest is not None and manifest.is_file():
+        if manifest is not None and (manifest.exists() or manifest.is_symlink()):
             metadata = _manifest_metadata(manifest, package_name)
-            if metadata is not None:
-                found.setdefault(metadata.service_id, metadata)
-                if metadata.implementation == COMPILED_ONLY_IMPLEMENTATION:
-                    continue
+            found.setdefault(metadata.service_id, metadata)
+            if metadata.error or metadata.implementation == COMPILED_ONLY_IMPLEMENTATION:
+                continue
+        elif manifest is not None and (
+            (package / "variants").is_dir()
+            or any(package.glob("_service_native.*.so"))
+            or any(package.glob("_service_native*.pyd"))
+            or (package / "_service_native.so").is_file()
+        ):
+            # A damaged compiled-only installation must not run an adjacent
+            # source checkout merely because its manifest is missing.
+            metadata = ServiceSource(
+                package_name.lower(), package_name, package_name, package,
+                manifest=manifest, error="Compiled service package is missing service.toml.",
+            )
+            found.setdefault(metadata.service_id, metadata)
+            continue
         for path in files:
             try:
                 source = path.read_text("utf-8")
@@ -264,9 +288,13 @@ def discover_sources(
     """
     roots = [Path(root)] if root is not None else service_roots(home)
     found: dict[str, ServiceSource] = {}
+    seen_packages: set[str] = set()
     for directory in roots:
-        for source in _discover_sources_in_root(directory):
-            found.setdefault(source.service_id, source)
+        sources = _discover_sources_in_root(directory)
+        for source in sources:
+            if source.package not in seen_packages:
+                found.setdefault(source.service_id, source)
+        seen_packages.update(source.package for source in sources)
     return sorted(found.values(), key=lambda item: item.name.casefold())
 
 
