@@ -23,7 +23,7 @@ from textual.widgets.option_list import Option
 
 from ..core import naming, service_catalog, template
 from ..core.i18n import tr
-from ..core.output_paths import render_episode_folder, validate_episode_folder_template
+from ..core.output_paths import finished_download_root, render_episode_folder, validate_episode_folder_template
 from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
@@ -49,7 +49,7 @@ _OUTPUT_ROWS = (
         "Finished downloads",
         "setting-path",
         "No YAML editing is required. Empty uses paths.downloads when configured, "
-        "otherwise ~/unidl_downloads. Files are grouped by service.",
+        "otherwise the default output folder. Files are grouped by service.",
     ),
     StorageRow(
         "subtitles",
@@ -328,17 +328,18 @@ class StorageManagerScreen(Screen[None]):
 
     def _display_value(self, row: StorageRow) -> tuple[str, str]:
         if row.kind == "setting-path":
+            config = self.app.config
             selected = str(self.globals.get(row.key) or "").strip()
             if selected:
-                return str(Path(selected).expanduser()), tr("storage.source.override")
-            raw = self.app.config.raw.get("paths") or {}
-            explicit = isinstance(raw, dict) and "downloads" in raw
+                return str(finished_download_root(config, self.globals)), tr("storage.source.override")
+            raw = config.raw.get("paths") or {}
+            explicit = config.missing_config is None and isinstance(raw, dict) and "downloads" in raw
             source = "storage.source.yaml" if explicit else "storage.source.builtin"
-            return str(self.app.config.paths.downloads), tr(source)
+            return str(config.paths.downloads), tr(source)
         if row.kind == "config-path":
             value = getattr(self.app.config.paths, row.key)
             raw = self.app.config.raw.get("paths") or {}
-            explicit = isinstance(raw, dict) and bool(str(raw.get(row.key) or "").strip())
+            explicit = self.app.config.missing_config is None and isinstance(raw, dict) and bool(str(raw.get(row.key) or "").strip())
             return str(value), tr("storage.source.yaml") if explicit else tr("storage.source.home_default")
         if row.kind == "choice":
             value = self.globals.get(row.key)
@@ -487,7 +488,7 @@ class StorageManagerScreen(Screen[None]):
             raise ValueError("a folder path must be one line")
         path = Path(value).expanduser()
         if not path.is_absolute():
-            base = self.app.config.source.parent if self.app.config.source else Path.cwd()
+            base = self.app.config.config_path.parent
             path = base / path
         return str(path.resolve(strict=False))
 

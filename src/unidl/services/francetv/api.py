@@ -1,4 +1,5 @@
-"""France.tv Android TV (fr.francetv.pluzz) API."""
+"""France.tv Android API.
+"""
 
 from __future__ import annotations
 
@@ -20,9 +21,9 @@ import requests
 from ...core.attachments import Attachment
 from ...core.chapters import Chapter
 
-APP_VERSION = "5.14.2"
-PLAYER_VERSION = "7.19.1"
-MEDIA3_VERSION = "1.9.0"
+APP_VERSION = "5.17.0"
+PLAYER_VERSION = "7.20.0"
+MEDIA3_VERSION = "1.9.0"  # Advertised by the player User-Agent.
 PACKAGE_NAME = "fr.francetv.pluzz"
 PLATFORM = "apps_tv"
 PROGRAM_SOURCE = "apps"
@@ -43,6 +44,7 @@ DEVICE_MODEL = "Chromecast"
 DEVICE_BUILD = "STTE.220621.019.A2"
 SCREEN_WIDTH = "1500"
 K7_CAPABILITIES = "drm2+mlt+spr+dai+p2p"
+K7_REGION_UNAVAILABLE = 2009
 SUPPORT_4K = True
 TOKEN_MIN_TTL_SECONDS = 42
 REQUEST_TIMEOUT = 30
@@ -87,9 +89,12 @@ class FranceTvAuthRequired(FranceTvError):
     pass
 
 
-class RefreshRejected(FranceTvError):
+class FranceTvRegionUnavailable(FranceTvError):
     pass
 
+
+class RefreshRejected(FranceTvError):
+    pass
 
 
 @dataclass
@@ -192,7 +197,6 @@ class DeviceCodeChallenge:
     url: str = ACTIVATION_URL
     deadline: float = 0.0
     transient_errors: int = 0
-
 
 
 def _as_int(value: Any) -> int | None:
@@ -675,6 +679,7 @@ def catalog_item_from_raw(item: dict[str, Any], *, entry_kind: str | None = None
 
 
 def parse_input(value: str) -> tuple[str, str] | None:
+    """Return a strict supported route without reflecting rejected input."""
     raw = value.strip() if isinstance(value, str) else ""
     if not raw:
         return None
@@ -707,6 +712,7 @@ def parse_input(value: str) -> tuple[str, str] | None:
     ):
         return None
     return _parse_supported_path(parsed.path, query)
+
 
 
 class FranceTvApi:
@@ -875,6 +881,7 @@ class FranceTvApi:
             type_token = previous.type_token
         if not type_token:
             raise FranceTvError("France.tv token response is missing a token type")
+
         expire_in = ""
         for key in ("expire_in", "expires_in"):
             if key in token_data:
@@ -1057,17 +1064,18 @@ class FranceTvApi:
             },
         )
         keys = ("contents", "programs", "collections")
-        if not any(key in payload for key in keys):
+        if payload and not any(key in payload for key in keys):
             raise FranceTvError("France.tv search response has an invalid shape")
         results: list[CatalogItem] = []
         for key in keys:
+            if payload.get(key) is None:
+                continue
             for raw in _list_field(payload, key):
                 if not isinstance(raw, dict):
                     raise FranceTvError("France.tv search response has an invalid item")
                 item = catalog_item_from_raw(raw)
-                if item is None:
-                    raise FranceTvError("France.tv search response has an unsupported item")
-                results.append(item)
+                if item is not None and item.kind != "article":
+                    results.append(item)
         return results
 
     def live_channels(self) -> list[CatalogItem]:
@@ -1199,8 +1207,6 @@ class FranceTvApi:
             for raw in _list_field(collection, "items", required=True):
                 if not isinstance(raw, dict):
                     raise FranceTvError("France.tv program page has an invalid item")
-                # Programme and collection cards navigate elsewhere; only rows with
-                # both identifiers can resolve to a video.
                 if not (raw.get("id") and raw.get("si_id")):
                     continue
                 owner = raw.get("program")
@@ -1294,10 +1300,17 @@ class FranceTvApi:
         }
         response = self._request(
             "GET",
-            urljoin(K7_BASE_URL, f"videos/{quote(si_id, safe='-')}") ,
+            urljoin(K7_BASE_URL, f"videos/{quote(si_id, safe='-')}"),
             params=params,
             headers={"Accept": "application/json", "User-Agent": USER_AGENT},
         )
+        if response.status_code == 422:
+            error = self._error_json_object(response)
+            if error.get("code") == K7_REGION_UNAVAILABLE:
+                raise FranceTvRegionUnavailable(
+                    "France.tv playback is not available in this region",
+                    status_code=response.status_code,
+                )
         if response.status_code >= 400:
             raise FranceTvError(
                 "France.tv playback metadata request failed",

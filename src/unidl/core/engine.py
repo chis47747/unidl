@@ -68,7 +68,7 @@ from .delivery import (
 from .diagnostics import DebugRecorder, activate, safe_log_text
 from .manifest_sources import manifest_json, merge_source_metadata, subtitle_source_identity, with_subtitle_sources
 from .network import network_get
-from .output_paths import render_episode_folder
+from .output_paths import finished_download_root, render_episode_folder
 from .playback import Playback, normalize_live_record_limit
 from .secureio import atomic_write_bytes, atomic_write_text, locked_path, private_directory, private_file, safe_filename
 from .settings import Settings, license_action, normalize_drop_video_pattern
@@ -3552,8 +3552,7 @@ class Engine:
         applied below it only for structured ``TitleKind.EPISODE`` values; movies,
         live programs and audio tracks retain the service-level layout.
         """
-        chosen = str((settings.get("download_dir") if settings else "") or "").strip()
-        root = Path(chosen).expanduser() if chosen else self.config.paths.downloads
+        root = finished_download_root(self.config, settings)
         name = _folder_name(service)
         directory = root / name if name else root
         folder_template = str(

@@ -1,0 +1,12 @@
+# UniDL's bundled defaults. Relative paths are based on the location of the
+# local unidl.yaml, not this installed package. Keep the local file out of Git.
+paths:
+  home: .
+  downloads: ./downloads
+  commands: ./download_commands
+  exports: ./exports
+  keys_db: ./db/keys.db
+
+# Add your own device paths in the local unidl.yaml, or use the resource manager.
+cdm:
+  devices: {}

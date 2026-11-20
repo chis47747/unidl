@@ -41,7 +41,6 @@ class Mewatch(Service):
         super().__init__(ctx)
         self._api: api.MewatchApi | None = None
 
-    # -------------------------------------------------------------------- auth
     def auth_status(self) -> AuthStatus:
         state = api.Session.from_cache(self.ctx.tokens.read(self.TOKEN_FILE))
         if state.signed_in:
@@ -193,7 +192,6 @@ class Mewatch(Service):
         self._api = client
         return client
 
-    # ---------------------------------------------------------------- browsing
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         parsed = api.parse_input(target)
         if parsed is None:
@@ -323,17 +321,29 @@ class Mewatch(Service):
                     return
 
     def _open_item(self, ctx: FlowContext, client: api.MewatchApi, item: api.Item) -> Iterator[Ask]:
+        if item.type == "link" and item.path:
+            parsed = api.parse_input(f"https://www.mewatch.sg{item.path}")
+            if parsed is None:
+                ctx.warn("This mewatch link does not point to a supported catalogue page or title")
+                return
+            if parsed.kind == "page":
+                yield from self._page(ctx, client, parsed.value)
+                return
+            try:
+                item = client.item(parsed.value)
+            except api.MewatchError as exc:
+                ctx.error(str(exc))
+                return
         if item.is_show:
             yield from self._show(ctx, client, item)
             return
-        if item.type == "link" and item.path:
-            parsed = api.parse_input(f"https://www.mewatch.sg{item.path}")
-            if parsed is not None and parsed.kind == "item":
-                try:
-                    item = client.item(parsed.value)
-                except api.MewatchError as exc:
-                    ctx.error(str(exc))
-                    return
+        if item.type == "channel":
+            yield from self._emit_live(
+                ctx,
+                client,
+                api.LiveChannel(item.id, item.title, description=item.description, path=item.path),
+            )
+            return
         yield from self._emit_item(ctx, client, item)
 
     def _show(self, ctx: FlowContext, client: api.MewatchApi, show: api.Item) -> Iterator[Ask]:
@@ -398,7 +408,6 @@ class Mewatch(Service):
             if not ctx.interactive:
                 return
 
-    # ---------------------------------------------------------------- playback
     def _emit_item(
         self,
         ctx: FlowContext,
@@ -462,7 +471,12 @@ class Mewatch(Service):
             if show is not None
             else str(item.raw.get("contextualTitle") or item.raw.get("showTitle") or item.title)
         )
-        kind = TitleKind.EXTRA if item.type in {"clip", "extra"} else TitleKind.EPISODE
+        if item.type == "clip" or item.subtype.lower() == "programclip":
+            kind = TitleKind.CLIP
+        elif item.type in {"program", "extra"}:
+            kind = TitleKind.EXTRA
+        else:
+            kind = TitleKind.EPISODE
         return Title(
             id=item.id,
             kind=kind,
@@ -564,7 +578,6 @@ class Mewatch(Service):
             playback.drm = DrmInfo(clear=True)
         return playback
 
-    # ------------------------------------------------------------------- drm
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
         if not drm.license_url:
             raise CdmError("mewatch playback returned no Widevine licence URL")

@@ -6,20 +6,28 @@ After installation, run `unidl` (or `python -m unidl`). A missing YAML file
 does not prevent startup. On first launch, Home shows the actual download
 directory with a clickable link to review or change it.
 
-The default is `~/unidl_downloads/<service>/`, which on Windows normally means
-`C:\Users\<username>\unidl_downloads\<service>\`. Directories are created
-automatically. Use **Settings → Files & naming → Output locations → Finished
-downloads** to change the destination without editing YAML.
+If there is no local configuration, the bundled, credential-free `unidl.yaml`
+supplies project-relative defaults: `downloads/<service>/`, `download_commands/`,
+`exports/`, and runtime state beside the expected local file. For example,
+starting a packaged install from `D:\unidl` uses `D:\unidl\downloads`. An
+explicit `UNIDL_HOME` still redirects runtime state when no local file is loaded.
+Use **Settings → Files & naming → Output locations → Finished downloads** to
+change the destination without editing YAML.
 
-Precedence is: the saved **Finished downloads** preference, then YAML
-`paths.downloads`, then the built-in `~/unidl_downloads` default. Setting
-`paths.home` changes runtime state, not this finished-media default.
+The saved **Finished downloads** preference wins over YAML `paths.downloads`.
+An existing local YAML keeps its path behavior, including the home-directory
+fallback for omitted entries. Setting `paths.home` changes runtime state, not
+the finished-media directory. Existing files are not moved.
 
 Use `--config PATH` only to choose a specific file. For example,
 `unidl --config ./unidl.private.yaml` does not read `unidl.yaml`; editing the
 latter will not change that run. Keep using the same explicit path on later
 launches. Source installs normally use their checkout's `unidl.yaml`; packaged
-installs use `unidl.yaml` in the current directory if it exists.
+installs use `unidl.yaml` in the current directory if it exists. If the expected
+file is missing, bundled relative paths use that same directory as their base,
+not the package installation directory. On Home, **Config** can create the
+local file. **Readiness → Where things are kept** reports the config path
+(including when it was not found), runtime home, and effective download folder.
 
 UniDL has two configuration tiers:
 
@@ -83,7 +91,7 @@ directories below are derived from it; finished downloads are the exception:
 
 | Path | Purpose |
 |---|---|
-| downloads | Finished media under `~/unidl_downloads`, grouped by service, unless overridden. Not derived from paths.home. |
+| downloads | Finished media, grouped by service. Bundled defaults use `./downloads`; this is not derived from paths.home. |
 | commands | Saved command/export text, grouped by service. |
 | exports | Re-importable resolved-title JSON documents. |
 | cache / temp | Manifest, segment and transient working data. |

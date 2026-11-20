@@ -112,8 +112,9 @@ python -m pip install --upgrade pip unidl
 unidl
 ```
 
-默认下载到 `~/unidl_downloads/<服务名>/`，Windows 通常为
-`C:\Users\<用户名>\unidl_downloads\<服务名>\`。首次启动主页会展示实际位置，
+没有本地配置时，默认下载到项目的 `downloads/<服务名>/`。例如，在
+`D:\unidl` 运行通过 pip 安装的 UniDL，默认下载到 `D:\unidl\downloads`。
+首次启动主页会展示实际位置，
 点击可进入设置查看或修改，无需编辑 YAML。查看后提示会隐藏，但始终可在
 **Settings → Files & naming → Output locations → Finished downloads** 修改目录。
 源码用户也可执行 `uv sync` 后运行 `uv run unidl`；普通使用无需 `uv lock`
@@ -126,7 +127,9 @@ unidl
 unidl
 ```
 
-`python -m unidl` 与上面的命令等价。通过包安装时，如果当前目录存在 `unidl.yaml`，程序将使用该配置；否则使用安全的内置路径默认值。配置位于其他位置时请显式指定：
+`python -m unidl` 与上面的命令等价。通过包安装时，如果当前目录存在
+`unidl.yaml`，程序优先使用该文件；否则使用随包提供的 `unidl.yaml`，相对路径
+仍以启动目录为基准。配置位于其他位置时请显式指定：
 
 ```console
 unidl --config ./unidl.yaml

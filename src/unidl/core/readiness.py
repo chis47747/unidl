@@ -34,6 +34,8 @@ from pathlib import Path
 
 from . import drm as drm_registry
 from .helpers import Helper, HelperKind, HelperResolver
+from .i18n import tr
+from .output_paths import finished_download_root
 
 #: The order groups are shown in, worst consequence first.
 GROUPS = ("drm", "tools", "assets", "folders")
@@ -338,10 +340,11 @@ def _mp4box_items() -> list[Item]:
     )]
 
 
-def _folder_items(config) -> list[Item]:
+def _folder_items(config, settings=None) -> list[Item]:
     paths = config.paths
     wanted = [
-        ("Downloads", paths.downloads, "where finished files land"),
+        ("Downloads", finished_download_root(config, settings), "where finished files land"),
+        (tr("ready.runtime_home"), paths.home, "runtime state and preferences"),
         ("Commands", paths.commands, "the exported UniDL commands"),
         ("Exports", paths.exports, "the portable manifest-and-keys files"),
         ("Tokens", paths.tokens, "what a sign-in produced"),
@@ -350,6 +353,13 @@ def _folder_items(config) -> list[Item]:
         ("Key vault", paths.keys_db, "the local KID:key database"),
     ]
     items = []
+    missing_config = getattr(config, "missing_config", None)
+    loaded_config = getattr(config, "loaded_config", None)
+    if missing_config or loaded_config:
+        detail = tr("ready.config_missing", path=missing_config) if missing_config else str(loaded_config)
+        # A local file is optional: falling back is informational, not a failed
+        # dependency check. The runtime and download rows show the resulting paths.
+        items.append(Item(group="folders", label=tr("ready.config_file"), ok=True, detail=detail))
     for label, path, what in wanted:
         target = Path(path)
         # A folder that does not exist yet is not a problem: it is made on demand.
@@ -443,7 +453,7 @@ def forget() -> None:
     _kept = None
 
 
-def survey(config, registry=None, *, fresh: bool = False) -> Report:
+def survey(config, registry=None, *, fresh: bool = False, settings=None) -> Report:
     """The whole report, in the order it should be read.
 
     ``fresh`` re-runs every probe. That is what "check again" means, and it is the
@@ -464,7 +474,7 @@ def survey(config, registry=None, *, fresh: bool = False) -> Report:
         + _hybrid_items()
         + _mp4box_items()
         + _compiled_service_items()
-        + _folder_items(config)
+        + _folder_items(config, settings)
     )
     order = {name: index for index, name in enumerate(GROUPS)}
     items.sort(key=lambda item: (order.get(item.group, 99), -item.severity, item.label.lower()))

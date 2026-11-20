@@ -21,7 +21,6 @@ _FLOW_ERRORS = (RuntimeError, requests.RequestException, OSError)
 def _browse_page(
     ctx: FlowContext, page: Pick, visit: Callable[[Any], Iterator[Ask]],
 ) -> Iterator[Ask]:
-    """Keep the actual parent page and its selection while visiting a child."""
     while True:
         selected = yield page
         if selected is None:
@@ -98,7 +97,6 @@ class VrtMax(Service):
         super().__init__(ctx)
         self._api: api.VrtMaxApi | None = None
 
-    # ------------------------------------------------------------------- auth
     def _save_state(self, state: api.Session) -> None:
         path = self.ctx.tokens.write(self.TOKEN_FILE, state.to_cache())
         path.chmod(0o600)
@@ -185,9 +183,7 @@ class VrtMax(Service):
             ctx.log("VRT MAX TV session ready", "ok")
         return client
 
-    # -------------------------------------------------------------------- home
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
-        """Add the TV homepage browse entry to the framework's normal actions."""
         page = ctx.pick("", [], scope=SCOPE_ROOT)
         while True:
             status = self._auth_status_quietly()
@@ -235,7 +231,6 @@ class VrtMax(Service):
                     "The service menu is still open - the rest of the session is fine.",
                 )
 
-    # --------------------------------------------------------------- catalogue
     def _browse(self, ctx: FlowContext) -> Iterator[Ask]:
         client = self.client(ctx)
         ctx.status("Loading the VRT MAX TV homepage")
@@ -514,7 +509,6 @@ class VrtMax(Service):
             return client.complete_list(catalog)
         return catalog
 
-    # --------------------------------------------------------------- playback
     def _emit_item(
         self,
         ctx: FlowContext,

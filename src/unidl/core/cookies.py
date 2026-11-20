@@ -31,10 +31,13 @@ from __future__ import annotations
 import html
 import os
 import tempfile
+import threading
+import warnings
 from dataclasses import dataclass
-from http.cookiejar import CookieJar, MozillaCookieJar
+from http.cookiejar import CookieJar, LoadError, MozillaCookieJar
 from pathlib import Path
 
+from .i18n import tr
 from .secureio import (
     FILE_MODE,
     atomic_write_via,
@@ -46,6 +49,7 @@ from .secureio import (
 
 #: the first line every Netscape cookie file starts with, in one spelling or another
 _HEADERS = ("# netscape http cookie file", "# http cookie file")
+_parse_lock = threading.Lock()
 
 
 class CookieError(RuntimeError):
@@ -60,8 +64,11 @@ class CookieInfo:
     count: int = 0
     domains: tuple[str, ...] = ()
     profile: str = "default"
+    error: str = ""
 
     def line(self) -> str:
+        if self.error:
+            return self.error
         where = ", ".join(self.domains[:3])
         more = f" +{len(self.domains) - 3}" if len(self.domains) > 3 else ""
         return f"{self.count} cookie(s) for {where}{more}"
@@ -203,10 +210,10 @@ class CookieStore:
             raise CookieError(f"no cookie file at {path}")
         private_file(path)
         try:
-            text = html.unescape(path.read_text("utf-8", errors="replace"))
+            source_text = path.read_text("utf-8", errors="replace")
         except OSError as exc:
             raise CookieError(f"could not read {path.name}: {exc}") from exc
-        text = _with_netscape_header(text)
+        text = _with_netscape_header(html.unescape(source_text))
 
         jar = MozillaCookieJar()
         # Parsed from a temporary copy rather than the original: MozillaCookieJar
@@ -217,6 +224,7 @@ class CookieStore:
             prefix=".cookie-read.", suffix=".txt", dir=str(self.root)
         )
         scratch = Path(scratch_name)
+        problem = ""
         try:
             set_fd_mode(descriptor, FILE_MODE)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -225,15 +233,25 @@ class CookieStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             jar.filename = str(scratch)
-            jar.load(ignore_discard=True, ignore_expires=True)
-        except Exception as exc:  # cookiejar raises LoadError, not OSError
-            raise CookieError(_why(path, text, exc)) from exc
+            with _parse_lock, warnings.catch_warnings():
+                # The stdlib warning and LoadError can include the rejected
+                # record. Never send either unfiltered to a user or the log.
+                warnings.filterwarnings("ignore", r"^http\.cookiejar bug!", UserWarning, r"^http\.cookiejar$")
+                jar.load(ignore_discard=True, ignore_expires=True)
+        except LoadError:
+            problem = _why(path, source_text)
+        except OSError as exc:
+            problem = f"could not read {path.name}: {exc.strerror or type(exc).__name__}"
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
             scratch.unlink(missing_ok=True)
             jar.filename = str(path)
 
+        if problem:
+            # Outside the except block so the unsanitized parser exception is
+            # not attached even as a suppressed traceback context.
+            raise CookieError(problem)
         if not len(jar):
             raise CookieError(f"{path.name} has no cookies in it")
         _keep_forever(jar)
@@ -254,8 +272,8 @@ class CookieStore:
             return None
         try:
             jar = self.load(path)
-        except CookieError:
-            return CookieInfo(path=path, count=0, profile=profile or "default")
+        except CookieError as exc:
+            return CookieInfo(path=path, profile=profile or "default", error=str(exc))
         domains = sorted({cookie.domain for cookie in jar if cookie.domain})
         return CookieInfo(
             path=path,
@@ -434,13 +452,8 @@ def _with_netscape_header(text: str) -> str:
     return "# Netscape HTTP Cookie File\n" + text
 
 
-def _why(path: Path, text: str, exc: Exception) -> str:
-    """Say what is wrong with a file that would not parse.
-
-    "invalid Netscape format cookies file" is true and useless. The three things
-    that actually happen are a missing header line, a file that is HTML, and a
-    file whose columns are spaces instead of tabs - and each has a different fix.
-    """
+def _why(path: Path, text: str) -> str:
+    """Diagnose a rejected export without quoting any fields from it."""
     first = next((line for line in text.splitlines() if line.strip()), "")
     lowered = first.strip().lower()
     if lowered.startswith("<"):
@@ -448,18 +461,36 @@ def _why(path: Path, text: str, exc: Exception) -> str:
             f"{path.name} is a web page, not a cookie file - the export probably "
             "saved the page instead of the download"
         )
-    if not any(lowered.startswith(header) for header in _HEADERS):
+    has_header = any(lowered.startswith(header) for header in _HEADERS)
+    if has_header and "\t" not in text:
+        return (
+            f"{path.name} has no tab characters, so its columns cannot be read - "
+            "something has reformatted it (a spreadsheet, or copy and paste)"
+        )
+    if has_header or "\t" in text:
+        # Count original lines, not the temporary copy with a synthetic header.
+        for number, raw in enumerate(text.split("\n"), 1):
+            row = html.unescape(raw).removeprefix("#HttpOnly_")
+            if not row.strip() or row.lstrip().startswith(("#", "$")):
+                continue
+            columns = row.split("\t")
+            if len(columns) != 7:
+                return tr("cookies.error.columns", name=path.name, line=number)
+            domain, subdomains, _path, _secure, expires, _name, _value = columns
+            if (subdomains == "TRUE") != domain.startswith("."):
+                return tr("cookies.error.domain", name=path.name, line=number)
+            if expires:
+                try:
+                    int(float(expires))  # Match Cookie's handling; don't reject valid legacy exports.
+                except (ValueError, OverflowError):
+                    return tr("cookies.error.expiry", name=path.name, line=number)
+    if not has_header:
         return (
             f"{path.name} does not start with the Netscape cookie header. Export "
             "it again as cookies.txt, or add this as its first line:\n"
             "    # Netscape HTTP Cookie File"
         )
-    if "\t" not in text:
-        return (
-            f"{path.name} has no tab characters, so its columns cannot be read - "
-            "something has reformatted it (a spreadsheet, or copy and paste)"
-        )
-    return f"{path.name} could not be read as a cookie file: {exc}"
+    return tr("cookies.error.invalid", name=path.name)
 
 
 def cookie_names(jar: CookieJar) -> list[str]:

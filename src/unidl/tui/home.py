@@ -40,6 +40,7 @@ from ..core import service_catalog
 from ..core.cdm import WIDEVINE
 from ..core.devreload import ReloadError
 from ..core.i18n import phrase, tr
+from ..core.output_paths import finished_download_root
 from ..core.service import Service
 from . import banner
 from .askhost import MODE_LABEL as _MODE_LABEL
@@ -291,12 +292,14 @@ class HomeScreen(Screen):
             + (f"  [$warn]{tr('home.chip.debug')}[/]" if debug else ""),
             f"{after_word} {action}{debug}",
         )
-        if config.source is not None:
+        config_chip = self.query_one("#chip-config", StatusChip)
+        if config.loaded_config is not None:
             self._set_chip(
                 "chip-config",
-                f"[$muted]{config_word}[/] [$manifest]{config.source.name}[/]",
-                f"{config_word} {config.source.name}",
+                f"[$muted]{config_word}[/] [$manifest]{visual_markup(config.loaded_config.name)}[/]",
+                f"{config_word} {config.loaded_config.name}",
             )
+            config_chip.tooltip = str(config.loaded_config)
         else:
             self._set_chip(
                 "chip-config",
@@ -309,8 +312,13 @@ class HomeScreen(Screen):
                 f"[$warn]{config_word}[/] [$muted]{tr('home.chip.config_create')}[/]",
                 f"{config_word} {tr('home.chip.config_create')}",
             )
-            chip = self.query_one("#chip-config", StatusChip)
-            chip.tooltip = tr("home.chip.config_create_tip")
+            config_chip.tooltip = tr("home.chip.config_create_tip")
+            if config.missing_config is not None:
+                config_chip.tooltip = "\n".join((
+                    tr("ready.config_missing", path=config.missing_config),
+                    f"{tr('ready.runtime_home')}: {config.paths.home}",
+                    tr("home.chip.config_create_tip"),
+                ))
         self._refresh_ready_chip()
         self._refresh_import_chip()
         self._fit_statusline()
@@ -379,7 +387,7 @@ class HomeScreen(Screen):
         from ..core import readiness
 
         try:
-            report = readiness.survey(self.app.config, self.app.registry)
+            report = readiness.survey(self.app.config, self.app.registry, settings=self.app.globals)
         except Exception:  # noqa: BLE001 - a report that cannot be built is not fatal
             result = ("unknown", 0, 0)
         else:
@@ -431,7 +439,7 @@ class HomeScreen(Screen):
         download_note = self.query_one("#download-setup-note", StatusChip)
         download_note.display = not self.app.globals.get("download_location_confirmed", False)
         if download_note.display:
-            folder = str(self.app.globals.get("download_dir") or self.app.config.paths.downloads)
+            folder = str(finished_download_root(self.app.config, self.app.globals))
             download_note.update(
                 f"[$accent]{visual_markup(tr('home.download_location', path=folder))}[/]\n"
                 f"[$dim]{visual_markup(tr('home.download_location_hint'))}[/]"

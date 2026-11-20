@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from . import template
 from .titles import Title, TitleKind
@@ -23,6 +23,12 @@ _INVALID_COMPONENT = re.compile(r'[<>:"\\|?*\x00-\x1f]')
 _RESERVED_COMPONENT = re.compile(
     r"(?i)^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$"
 )
+
+
+def finished_download_root(config, settings=None) -> Path:
+    """Use the same output root in delivery, settings and diagnostics."""
+    override = str((settings.get("download_dir") if settings is not None else "") or "").strip()
+    return Path(override).expanduser() if override else config.paths.downloads
 
 
 def safe_folder_component(value: object, *, fallback: str = "Unknown") -> str:

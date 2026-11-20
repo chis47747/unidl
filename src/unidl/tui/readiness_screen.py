@@ -97,7 +97,7 @@ class ReadinessScreen(Screen[None]):
     def build(self, *, fresh: bool = False) -> None:
         """Survey, then draw. Both here: the survey is what takes the time."""
         palette = self.app.palette
-        report = readiness.survey(self.app.config, self.app.registry, fresh=fresh)
+        report = readiness.survey(self.app.config, self.app.registry, fresh=fresh, settings=self.app.globals)
         self._report = report
 
         head = Text()
@@ -137,7 +137,8 @@ class ReadinessScreen(Screen[None]):
         # the column still gets its two spaces rather than running into the detail
         label = visual_text(item.label)
         line.append(f"{label:<{LABEL_WIDTH}}  ", style=palette.fg if item.ok else palette.fg2)
-        line.append(_first_line(item.detail), style=palette.dim if item.ok else palette.fg2)
+        detail = visual_text(item.detail) if item.group == "folders" else _first_line(item.detail)
+        line.append(detail, style=palette.dim if item.ok else palette.fg2)
         if not item.ok:
             if item.hint:
                 line.append(f"\n     {visual_text(item.hint)}", style=palette.accent)

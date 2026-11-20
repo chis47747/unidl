@@ -39,14 +39,13 @@ from textual.binding import Binding
 
 from ..core import i18n, playready, service_catalog, vaults
 from ..core.brands import service_tag
-from ..core.config import Config, default_config_path
+from ..core.config import Config
 from ..core.credentials import mask_in
 from ..core.devreload import ReloadError, ReloadResult, ServiceReloader
 from ..core.drm import CdmError
 from ..core.engine import Engine
 from ..core.helpers import HelperResolver
 from ..core.i18n import tr
-from ..core.secureio import atomic_write_text, private_file
 from ..core.service import Capabilities, Service, registry
 from ..core.settings import SettingsStore, global_settings
 from ..core.vault import KeyVault
@@ -698,24 +697,12 @@ class UnidlApp(App):
 
     def open_config(self) -> None:
         """Open the config file in the system default editor, creating it if needed."""
-        path = self.config.source or default_config_path()
-        example = Path(__file__).resolve().parents[3] / "unidl.example.yaml"
         try:
-            if not path.is_file():
-                text = (
-                    example.read_text("utf-8")
-                    if example.is_file()
-                    else "# unidl configuration\n"
-                )
-                atomic_write_text(path, text)
+            path, created = self.config.ensure_config_file()
+            if created:
                 self.notify(tr("notify.created", path=path), timeout=4)
-            else:
-                private_file(path)
-            # A second click must open the file just created, not recreate it from
-            # the example and erase edits made after the first click.
-            self.config.source = path
-        except OSError as exc:
-            self.notify(tr("notify.create_fail", path=path, error=exc), severity="error", timeout=6)
+        except (OSError, ValueError) as exc:
+            self.notify(tr("notify.create_fail", path=self.config.config_path, error=exc), severity="error", timeout=6)
             return
         self.open_path(path)
 

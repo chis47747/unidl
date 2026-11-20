@@ -37,8 +37,9 @@ id_ed25519
 # here: visible is not the same as shareable. Sessions, keys and CDM devices are
 # the three things in this tree that must never leave the machine.
 .unidl-core/
-# The root YAML is mutable local configuration. Commit only the example.
+# Local YAML may contain credentials. Only the packaged defaults are public.
 unidl.yaml
+!/src/unidl/unidl.yaml
 cache/
 downloads/
 subtitles/

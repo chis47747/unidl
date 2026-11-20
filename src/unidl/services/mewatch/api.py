@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -31,7 +31,14 @@ DEVICE = "tv_android"
 LANGUAGE = "en"
 SEGMENTS = "all"
 FEATURE_FLAGS = "ldp,idp,rpt,cd"
-USER_AGENT = "okhttp/4.12.0"
+APP_VERSION = "6.160.101"
+APP_BUILD = 4074654
+ANDROID_VERSION = "7.0"
+ANDROID_API_LEVEL = 24
+USER_AGENT = (
+    f"/mewatchTV-prod/{APP_BUILD}/{APP_VERSION}"
+    f"Dalvik/2.1.0 (Linux; U; Android {ANDROID_VERSION})"
+)
 REQUEST_TIMEOUT = 25
 TOKEN_SKEW = 60
 PAGE_SIZE = 24
@@ -260,8 +267,6 @@ class Session:
             ),
             None,
         )
-        if match is None and scope == "Catalog":
-            match = next((token for token in reversed(self.axis_tokens) if token.type == kind), None)
         return match if match is not None and (not fresh or match.fresh()) else None
 
     def ingest_axis(self, payload: Any) -> None:
@@ -452,6 +457,8 @@ class Item:
 
     @property
     def type_label(self) -> str:
+        if self.type == "program":
+            return "Clip" if self.subtype.lower() == "programclip" else "Extra"
         labels = {
             "show": "Series",
             "series": "Series",
@@ -582,7 +589,9 @@ def parse_input(value: str) -> ParsedInput | None:
         fragment = parsed.fragment
         path = fragment if fragment.startswith("/") else f"/{fragment}"
     page = path.rstrip("/") or "/"
-    if page in {"/", "/movies", "/series", "/live-tv", "/live-tv/free-channels"}:
+    if page in {"/", "/movies", "/series", "/live-tv", "/live-tv/free-channels"} or page.startswith(
+        ("/movies/", "/series/", "/list/")
+    ):
         return ParsedInput("page", page)
     match = _ID_AT_END.search(page)
     return ParsedInput("item", match.group(1)) if match else None
@@ -600,6 +609,7 @@ class MewatchApi:
         self.state = state or Session()
         self.state.ensure_device_id()
         self.on_save = on_save
+        self._enhanced_search: bool | None = None
         self.http.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
 
     def _save(self) -> None:
@@ -649,15 +659,18 @@ class MewatchApi:
         finally:
             response.close()
 
-    @staticmethod
-    def common_params(**extra: Any) -> dict[str, Any]:
-        return {
+    def common_params(self, **extra: Any) -> dict[str, Any]:
+        params = {
             "device": DEVICE,
             "segments": SEGMENTS,
             "ff": FEATURE_FLAGS,
             "lang": LANGUAGE,
             **extra,
         }
+        subscription = self.state.account.get("subscriptionCode")
+        if subscription:
+            params["sub"] = str(subscription)
+        return params
 
     def _axis_headers(self, kind: str = "") -> dict[str, str]:
         token = None
@@ -670,7 +683,6 @@ class MewatchApi:
                     break
         return {"X-Authorization": f"Bearer {token.value}"} if token is not None else {}
 
-    # ------------------------------------------------------------------ auth
     def ensure_anonymous(self) -> AxisToken:
         existing = self.state.token("Anonymous")
         if existing is not None:
@@ -734,6 +746,7 @@ class MewatchApi:
                 raise MewatchError("mewatch TV activation was denied") from exc
             raise
         self.state.ingest_auth0(payload)
+        self._save()
         self._finish_account_login()
         self._save()
         return self.state
@@ -828,8 +841,8 @@ class MewatchApi:
         self._save()
         return self.state.profile
 
-    def _refresh_auth0(self) -> None:
-        if self.state.auth0_fresh():
+    def _refresh_auth0(self, *, force: bool = False) -> None:
+        if self.state.auth0_fresh() and not force:
             return
         if not self.state.auth0_refresh_token:
             raise MewatchError("The mewatch Auth0 session expired; sign in again")
@@ -843,6 +856,7 @@ class MewatchApi:
             },
         )
         self.state.ingest_auth0(payload)
+        self._save()
 
     def refresh(self) -> bool:
         if not self.state.signed_in:
@@ -852,13 +866,26 @@ class MewatchApi:
             token = self.state.token(kind, fresh=False)
             if token is None or token.fresh():
                 continue
-            payload = self._json(
-                "POST",
-                API + "v2/authorization/refresh",
-                params={"ff": FEATURE_FLAGS, "lang": LANGUAGE},
-                json={"token": token.value, "oktaToken": self.state.auth0_access_token},
-            )
+            body = {"token": token.value, "oktaToken": self.state.auth0_access_token}
+            try:
+                payload = self._json(
+                    "POST",
+                    API + "v2/authorization/refresh",
+                    params={"ff": FEATURE_FLAGS, "lang": LANGUAGE},
+                    json=body,
+                )
+            except MewatchError as exc:
+                if exc.code != "6005":
+                    raise
+                self._refresh_auth0(force=True)
+                payload = self._json(
+                    "POST",
+                    API + "v2/authorization/refresh",
+                    params={"ff": FEATURE_FLAGS, "lang": LANGUAGE},
+                    json={"token": token.value, "oktaToken": self.state.auth0_access_token},
+                )
             self.state.ingest_axis(payload)
+            self._save()
         if self.state.token("UserAccount") is None:
             raise MewatchError("The mewatch account token could not be refreshed; sign in again")
         self._save()
@@ -873,7 +900,57 @@ class MewatchApi:
             raise MewatchError("Sign in to mewatch from the service menu first")
         return False
 
-    # --------------------------------------------------------------- catalog
+    def enhanced_search_enabled(self) -> bool:
+        if self._enhanced_search is not None:
+            return self._enhanced_search
+        payload = self._json(
+            "GET",
+            API + "config",
+            headers=self._axis_headers(),
+            params=self.common_params(include="general"),
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("general"), dict):
+            raise MewatchError("mewatch returned an invalid general configuration")
+        fields = payload["general"].get("customFields")
+        if not isinstance(fields, dict):
+            fields = {}
+        flag = {}
+        containers = [("FeatureToggle", fields.get("FeatureToggle"))]
+        containers.extend(
+            (key, value) for key, value in fields.items() if str(key).lower() != "featuretoggle"
+        )
+        for key, container in containers:
+            if str(key).lower().startswith("feature") and isinstance(container, dict):
+                platforms = container.get("enhancedSearch")
+                if isinstance(platforms, dict):
+                    for platform, value in platforms.items():
+                        if str(platform).lower() == "atv" and isinstance(value, dict):
+                            flag = value
+                            break
+        enabled = flag.get("enabled") is True
+        for current, lower, upper in (
+            (APP_VERSION, flag.get("minApp") or "0.0.0", flag.get("maxApp") or "10000.10000.10000"),
+            (str(ANDROID_API_LEVEL), flag.get("minOS") or "0", flag.get("maxOS") or "1000"),
+        ):
+            try:
+                versions = [
+                    [int(part) for part in str(value).split(".")]
+                    for value in (current, lower, upper)
+                ]
+            except ValueError:
+                enabled = False
+                break
+            width = max(len(version) for version in versions)
+            current_version, minimum, maximum = [
+                tuple(version + [0] * (width - len(version))) for version in versions
+            ]
+            enabled = enabled and minimum <= current_version <= maximum
+        blocked_os = flag.get("blacklistOS")
+        if isinstance(blocked_os, list) and any(_as_int(value, -1) == ANDROID_API_LEVEL for value in blocked_os):
+            enabled = False
+        self._enhanced_search = enabled
+        return enabled
+
     def item(self, item_id: str) -> Item:
         self.ensure_auth()
         payload = self._json(
@@ -916,24 +993,43 @@ class MewatchApi:
             for (season_id, number), episodes in sorted(groups.items(), key=lambda row: row[0][1])
         ]
 
-    def search(self, term: str, max_results: int = 24) -> list[Item]:
+    def search(self, term: str, max_results: int = 20) -> list[Item]:
         self.ensure_auth()
-        payload = self._json(
-            "GET",
-            API + "search",
-            headers=self._axis_headers(),
-            params=self.common_params(term=term, group="true", max_results=max_results),
-        )
+        enhanced = self.enhanced_search_enabled()
+        if enhanced:
+            payload = self._json(
+                "GET",
+                API + "page",
+                headers=self._axis_headers(),
+                params=self.common_params(
+                    path="/esearch?" + urlencode({"q": term}),
+                    ff=FEATURE_FLAGS + ",es",
+                    list_page_size=max_results,
+                    list_page_size_large=100,
+                    max_list_prefetch=10,
+                ),
+            )
+        else:
+            payload = self._json(
+                "GET",
+                API + "search",
+                headers=self._axis_headers(),
+                params=self.common_params(term=term, group="true", max_results=max_results),
+            )
         if not isinstance(payload, dict):
             raise MewatchError("mewatch returned an invalid search response")
         found: list[Item] = []
         seen: set[str] = set()
-        for key in ("tv", "movies", "extras", "sports"):
-            group = payload.get(key)
+        if enhanced:
+            entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+            groups = [entry.get("list") for entry in entries if isinstance(entry, dict)]
+        else:
+            groups = [payload.get(key) for key in ("tv", "movies", "extras", "sports")]
+        for group in groups:
             rows = group.get("items") if isinstance(group, dict) else []
             for row in rows if isinstance(rows, list) else []:
                 item = Item.from_payload(row)
-                if item is not None and item.id not in seen:
+                if item is not None and item.type != "credit" and item.id not in seen:
                     seen.add(item.id)
                     found.append(item)
         return found
@@ -954,17 +1050,21 @@ class MewatchApi:
         if not isinstance(payload, dict):
             raise MewatchError(f"mewatch returned an invalid page for {path}")
         rails: list[Rail] = []
+        seen_lists: set[str] = set()
         entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            listing = entry.get("list") if isinstance(entry.get("list"), dict) else {}
+            listing = payload.get("list") if entry.get("type") == "ListDetailEntry" else entry.get("list")
+            if not isinstance(listing, dict):
+                continue
             rows = listing.get("items") if isinstance(listing.get("items"), list) else []
             items = tuple(item for row in rows if (item := Item.from_payload(row)) is not None)
             list_id = str(listing.get("id") or entry.get("id") or "")
             size = _as_int(listing.get("size"), len(items))
-            if not items and (not list_id.isdigit() or size <= 0):
+            if list_id in seen_lists or (not items and (not list_id.isdigit() or size <= 0)):
                 continue
+            seen_lists.add(list_id)
             rails.append(
                 Rail(
                     id=list_id,
@@ -1051,7 +1151,6 @@ class MewatchApi:
                 )
         return channels
 
-    # --------------------------------------------------------------- playback
     @staticmethod
     def _media_headers(value: Any) -> tuple[tuple[str, str], ...]:
         if isinstance(value, dict):
@@ -1118,14 +1217,7 @@ class MewatchApi:
             if signed_in and self.state.token("UserProfile") is not None
             else f"items/{item_id}/videos"
         )
-        params: list[tuple[str, str]] = [
-            ("delivery", "stream"),
-            ("resolution", "External"),
-            ("device", DEVICE),
-            ("segments", SEGMENTS),
-            ("ff", FEATURE_FLAGS),
-            ("lang", LANGUAGE),
-        ]
+        params = list(self.common_params(delivery="stream", resolution="External").items())
         payload = self._json(
             "GET",
             API + endpoint,

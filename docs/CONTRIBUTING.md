@@ -55,7 +55,7 @@ manifest parsing, track selection, download, decrypt, subtitles and muxing.
 
 Update the matching reference in the same change:
 
-- a config key: `docs/configuration.md` and `unidl.example.yaml`
+- a config key: `docs/configuration.md` and, if appropriate, the credential-free defaults in `src/unidl/unidl.yaml`
 - a global or track setting: `docs/settings.md`
 - a Flow ask or service hook: `docs/writing-a-service.md` and the reference
   service comments

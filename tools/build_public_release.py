@@ -16,8 +16,9 @@ from tempfile import TemporaryDirectory
 _PUBLIC_INPUTS = (
     "src/unidl", "docs", "pyproject.toml", "MANIFEST.in", "LICENSE",
     "README.md", "README.zh-CN.md", "CHANGELOG.md", "requirements.txt",
-    "requirements-dev.txt", "unidl.example.yaml",
+    "requirements-dev.txt",
 )
+_BUNDLED_DEFAULTS = {"src/unidl/unidl.yaml", "unidl/unidl.yaml"}
 _PRIVATE_DIRS = {"test", "tests", "tools", "tokens", "cookies", "logs", "cache", "downloads",
                  "download_commands", "cdm", "db", "__pycache__", "exports", ".git"}
 _PRIVATE_EXTENSIONS = {".wvd", ".prd", ".mld", ".sqlite", ".sqlite3", ".db", ".pem", ".so", ".pyd", ".zip"}
@@ -31,7 +32,8 @@ def _forbidden(path: PurePosixPath) -> bool:
     return (
         path.is_absolute() or ".." in path.parts or "\\" in str(path)
         or bool(parts & _PRIVATE_DIRS)
-        or name in {"agents.md", "unidl.yaml"}
+        or name == "agents.md"
+        or (name == "unidl.yaml" and path.as_posix() not in _BUNDLED_DEFAULTS)
         or name == "conftest.py" or name.startswith(("test_", ".env"))
         or path.suffix.lower() in _PRIVATE_EXTENSIONS
     )

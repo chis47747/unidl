@@ -1,4 +1,5 @@
-"""France.tv - free public broadcaster (Android TV protocol)."""
+"""France.tv - free public broadcaster (Android TV protocol).
+"""
 
 from __future__ import annotations
 
@@ -37,7 +38,6 @@ def _safe_failure(summary: str, exc: api.FranceTvError) -> str:
 
 @registry.register
 class FranceTV(Service):
-    """France.tv public service broadcaster."""
 
     ID = "francetv"
     NAME = "France.tv"
@@ -413,6 +413,9 @@ class FranceTV(Service):
         except api.FranceTvAuthRequired as exc:
             ctx.error(_safe_failure("France.tv TV sign-in is required", exc))
             return
+        except api.FranceTvRegionUnavailable as exc:
+            ctx.error(_safe_failure("France.tv playback is not available in your region", exc))
+            return
         except api.FranceTvError as exc:
             ctx.error(_safe_failure("France.tv playback could not be resolved", exc))
             return
@@ -454,8 +457,6 @@ class FranceTV(Service):
                 )
             )
         except Back:
-            # Delivery raises Back after success, failure, or dismissal. Keep
-            # the current France.tv search/program page mounted.
             return
 
     def _title(self, source: api.Source) -> Title:

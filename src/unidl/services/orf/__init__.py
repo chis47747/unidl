@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import hashlib
+from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from ...core.cdm import CdmError
 from ...core.flow import Ask, Back, Choice, FlowContext
-from ...core.playback import DrmInfo, Playback
+from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
+from ...core.secureio import atomic_write_bytes, private_directory
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.settings import Option, Setting
 from ...core.titles import Title, TitleKind
+from ...downloader.models import StreamInfo
 from . import api
 
 _LOGIN_MODE = Setting(
@@ -43,13 +47,6 @@ _SOURCE_TIER = Setting(
 
 @registry.register
 class Orf(Service):
-    """ORF ON using the 6.11.9 television API contract.
-
-    Authorization: anonymous TV-client Basic auth, or OIDC TV code with refresh.
-    Geofence:      Austria for titles whose rights are not worldwide.
-    Playback:      DASH/HLS catalogue sources and raw Widevine licences.
-    Lifecycle:     metadata authorization opens no platform playback session.
-    """
 
     ID = "orf"
     NAME = "ORF ON"
@@ -74,7 +71,6 @@ class Orf(Service):
         self._adult_access_granted = False
         self._auth_error = ""
 
-    # ---------------------------------------------------------------- auth
     def login_mode(self) -> str:
         return api.normalize_login_mode(self.settings.get("login_mode", "anonymous"))
 
@@ -238,7 +234,6 @@ class Orf(Service):
                 return True
             ctx.warn("That ORF adult PIN was not accepted")
 
-    # ------------------------------------------------------------- catalogue
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         reference = api.parse_reference(target)
         if reference is None:
@@ -633,6 +628,8 @@ class Orf(Service):
                     yield from self._emit(ctx, client, episode, title)
                 except Back:
                     continue
+                except api.OrfError as exc:
+                    ctx.error(str(exc))
                 continue
             if action != "segments":
                 return
@@ -667,6 +664,8 @@ class Orf(Service):
                         yield from self._emit_segment(ctx, client, episode, segment)
                     except Back:
                         break
+                    except api.OrfError as exc:
+                        ctx.error(str(exc))
 
     @staticmethod
     def _duration_detail(video: api.Video) -> str:
@@ -734,7 +733,6 @@ class Orf(Service):
         )
         yield from self._emit(ctx, client, segment, title)
 
-    # -------------------------------------------------------------- playback
     def _emit(
         self,
         ctx: FlowContext,
@@ -745,6 +743,12 @@ class Orf(Service):
         live: bool = False,
     ) -> Iterator[Ask]:
         ctx.status(f"Authorizing {title.full_label()}")
+        video = client.playback_video(video)
+        allowed = yield from self._adult_access(ctx, client, video)
+        if not allowed:
+            return
+        if not live:
+            title.duration = video.duration
         source = client.source(video, source_tier=self.source_tier(), live=live)
         drm = None
         if source.encrypted:
@@ -764,6 +768,7 @@ class Orf(Service):
             proxy=self.ctx.proxy,
             is_live=live,
             drm=drm,
+            subtitle_references=self._subtitle_references(video),
             chapters=(
                 list(video.chapters)
                 if self.fetch_chapters_enabled() and not live
@@ -779,11 +784,86 @@ class Orf(Service):
         )
         yield ctx.emit(playback)
 
+    @staticmethod
+    def _subtitle_references(video: api.Video) -> list[SubtitleReference]:
+        if not video.subtitle_url:
+            return []
+        return [SubtitleReference(
+            url=video.subtitle_url,
+            language="de",
+            name="Deutsch",
+            format="vtt",
+            headers={"User-Agent": api.USER_AGENT},
+        )]
+
+    def augment_tracks(self, playback: Playback, tracks, log):
+        return [StreamInfo(
+            manifest_type="service",
+            media_type="subtitle",
+            url=reference.url,
+            original_url=reference.url,
+            id=f"orf-subtitle-{index}",
+            group_id=reference.kind,
+            name=reference.name,
+            language=reference.language,
+            codecs="webvtt",
+            extension="vtt",
+            extra={
+                "service_sidecar": "subtitle",
+                "subtitle_reference_url": reference.url,
+                "subtitle_kind": reference.kind,
+            },
+        ) for index, reference in enumerate(playback.subtitle_references, 1)]
+
+    def prepare_download(self, playback: Playback, log: Callable[[str], None]) -> None:
+        self._prepare_subtitles(playback, log)
+
+    def prepare_download_with_progress(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+        progress: Callable[[SubtitleReference, int, int | None], None],
+    ) -> None:
+        self._prepare_subtitles(playback, log, progress)
+
+    def _prepare_subtitles(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+        progress: Callable[[SubtitleReference, int, int | None], None] | None = None,
+    ) -> None:
+        selected = [reference for reference in playback.subtitle_references if reference.selected]
+        if not selected:
+            return
+        client = self.client()
+        directory = private_directory(self.ctx.subtitle_dir())
+        staged = {Path(track.path).resolve() for track in playback.mux_imports}
+        for reference in selected:
+            report = partial(progress, reference) if progress is not None else None
+            data = client.subtitle(reference.url, progress=report)
+            digest = hashlib.sha256(reference.url.encode() + b"\0" + data).hexdigest()[:20]
+            path = directory / f"orf-{digest}.vtt"
+            atomic_write_bytes(path, data)
+            if path.resolve() not in staged:
+                playback.mux_imports.append(ExternalTrack(
+                    str(path),
+                    language=reference.language,
+                    name=reference.name,
+                    kind=reference.kind,
+                    original=reference.original,
+                    forced=reference.kind == "forced",
+                ))
+                staged.add(path.resolve())
+            log(f"ORF subtitle prepared: {reference.name}")
+
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
         brand_guid = str(drm.context.get("brand_guid") or "")
         user_token = str(drm.context.get("user_token") or "")
+        client = self._api
+        if client is None:
+            raise CdmError("ORF playback client is not open")
         try:
-            return self.client().license(
+            return client.license(
                 challenge,
                 drm.license_url,
                 brand_guid,

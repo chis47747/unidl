@@ -916,7 +916,7 @@ class Service:
         profile = self.ctx.cookie_profile()
         directory = self.ctx.cookie_store.directory_for(self.ID)
         existing = self.ctx.cookie_info()
-        if existing is not None:
+        if existing is not None and existing.count:
             ctx.log(f"current cookies: {existing.line()}  ({existing.path})", "ok")
 
         ctx.log(f"{self.NAME} signs in with browser cookies.", "info")
@@ -927,6 +927,8 @@ class Service:
         )
         if self.ctx.cookie_path() is None:
             ctx.warn("no cookie file was found in the service cookie folder")
+        elif existing is not None and existing.error:
+            ctx.warn(existing.error)
         else:
             ctx.log("using the cookie file already in place", "ok")
         # Keep this method a flow even though it has no user input anymore.
@@ -943,7 +945,7 @@ class Service:
             return AuthStatus(logged_in=False, label="no cookies imported")
         if not info.count:
             return AuthStatus(
-                logged_in=False, label=f"{info.path.name} could not be read"
+                logged_in=False, label=info.error or f"{info.path.name} could not be read"
             )
         return AuthStatus(logged_in=True, label=info.line(), detail=str(info.path))
 

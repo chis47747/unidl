@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.6.8] - 2026-11-20
+
+### Storage paths
+
+- Fixed default file locations on Windows. When there was no local configuration, the public package resolved bundled defaults relative to the expected local configuration rather than the installation directory.
+- Made Home and Readiness show the effective download destination and configuration path. Kept existing local settings and files in place.
+
+### Cookie diagnostics
+
+- Reported malformed Netscape cookie exports with specific reasons and line numbers where possible, without exposing cookie values.
+
+### Services
+
+- Added ARD Mediathek and ZDF Mediathek.
+- Updated france.tv, mewatch, ORF ON, TF1+, and VRT MAX.
+
 ## [2.6.7] - 2026-11-18
 
 ### Shutdown and interface

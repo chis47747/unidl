@@ -148,8 +148,9 @@ python -m pip install --upgrade pip unidl
 unidl
 ```
 
-Downloads default to `~/unidl_downloads/<service>/` (normally
-`C:\Users\<username>\unidl_downloads\<service>\` on Windows). Home shows this
+Without a local configuration, downloads default to `downloads/<service>/`
+under the project folder. For example, a packaged install started in
+`D:\unidl` defaults to `D:\unidl\downloads`. Home shows the effective
 location on first launch. Change it under **Settings → Files & naming → Output
 locations → Finished downloads**, without editing YAML. After reviewing that
 screen, the first-run hint is dismissed. The setting remains available later.
@@ -163,8 +164,9 @@ unidl
 ```
 
 `python -m unidl` is equivalent. A packaged install uses `unidl.yaml` from the
-current directory when it exists; otherwise it starts with the safe built-in
-path defaults. Pass an explicit configuration whenever the file lives elsewhere:
+current directory when it exists; otherwise the bundled `unidl.yaml` supplies
+project-relative defaults there. Pass an explicit configuration whenever the
+file lives elsewhere:
 
 ```console
 unidl --config ./unidl.yaml
@@ -205,8 +207,9 @@ recording and use Stop/Back/Esc to finish it.
 
 ## Configuration and data
 
-`unidl.yaml` is the local configuration surface. Copy `unidl.example.yaml` to
-`unidl.yaml` if you want a starter template. Keep the working file out of Git.
+`unidl.yaml` is the local configuration surface. The package ships a separate,
+credential-free `unidl.yaml` for defaults. Use the **Config** control on Home
+to create your local copy if needed. Keep the working file out of Git.
 Relative paths are resolved
 from the directory containing that file, so a checkout can be moved safely.
 Interactive preferences are stored in `settings.json` under `paths.home`.

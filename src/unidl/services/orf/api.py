@@ -27,8 +27,8 @@ OIDC_CLIENT_ID = "orf-mediathek-production-device"
 OIDC_SCOPE = "openid profile email profile.read profile.write offline_access"
 OIDC_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
-CLIENT_VERSION = "6.11.9-tv"
-CLIENT_VERSION_CODE = "5000140"
+CLIENT_VERSION = "6.14.18-tv"
+CLIENT_VERSION_CODE = "5000190"
 USER_AGENT = "ORF TVthek Android TV"
 ANONYMOUS_BASIC_TOKEN = (
     "MGtpMzIzNDVhNXM5Z3g6Z2s5MDQ5Z2tkZnYzMGRmZ2szMGZnbTM1NDB0M212czhqc2w="
@@ -43,6 +43,7 @@ MAX_PROFILE_PAGES = 100
 DRM_BRAND_STANDARD = "13f2e056-53fe-4469-ba6d-999970dbe549"
 DRM_BRAND_MULTIKEY_VOD = "31149fc4-9e4e-4252-b99d-34a4a90f4618"
 DRM_BRAND_MULTIKEY_LIVE = "3c03f537-b018-463d-a058-ff3eb5346cee"
+WIDEVINE_LICENSE_URL = "https://drm.ors.at/acquire-license/widevine"
 FILM_GENRE_ID = 2703833
 SERIES_GENRE_ID = 13776492
 
@@ -52,8 +53,19 @@ LIVE_CHANNEL_NAMES = {
     "orf2": "ORF 2",
     "orf3": "ORF III",
     "orfs": "ORF SPORT+",
+    "orfkids": "ORF Kids",
 }
 SUPPORTED_VIDEO_KINDS = {"episode", "segment", "livestream"}
+_PLAYBACK_ID_PREFIXES = {
+    "episode": "3dSlfek03nsLKdj4Jsd",
+    "segment": "8783hjd7293kmd",
+    "livestream": "8876324jshjd7293ktd",
+}
+_SOURCE_QUALITIES = {
+    "hd": ("QXA", "Q8C", "Q6A", "Q4A"),
+    "fhd": ("QXB", "QXA", "Q8C", "Q6A", "Q4A"),
+    "uhd": ("QXC", "QXB", "QXA", "Q8C", "Q6A", "Q4A"),
+}
 
 _SECRET = re.compile(
     r"(access_token|id_token|refresh_token|device_code|userToken|token)"
@@ -283,6 +295,8 @@ class Video:
     profile_url: str = field(default="", repr=False)
     episode_url: str = field(default="", repr=False)
     episode_id: int = 0
+    encrypted_id: str = field(default="", repr=False)
+    subtitle_url: str = field(default="", repr=False)
 
     @property
     def content_kind(self) -> str:
@@ -545,6 +559,7 @@ def _video(raw: dict[str, Any], expected_kind: str = "") -> Video:
 
     embedded_profile = embedded.get("profile")
     profile = _profile(embedded_profile, "embedded profile") if isinstance(embedded_profile, dict) else None
+    subtitle = embedded.get("subtitle")
     chapters = _chapters(raw)
     attachments = _attachments(raw, embedded)
 
@@ -572,6 +587,8 @@ def _video(raw: dict[str, Any], expected_kind: str = "") -> Video:
         profile_url=_link(raw, "profile"),
         episode_url=_link(raw, "episode"),
         episode_id=_integer(raw.get("episode_id"), "episode ID", default=0),
+        encrypted_id=str(raw.get("encrypted_id") or ""),
+        subtitle_url=str(subtitle.get("vtt_url") or "").strip() if isinstance(subtitle, dict) else "",
     )
 
 
@@ -590,30 +607,32 @@ def equivalent_full_segment(episode: Video) -> bool:
     )
 
 
-def _stream_score(stream: Stream, source_tier: str) -> int:
-    key = stream.quality_key.upper()
-    score = 100 if stream.protocol == "dash" else 0
-    if stream.multikey:
-        score += 1000
-    if stream.adaptive:
-        score += 40
-    if "QXB" in key:
-        score += 30
-    elif "QXA" in key:
-        score += 20
-    elif "Q8" in key:
-        score += 15
-    elif "Q6" in key:
-        score += 10
-    if stream.uhd:
-        score += 50 if source_tier == "uhd" else -100
-    if source_tier == "hd" and ("Q8" in key or "QX" in key):
-        score -= 20
-    return score
+def _select_stream(video: Video, tier: str, *, live: bool) -> tuple[Stream, bool]:
+    streams = {item.quality_key: item for item in video.streams if item.protocol == "dash"}
+    if not streams:
+        raise OrfError(f"ORF returned no DASH sources for {video.title}")
+    if live:
+        multi_keys = ("QXADRM", "QXCDRM") if tier == "hd" else ("QXBDRM", "QXCDRM")
+        for key in multi_keys:
+            if key in streams and streams[key].multikey:
+                return streams[key], True
+    elif video.drm_token_multikey:
+        key = "QXADRM" if tier == "hd" else "QXBDRM"
+        if key in streams:
+            return streams[key], True
+
+    qualities = _SOURCE_QUALITIES[tier]
+    protected = video.encrypted
+    if protected:
+        adaptive = [key for key in qualities if key.startswith("QX")]
+        qualities = (*[f"{key}DRM" for key in adaptive], *qualities)
+    for key in qualities:
+        if key in streams:
+            return streams[key], False
+    raise OrfError(f"ORF returned no supported {tier.upper()} DASH quality for {video.title}")
 
 
 class OrfApi:
-    """One ORF ON TV-client session with strict response parsing."""
 
     def __init__(
         self,
@@ -864,6 +883,22 @@ class OrfApi:
         data = _object(self._request("GET", f"{kind}/{item_id}"), f"{kind} response")
         return _video(data, kind)
 
+    def playback_video(self, video: Video) -> Video:
+        prefix = _PLAYBACK_ID_PREFIXES.get(video.kind)
+        if prefix is None:
+            raise OrfError(f"Unsupported ORF playback type: {video.kind}")
+        encrypted_id = video.encrypted_id or base64.b64encode(
+            f"{prefix}{video.id}".encode()
+        ).decode("ascii")
+        data = _object(
+            self._request("GET", f"public/{video.kind}/encrypted/{quote(encrypted_id, safe='')}"),
+            "public playback response",
+        )
+        resolved = _video(data, video.kind)
+        if resolved.id != video.id:
+            raise OrfError("ORF public playback returned a different video ID")
+        return resolved
+
     def profile(self, profile_id: int) -> Profile:
         data = _object(self._request("GET", f"profile/{profile_id}"), "profile response")
         return _profile(data)
@@ -983,10 +1018,17 @@ class OrfApi:
         return found
 
     def live_channels(self) -> list[Channel]:
-        data = _object(self._request("GET", "page/start/orflive"), "live response")
+        data = _object(
+            self._request(
+                "GET", "page/start/orflive", params={"channels": ",".join(LIVE_CHANNEL_NAMES)}
+            ),
+            "live response",
+        )
         values = _object(data.get("timeShift"), "live timeShift channels")
         channels: list[Channel] = []
         for key, raw in values.items():
+            if raw is None:
+                continue
             item = _object(raw, f"live channel {key}")
             channel_id = _integer(item.get("id"), f"live channel {key} ID")
             current = str(item.get("title") or "").strip()
@@ -1002,31 +1044,29 @@ class OrfApi:
 
     def source(self, video: Video, *, source_tier: str = "uhd", live: bool = False) -> Source:
         tier = normalize_source_tier(source_tier)
-        if not video.streams:
-            raise OrfError(f"ORF returned no playable sources for {video.title}")
-        stream = max(video.streams, key=lambda item: _stream_score(item, tier))
-        encrypted = bool(video.encrypted or stream.encrypted)
+        stream, multikey = _select_stream(video, tier, live=live)
         manifest_url = stream.url
         endpoint = ""
         brand = ""
         token = ""
-        if encrypted:
-            if stream.protocol != "dash":
-                raise OrfError("ORF Widevine playback requires a DASH source")
-            settings = self.settings()
-            endpoints = _object(settings.get("drm_endpoints"), "DRM endpoints")
-            endpoint = str(endpoints.get("widevine") or "").strip()
-            if not endpoint:
-                raise OrfError("ORF settings omitted the Widevine license endpoint")
-            if stream.multikey:
-                token = video.drm_token_multikey
-                brand = DRM_BRAND_MULTIKEY_LIVE if live else DRM_BRAND_MULTIKEY_VOD
-                manifest_url = _append_query(manifest_url, drm="MULTIKEY")
-            else:
-                token = video.drm_token
-                brand = DRM_BRAND_STANDARD
+        if live and stream.multikey:
+            token = video.drm_token_multikey
             if not token:
-                raise OrfError("ORF protected playback omitted its user token")
+                raise OrfError("ORF protected live playback omitted its multikey token")
+            brand = DRM_BRAND_MULTIKEY_LIVE
+        elif not live and video.drm_token_multikey:
+            token = video.drm_token_multikey
+            brand = DRM_BRAND_MULTIKEY_VOD
+            if multikey:
+                manifest_url = _append_query(manifest_url, drm="MULTIKEY")
+        elif video.drm_token:
+            token = video.drm_token
+            brand = DRM_BRAND_STANDARD
+        encrypted = bool(token or stream.encrypted)
+        if encrypted and not token:
+            raise OrfError("ORF protected playback omitted its user token")
+        if encrypted:
+            endpoint = WIDEVINE_LICENSE_URL
         return Source(
             manifest_url=manifest_url,
             protocol=stream.protocol,
@@ -1038,6 +1078,41 @@ class OrfApi:
             brand_guid=brand,
             user_token=token,
         )
+
+    def subtitle(
+        self,
+        url: str,
+        *,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> bytes:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise OrfError("ORF returned an invalid subtitle URL")
+        try:
+            with self.http.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Accept": "text/vtt"},
+                timeout=REQUEST_TIMEOUT,
+                stream=True,
+            ) as response:
+                if response.status_code != 200:
+                    raise OrfError(f"ORF subtitle request failed with HTTP {response.status_code}")
+                size = response.headers.get("Content-Length", "")
+                total = int(size) if size.isdigit() else None
+                content = bytearray()
+                for chunk in response.iter_content(chunk_size=65536):
+                    content.extend(chunk)
+                    if progress is not None:
+                        progress(len(content), total)
+        except requests.RequestException as exc:
+            raise OrfError("Could not download the ORF subtitle") from exc
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise OrfError("ORF subtitle is not UTF-8 WebVTT") from exc
+        if not text.startswith("WEBVTT"):
+            raise OrfError("ORF subtitle response is not WebVTT")
+        return bytes(content)
 
     def license(
         self,
@@ -1051,7 +1126,7 @@ class OrfApi:
         try:
             response = self.http.post(
                 endpoint,
-                params={"brandGuid": brand_guid, "userToken": unquote(user_token)},
+                params={"BrandGuid": brand_guid, "userToken": unquote(user_token)},
                 data=challenge,
                 headers={
                     "Accept": "*/*",

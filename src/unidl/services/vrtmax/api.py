@@ -14,12 +14,12 @@ import requests
 from ...core.attachments import Attachment
 from ...core.chapters import Chapter, normalize_chapters
 
-APP_VERSION = "3.14.2-tv"
+APP_VERSION = "3.19.2-tv"
 PACKAGE_NAME = "be.vrt.vrtnu-max"
 CLIENT_NAME = "TVAndroid"
 OS_VERSION = "36"
 DEVICE_NAME = "Google TV Streamer"
-PLAYER_VERSION = "58.4.0"
+PLAYER_VERSION = "59.18.1"
 USER_AGENT = (
     f"VRTPlayer/{PLAYER_VERSION} (Android 16; Google {DEVICE_NAME}) "
     f"{CLIENT_NAME}/{APP_VERSION}"
@@ -262,6 +262,7 @@ class PlayerData:
     secondary_meta: tuple[str, ...] = ()
     image_url: str = ""
     header_image_url: str = ""
+    screenshot_url: str = ""
 
     @property
     def release_year(self) -> str | None:
@@ -330,6 +331,9 @@ def _error_text(payload: Any, default: str) -> str:
         if isinstance(first, dict):
             return _text(first.get("message") or first.get("error_code")) or default
         return _text(first) or default
+    code = _text(payload.get("code"))
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{1,100}", code):
+        return f"{default}: {code}"
     return default
 
 
@@ -375,7 +379,6 @@ def _parse_date(value: Any) -> float:
 
 
 def parse_reference(value: str) -> str | None:
-    """Return the exact VRT MAX page id from a supported web URL."""
     text = str(value or "").strip()
     if not text:
         return None
@@ -404,7 +407,6 @@ def parse_season_episode(item: CatalogItem) -> tuple[int | None, int | None]:
 
 
 def release_year(*values: object) -> str | None:
-    """Return the first film release year exposed by VRT TV metadata."""
     for value in values:
         match = re.search(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", str(value or ""))
         if match:
@@ -420,7 +422,7 @@ fragment VrtLink on Action {
 fragment VrtTile on ITile {
  __typename
  ... on ProgramTile { id objectId componentId title description tileType image { templateUrl } primaryMeta { type value } secondaryMeta { type value } action { ...VrtLink } }
- ... on EpisodeTile { id objectId componentId title description tileType available image { templateUrl } primaryMeta { type value } secondaryMeta { type value } indexMeta { type value } action { ...VrtLink } }
+ ... on EpisodeTile { id objectId componentId title accessibilityTitle description tileType available image { templateUrl } primaryMeta { type value } secondaryMeta { type value } indexMeta { type value } labelMeta { type value } action { ...VrtLink } }
  ... on LivestreamTile { id objectId componentId title description tileType brand active image { templateUrl } primaryMeta { type value } action { ...VrtLink } }
  ... on ContentTile { id objectId componentId title tileType brand active image { templateUrl } primaryMeta { type value } action { ...VrtLink } }
  ... on BannerTile { id objectId componentId title description tileType active image { templateUrl } labelMeta { type value } secondaryMeta { type value } action { ...VrtLink } }
@@ -440,9 +442,9 @@ LIST_FRAGMENT = """
 fragment VrtBasicList on Component {
  __typename
  ... on LazyTileList { title listId tileVariant }
- ... on StaticTileList { title listId tileVariant items { ...VrtTile } }
+ ... on StaticTileList { title listId tileVariant banner { title } items { ...VrtTile } }
  ... on PaginatedTileList {
-  title listId tileVariant
+  title listId tileVariant banner { title }
   paginatedItems(first: $pageSize) {
    edges { cursor node { ...VrtTile } }
    pageInfo { startCursor endCursor hasNextPage hasPreviousPage }
@@ -470,6 +472,10 @@ query DynamicPageTV($id: ID!, $pageSize: Int!, $after: ID, $first: Int!) {
   __typename
   ... on IPage {
    id title
+   heading {
+    __typename ...VrtBasicList
+    ... on Banner { objectId title image { templateUrl } action { ...VrtLink } }
+   }
    paginatedComponents(first: $first, after: $after) {
     edges { node { ...VrtList } }
     pageInfo { endCursor hasNextPage }
@@ -587,11 +593,15 @@ query OnePlayerData($id: ID!, $fetchChapters: Boolean! = true, $fetchAttachments
       markers @include(if: $fetchChapters) {
        __typename title
        ... on MediaPlayerChapterMarker { startOffsetInSeconds }
+       ... on MediaPlayerHighlightMarker { startOffsetInSeconds }
       }
      }
     }
     primaryMeta { type value }
     secondaryMeta { type value }
+   }
+   triggers @include(if: $fetchAttachments) {
+    screenshot { ... on ShareAction { image { templateUrl } } }
    }
   }
   ... on LivestreamPage { linkTemplate }
@@ -602,9 +612,26 @@ query OnePlayerData($id: ID!, $fetchChapters: Boolean! = true, $fetchAttachments
 
 GEO_QUERY = "query GeoLocation { geoLocation }"
 
+NAVIGATION_QUERY = """
+query Navigation {
+ navigation {
+  nodes {
+   __typename
+   ... on NavigationLeafNode { content { title action { ...VrtLink } } }
+   ... on NavigationCompositeNode {
+    nodes { ... on NavigationLeafNode { content { title action { ...VrtLink } } } }
+   }
+  }
+ }
+}
+fragment VrtLink on Action {
+ __typename
+ ... on LinkAction { link internalTarget }
+}
+"""
+
 
 def _chapter_markers(mode: dict[str, Any]) -> tuple[tuple[Chapter, ...], tuple[str, ...]]:
-    """Parse the TV schema's chapter offsets, explicitly expressed in seconds."""
     markers = mode.get("markers")
     if not isinstance(markers, list):
         return (), ()
@@ -612,7 +639,10 @@ def _chapter_markers(mode: dict[str, Any]) -> tuple[tuple[Chapter, ...], tuple[s
     chapters: list[Chapter] = []
     warnings: list[str] = []
     for index, marker in enumerate(markers, 1):
-        if not isinstance(marker, dict) or marker.get("__typename") != "MediaPlayerChapterMarker":
+        if not isinstance(marker, dict):
+            continue
+        marker_type = marker.get("__typename")
+        if marker_type not in {"MediaPlayerChapterMarker", "MediaPlayerHighlightMarker"}:
             continue
         offset = marker.get("startOffsetInSeconds")
         title = _text(marker.get("title"))
@@ -622,18 +652,19 @@ def _chapter_markers(mode: dict[str, Any]) -> tuple[tuple[Chapter, ...], tuple[s
         if duration > 0 and offset >= duration:
             warnings.append(f"VRT MAX chapter {index} starts outside the media duration; skipped")
             continue
-        chapters.append(Chapter.from_seconds(offset, title))
+        kind = "highlight" if marker_type == "MediaPlayerHighlightMarker" else ""
+        chapters.append(Chapter.from_seconds(offset, title, kind=kind))
     return normalize_chapters(chapters, duration_ms=round(duration * 1000) if duration > 0 else None), tuple(warnings)
 
 
 def title_attachments(
     item: CatalogItem, player: PlayerData, program: Program | None,
 ) -> list[Attachment]:
-    """Keep only images belonging to this title, without playback credentials."""
     images = [
         (player.image_url, "Playback artwork"),
         (item.image_url, item.title),
         (player.header_image_url, "Title artwork"),
+        (player.screenshot_url, "Screenshot"),
     ]
     if program is not None:
         images.extend([(program.image_url, program.title), (program.title_art_url, "Title art")])
@@ -676,7 +707,9 @@ def _parse_tile(data: Any) -> CatalogItem | None:
         link=link,
         internal_target=_text(action.get("internalTarget")),
         image_url=_image_url(data.get("image")),
-        primary_meta=_meta(data.get("primaryMeta") or data.get("indexMeta") or data.get("labelMeta")),
+        primary_meta=tuple(dict.fromkeys(
+            (*_meta(data.get("primaryMeta")), *_meta(data.get("indexMeta")), *_meta(data.get("labelMeta")))
+        )),
         secondary_meta=_meta(data.get("secondaryMeta")),
         available=available is not False,
     )
@@ -709,8 +742,9 @@ def _parse_list(data: Any, *, title: str = "", component_id: str = "") -> Catalo
     if typename not in {"LazyTileList", "StaticTileList", "PaginatedTileList"}:
         return None
     items, cursor, has_next = _connection(data)
+    banner = data.get("banner") if isinstance(data.get("banner"), dict) else {}
     return CatalogList(
-        title=_text(data.get("title")) or title,
+        title=_text(data.get("title")) or title or _text(banner.get("title")),
         list_id=_text(data.get("listId")),
         items=items,
         end_cursor=cursor,
@@ -727,6 +761,11 @@ def _parse_components(values: Any) -> tuple[CatalogList, ...]:
         direct = _parse_list(value)
         if direct is not None:
             found.append(direct)
+            continue
+        if isinstance(value, dict) and value.get("__typename") == "Banner":
+            item = _parse_tile(value)
+            if item is not None:
+                found.append(CatalogList(item.title, "", (item,)))
             continue
         if not isinstance(value, dict) or value.get("__typename") != "NestedSingleComponentSelect":
             continue
@@ -784,6 +823,7 @@ class VrtMaxApi:
         self._player_token_expires_at = 0.0
         self.fetch_chapters = True
         self.fetch_attachments = True
+        self._live_page_id = ""
 
     def _persist(self) -> None:
         if self.on_save is not None:
@@ -986,6 +1026,8 @@ class VrtMaxApi:
         raise AuthenticationRequired("VRT MAX rejected the refreshed session. Sign in again.")
 
     def dynamic_page(self, page_id: str) -> CatalogPage:
+        if page_id == "livestreams":
+            page_id = self.live_page_id()
         after: str | None = None
         page_data: dict[str, Any] | None = None
         lists: list[CatalogList] = []
@@ -999,6 +1041,9 @@ class VrtMaxApi:
             if not isinstance(raw, dict):
                 raise VrtMaxError(f"VRT MAX returned no page for {page_id}")
             page_data = raw
+            if after is None:
+                heading = raw.get("heading")
+                lists.extend(_parse_components([heading]))
             components = raw.get("paginatedComponents") if isinstance(raw.get("paginatedComponents"), dict) else {}
             edges = components.get("edges") if isinstance(components.get("edges"), list) else []
             lists.extend(_parse_components([edge.get("node") for edge in edges if isinstance(edge, dict)]))
@@ -1019,6 +1064,28 @@ class VrtMaxApi:
             typename=_text(page_data.get("__typename")),
             lists=tuple(lists),
         )
+
+    def live_page_id(self) -> str:
+        if self._live_page_id:
+            return self._live_page_id
+        data = self.graphql(NAVIGATION_QUERY, {}, "Navigation")
+        navigation = data.get("navigation")
+        nodes = navigation.get("nodes") if isinstance(navigation, dict) else None
+        pending = list(nodes) if isinstance(nodes, list) else []
+        for node in pending:
+            if not isinstance(node, dict):
+                continue
+            content = node.get("content")
+            action = content.get("action") if isinstance(content, dict) else None
+            if isinstance(action, dict) and action.get("internalTarget") == "livestreamspage":
+                page_id = parse_reference(_text(action.get("link")))
+                if page_id is not None:
+                    self._live_page_id = page_id
+                    return page_id
+            children = node.get("nodes")
+            if isinstance(children, list):
+                pending.extend(children)
+        raise VrtMaxError("VRT MAX TV navigation returned no live page link")
 
     def list_page(self, catalog: CatalogList) -> CatalogList:
         if not catalog.list_id:
@@ -1173,6 +1240,8 @@ class VrtMaxApi:
                 metadata_warnings=warnings,
             ))
         header = page.get("header") if isinstance(page.get("header"), dict) else {}
+        triggers = page.get("triggers") if isinstance(page.get("triggers"), dict) else {}
+        screenshot = triggers.get("screenshot") if isinstance(triggers.get("screenshot"), dict) else {}
         result = PlayerData(
             page_id=_text(page.get("id")) or page_id,
             page_type=_text(page.get("__typename")),
@@ -1184,6 +1253,7 @@ class VrtMaxApi:
             secondary_meta=_meta(player.get("secondaryMeta")),
             image_url=_image_url(player.get("image")) if self.fetch_attachments else "",
             header_image_url=_image_url(header.get("image")) if self.fetch_attachments else "",
+            screenshot_url=_image_url(screenshot.get("image")) if self.fetch_attachments else "",
         )
         result.active_mode()
         return result

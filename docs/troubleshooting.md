@@ -160,14 +160,14 @@ targets in the top bar.
 
 | | |
 |---|---|
-| config | `<source checkout>/unidl.yaml`, or the explicit `--config PATH` |
+| config | Checkout-root `unidl.yaml`, current-directory `unidl.yaml` for a packaged install, or the explicit `--config PATH` |
 | settings | `<paths.home>/settings.json` |
 | tokens | `<paths.tokens>/<service>/` |
 | key vault | `paths.keys_db` |
 | exported commands | `<paths.commands>/<service>/` |
 | task logs | `paths.logs` |
 | segment cache | `paths.temp` |
-| finished media | `~/unidl_downloads/<service>/` |
+| finished media | The effective download folder, shown in Readiness, with one folder per service. The bundled configuration defaults to project-relative `downloads/`. |
 
 ## Reproducing outside the interface
 

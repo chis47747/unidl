@@ -1031,7 +1031,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "text",
         default="",
         help="No YAML editing is required. Empty uses paths.downloads when configured, "
-        "otherwise ~/unidl_downloads, grouped by service. "
+        "otherwise the default output folder, grouped by service. "
         "The folder is created if it does not exist; ~ works.",
         visible=False,
     ),

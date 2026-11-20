@@ -1,11 +1,4 @@
-"""TF1+ (mytf1) - free French FTA with optional TV account.
-
-Authorization:  smart_tv_anonymous guest JWT (default), or OAuth device-code
-                at tf1.fr/tv for full catalogue rights.
-Geofence:       FR.
-Playback:       DASH via mediainfocombo; Widevine DRM proxy when present.
-Catalogue:      URL (tf1.fr), GraphQL search, live channel list.
-"""
+"""TF1+ (mytf1) - free French FTA with optional TV account."""
 
 from __future__ import annotations
 
@@ -188,8 +181,6 @@ class TF1(Service):
             ctx.log(f"TF1+ session ready · {mode} · right={client.state.right}", "ok")
         return client
 
-    # ---------------------------------------------------------------- browsing
-
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         route = api.parse_input(target)
         if route is None:
@@ -212,12 +203,8 @@ class TF1(Service):
                 item = client.live_by_slug(route["id"])
                 yield from self._play_item(ctx, client, item)
             elif kind == "Video":
-                yield from self._play_media(
-                    ctx,
-                    client,
-                    route["id"],
-                    title=route["id"],
-                )
+                item = client.video_by_id(route["id"])
+                yield from self._play_item(ctx, client, item)
             elif kind == "VideoSlug":
                 item = client.video_by_slug(
                     route.get("programSlug") or "",
@@ -258,7 +245,7 @@ class TF1(Service):
                             item.label,
                             item,
                             detail=self._detail(item),
-                            tags=(item.kind,),
+                            tags=("Movie" if item.is_movie else item.kind,),
                         )
                         for item in hits
                     ],
@@ -288,7 +275,7 @@ class TF1(Service):
             try:
                 channel = yield ctx.pick(
                     f"TF1+ Live  ·  {len(channels)}",
-                    [Choice(item.label, item, detail=item.id) for item in channels],
+                    [Choice(item.label, item, detail=item.detail or item.id) for item in channels],
                     cursor=cursor,
                 )
             except Back:
@@ -303,24 +290,61 @@ class TF1(Service):
     def _program(
         self, ctx: FlowContext, client: api.Tf1Api, program: api.CatalogItem
     ) -> Iterator[Ask]:
+        try:
+            ctx.status(f"Loading {program.label}")
+            program = client.program_by_id(program.id)
+        except api.Tf1Error as exc:
+            ctx.error(str(exc))
+            return
+        groups = client.program_lists(program)
+        if program.is_movie or len(groups) <= 1:
+            yield from self._videos(ctx, client, program, groups[0] if groups else None)
+            return
+        cursor = 0
+        while True:
+            try:
+                group = yield ctx.pick(
+                    program.label,
+                    [Choice(item.title, item, detail=f"{item.total} video(s)") for item in groups],
+                    cursor=cursor,
+                )
+            except Back:
+                return
+            if not isinstance(group, api.CatalogList):
+                return
+            cursor = groups.index(group)
+            yield from self._videos(ctx, client, program, group)
+            if not ctx.interactive:
+                return
+
+    def _videos(
+        self,
+        ctx: FlowContext,
+        client: api.Tf1Api,
+        program: api.CatalogItem,
+        listing: api.CatalogList | None,
+    ) -> Iterator[Ask]:
         slug = program.program_slug or program.slug
         if not slug:
             ctx.error(f"{program.label}: missing program slug")
             return
         try:
             ctx.status(f"Loading {program.label}")
-            videos = client.program_videos(slug, program=program)
+            videos = client.program_videos(slug, video_type="", program=program, listing=listing)
         except api.Tf1Error as exc:
             ctx.error(str(exc))
             return
         if not videos:
             ctx.warn(f"{program.label}: no replay videos")
             return
+        if program.is_movie and len(videos) == 1:
+            yield from self._play_item(ctx, client, videos[0])
+            return
         cursor = 0
         while True:
             try:
                 picked = yield ctx.pick(
-                    program.label,
+                    f"{program.label} · {listing.title}" if listing else program.label,
                     [
                         Choice(item.label, item, detail=self._detail(item))
                         for item in videos
@@ -443,8 +467,6 @@ class TF1(Service):
                 attachments=list(source.attachments),
             ))
         except Back:
-            # Delivery sends the same Back after success, failure, or dismissal.
-            # Let the immediate caller restore the picker or URL prompt.
             return
 
     def _title(self, source: api.Source) -> Title:

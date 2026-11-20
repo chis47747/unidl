@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -334,7 +335,7 @@ def write_credential(text: str, service_id: str, slot: str, values: dict[str, An
 
 @dataclass
 class Paths:
-    home: Path = DEFAULT_HOME
+    home: Path = field(default_factory=lambda: DEFAULT_HOME)
     #: Where finished files land, one folder per service inside it. Named
     #: ``unidl_downloads`` and put in the home directory rather than inside
     #: ``Downloads``: it is a folder you go to on purpose, not one thing among a
@@ -414,9 +415,18 @@ class Paths:
 
 
 class Config:
-    def __init__(self, data: dict[str, Any] | None = None, source: Path | None = None):
+    def __init__(
+        self,
+        data: dict[str, Any] | None = None,
+        source: Path | None = None,
+        *,
+        missing_config: Path | None = None,
+        seed_config: str = "",
+    ):
         self.raw = data or {}
         self.source = source
+        self.missing_config = missing_config
+        self._seed_config = seed_config
         self.paths = self._read_paths()
         configure_binary_path(self.paths.home)
         self._devices = self._read_devices()
@@ -424,6 +434,16 @@ class Config:
         #: "set it once" surface; this is the "flipped while browsing" surface,
         #: and it is persisted in settings.json, not here.
         self.device_override: str = ""
+
+    @property
+    def config_path(self) -> Path:
+        """The file to open or save, including the candidate when it was absent."""
+        return self.source or self.missing_config or default_config_path()
+
+    @property
+    def loaded_config(self) -> Path | None:
+        """The local file actually in use, as opposed to bundled defaults."""
+        return self.source if self.missing_config is None else None
 
     def _resolve_path(self, value: str | Path) -> Path:
         """Expand a configured path relative to the YAML that owns it.
@@ -434,14 +454,15 @@ class Config:
         process working directory remains the natural fallback.
         """
         path = _expand(value)
-        if path.is_absolute() or self.source is None:
+        base = self.source or self.missing_config
+        if path.is_absolute() or base is None:
             return path
-        return self.source.parent.resolve() / path
+        return base.parent.resolve() / path
 
     # ------------------------------------------------------------- loading
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
-        candidate = _expand(path) if path is not None else default_config_path()
+        candidate = _absolute(_expand(path)) if path is not None else default_config_path()
         _reject_legacy_config(candidate)
         if candidate.exists():
             try:
@@ -451,10 +472,20 @@ class Config:
             if not isinstance(data, dict):
                 raise ValueError(f"{candidate} must contain a mapping at the top level")
             return cls(data, candidate)
-        # An explicit path remains authoritative even before its first write.
-        # Dropping it here made a later sign-in save into the canonical project
-        # file instead of the path supplied with --config.
-        return cls({}, candidate if path is not None else None)
+        # Package data is a template, not a second local configuration source.
+        # Resolve it beside the expected local file and never write to the
+        # installation, even when running from a wheel.
+        seed = files("unidl").joinpath(CONFIG_NAME).read_text("utf-8")
+        data = yaml.safe_load(seed)
+        if os.environ.get("UNIDL_HOME", "").strip():
+            # Keep the explicit runtime-state redirect. Finished media is
+            # still project-local unless the user has picked another folder.
+            data["paths"] = {"downloads": data["paths"]["downloads"]}
+            seed = yaml.safe_dump(data, sort_keys=False)
+        return cls(
+            data, candidate if path is not None else None,
+            missing_config=candidate, seed_config=seed,
+        )
 
     def reload(self) -> None:
         """Reload the YAML in place, preserving the device chosen in the UI.
@@ -470,9 +501,32 @@ class Config:
         refreshed = type(self).load(self.source)
         self.raw = refreshed.raw
         self.source = refreshed.source
+        self.missing_config = refreshed.missing_config
+        self._seed_config = refreshed._seed_config
         self.paths = refreshed.paths
         self._devices = refreshed._devices
         self.device_override = selected
+
+    def _config_text_for_write(self, path: Path) -> str:
+        """Call under the file lock; preserve a file another process created."""
+        return path.read_text("utf-8") if path.is_file() else self._seed_config
+
+    def _config_written(self, path: Path) -> None:
+        self.source = path
+        self.missing_config = None
+        self._seed_config = ""
+
+    def ensure_config_file(self) -> tuple[Path, bool]:
+        """Materialize the safe defaults only on an explicit Create/Open action."""
+        path = self.config_path
+        _reject_legacy_config(path)
+        with locked_path(path):
+            if path.is_file():
+                private_file(path)
+                return path, False
+            atomic_write_text(path, self._seed_config or "# unidl configuration\n")
+            self._config_written(path)
+            return path, True
 
     def save_managed_section(
         self,
@@ -489,12 +543,12 @@ class Config:
         used by credential storage. Only the named section is replaced, so a
         simultaneous edit to service settings or credentials is not overwritten.
         """
-        path = self.source or default_config_path()
+        path = self.config_path
         _reject_legacy_config(path)
         if path.is_symlink():
             path = Path(os.path.realpath(path))
         with locked_path(path):
-            text = path.read_text("utf-8") if path.is_file() else ""
+            text = self._config_text_for_write(path)
             updated = _replace_top_level_section(
                 text,
                 str(name).strip(),
@@ -510,7 +564,7 @@ class Config:
         if not isinstance(parsed, dict):
             raise ValueError("the saved configuration must contain a mapping at the top level")
         self.raw = parsed
-        self.source = path
+        self._config_written(path)
         self.paths = self._read_paths()
         self._devices = self._read_devices()
         return path
@@ -542,12 +596,12 @@ class Config:
         if unknown:
             raise ValueError(f"paths cannot be managed here: {', '.join(unknown)}")
 
-        path = self.source or default_config_path()
+        path = self.config_path
         _reject_legacy_config(path)
         if path.is_symlink():
             path = Path(os.path.realpath(path))
         with locked_path(path):
-            text = path.read_text("utf-8") if path.is_file() else ""
+            text = self._config_text_for_write(path)
             try:
                 current = yaml.safe_load(text) or {}
             except yaml.YAMLError as exc:
@@ -574,7 +628,7 @@ class Config:
         if not isinstance(parsed, dict):
             raise ValueError("the saved configuration must contain a mapping at the top level")
         self.raw = parsed
-        self.source = path
+        self._config_written(path)
         self.paths = self._read_paths()
         self._devices = self._read_devices()
         return path
@@ -880,7 +934,7 @@ class Config:
         a password. Creates it at the canonical project config path if there is
         none; runtime state under ``paths.home`` is a separate location.
         """
-        path = self.source or default_config_path()
+        path = self.config_path
         _reject_legacy_config(path)
         if path.is_symlink():
             # Written through the link, not over it. `os.replace` onto a symlink
@@ -889,7 +943,7 @@ class Config:
             # and leave every later hand edit to the real file unread.
             path = Path(os.path.realpath(path))
         with locked_path(path):
-            text = path.read_text("utf-8") if path.is_file() else ""
+            text = self._config_text_for_write(path)
             updated = write_credential(text, service_id, slot, values)
             atomic_write_text(path, updated)
 
@@ -905,7 +959,7 @@ class Config:
             else:
                 # a flat block: it holds one unnamed login, which is this one
                 section[service_id] = {slot: dict(values)}
-        self.source = path
+        self._config_written(path)
         return path
 
     def forget_credential(

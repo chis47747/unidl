@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unidl"
-version = "2.6.7"
+version = "2.6.8"
 description = "Integrated TUI for browsing streaming services and downloading selected media."
 readme = "README.md"
 license = "MIT"
@@ -77,7 +77,7 @@ namespaces = false
 include = [
     "unidl", "unidl.core", "unidl.downloader", "unidl.downloader.parsers", "unidl.tui",
     "unidl.services",
-    "unidl.services.abciview", "unidl.services.bbciplayer", "unidl.services.cbcgem",
+    "unidl.services.abciview", "unidl.services.ard", "unidl.services.bbciplayer", "unidl.services.cbcgem",
     "unidl.services.channel4", "unidl.services.channel5", "unidl.services.cw",
     "unidl.services.dafilms", "unidl.services.eternalfamily", "unidl.services.example",
     "unidl.services.fawesometv", "unidl.services.filmrise", "unidl.services.francetv",
@@ -87,11 +87,11 @@ include = [
     "unidl.services.ninenow", "unidl.services.nrk", "unidl.services.orf",
     "unidl.services.sbs", "unidl.services.sevenplus",
     "unidl.services.soundcloud", "unidl.services.tf1", "unidl.services.tubi",
-    "unidl.services.tvnz", "unidl.services.u", "unidl.services.vrtmax",
+    "unidl.services.tvnz", "unidl.services.u", "unidl.services.vrtmax", "unidl.services.zdf",
 ]
 
 [tool.setuptools.package-data]
-"unidl" = ["locales/*.json"]
+"unidl" = ["locales/*.json", "unidl.yaml"]
 "unidl.services.channel5" = ["*.p12"]
 
 [tool.ruff]
