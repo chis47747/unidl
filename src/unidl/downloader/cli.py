@@ -2234,6 +2234,10 @@ def _completed_track_cache_identity(stream, filename: str | None, args: argparse
             if (getattr(args, "sub_format", "srt") or "srt").lower() != "raw"
             and (sections := _dash_subtitle_sections(stream)) else {}
         ),
+        **(
+            {"dash_audio_period_durations": audio_periods}
+            if not getattr(args, "no_decrypt", False) and (audio_periods := _dash_audio_section_durations(stream)) else {}
+        ),
         "audio_vivid_decoder": getattr(args, "audio_vivid_decoder", None),
         "audio_vivid_decoder_args": getattr(args, "audio_vivid_decoder_args", None),
         "decode_audio_vivid": bool(getattr(args, "decode_audio_vivid", False)),
@@ -2627,6 +2631,9 @@ def _download_selected_stream(
     cleanup_paths = [current_path, *projection_cleanup]
     result_temp_dir = result.temp_dir
     if not checkpoint.reached("decrypted") and projection_result is None:
+        audio_periods = None if args.no_decrypt else _dash_audio_section_durations(stream)
+        if audio_periods and len(result.sections or []) != len(audio_periods):
+            raise RuntimeError("DASH audio period windows do not match the downloaded sections.")
         if _is_sabr_stream(stream):
             _apply_sniffed_sabr_container_from_path(stream, current_path)
         status.set_path(current_path)
@@ -2636,7 +2643,16 @@ def _download_selected_stream(
             note = f"Audio encryption metadata corrected: {stream.language or 'und'} is clear; skipping decryption."
             emit(note)
             _log_line(args, note)
-        if _should_finalize_clear_hls_sections(stream, result, hls_crypto):
+        if audio_periods and not stream.encrypted:
+            previous_path = current_path
+            with status.spinning("Downloaded ✓", "Aligning audio periods {spinner}"):
+                current_path = concat_media_files(
+                    result.sections or [], current_path.with_suffix(".periods.mp4"),
+                    audio_period_durations=audio_periods,
+                )
+            _cleanup_replaced_intermediate(previous_path, current_path, args, colors)
+            cleanup_paths.append(current_path)
+        elif _should_finalize_clear_hls_sections(stream, result, hls_crypto):
             with status.spinning("Downloaded ✓", "Finalizing {spinner}"):
                 current_path = _finalize_clear_hls_sections(
                     stream, result, current_path,
@@ -2697,7 +2713,7 @@ def _download_selected_stream(
                             event_callback=decrypt_event,
                         )
                     elif _should_decrypt_fragmented_parts(stream, result) and not (
-                        result.sections and _stream_sections_need_timestamp_restamp(stream)
+                        result.sections and (audio_periods or _stream_sections_need_timestamp_restamp(stream))
                     ):
                         current_path = decrypt_fragmented_mp4_parts(
                             result.parts or [],
@@ -2740,6 +2756,7 @@ def _download_selected_stream(
                                 section_expected_kids=_stream_section_key_ids(stream),
                                 keep_temp=bool(args.keep_temp or not getattr(args, "del_after_done", True)),
                                 **({"preserve_subtitles": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
+                                **({"audio_period_durations": audio_periods} if audio_periods else {}),
                             )
                     else:
                         current_path = decrypt_file(
@@ -2762,6 +2779,8 @@ def _download_selected_stream(
                 cleanup_paths.append(current_path)
             status.update("Downloaded ✓", "Decrypted ✓")
             _log_line(args, f"Decrypted: {current_path}")
+        if audio_periods:
+            _log_line(args, f"DASH audio aligned to {len(audio_periods)} periods.")
         checkpoint.save("decrypted", current_path, result)
     # A durable clear-track checkpoint now replaces the download parts.
     if checkpoint.reached("decrypted"):
@@ -3105,6 +3124,8 @@ def _decrypt_webm_output(
 def _download_parts_needed_for_postprocess(stream, result, hls_crypto, args) -> bool:
     if getattr(args, "no_decrypt", False):
         return False
+    if result.sections and _dash_audio_section_durations(stream):
+        return True
     if uses_legacy_sample_aes(stream):
         return True
     if _stream_uses_webm_container(stream) and _stream_needs_external_decryption(stream, hls_crypto):
@@ -3257,6 +3278,20 @@ def _normalize_hls_video_sample_timing(path: Path, stream) -> None:
 
 def _stream_section_durations(stream) -> list[float]:
     return [sum(durations) for durations in _stream_section_fragment_durations(stream)]
+
+
+def _dash_audio_section_durations(stream) -> list[float] | None:
+    if stream.manifest_type != "dash" or stream.media_type != "audio" or stream.is_live:
+        return None
+    durations: list[float] = []
+    for segment in stream.segments:
+        if segment.index != -1:
+            continue
+        duration = segment.dash_audio_period_duration
+        if duration is None or not math.isfinite(duration) or duration <= 0:
+            return None
+        durations.append(duration)
+    return durations if len(durations) > 1 and len(stream.extra.get("period_ids", [])) == len(durations) else None
 
 
 def _filter_incompatible_apple_credit_sections(stream, result):
@@ -9068,7 +9103,11 @@ def _apply_custom_range(stream, range_expr: str) -> None:
         if media_position not in selected_media:
             continue
         if current_init is not None and not init_included:
-            filtered.append(current_init)
+            # A segment subset no longer covers the declared Period window.
+            filtered.append(
+                replace(current_init, dash_audio_period_duration=None)
+                if current_init.dash_audio_period_duration is not None else current_init
+            )
             init_included = True
         filtered.append(segment)
     stream.segments = filtered

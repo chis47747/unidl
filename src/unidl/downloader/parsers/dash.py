@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from ..live_rules import join_dash_base_uri, should_skip_dash_period
-from ..models import DashSubtitlePeriod, SegmentInfo, StreamInfo
+from ..models import DASH_BOUNDED_AAC_PERIOD, DashSubtitlePeriod, SegmentInfo, StreamInfo
 from ..utils import ceil_div_duration, join_uri, parse_frame_rate, parse_iso8601_duration, pretty_codec
 from ..video_range import HDR_VIVID, combine_dolby_vision_range, has_hdr_vivid_signal, is_hdr_vivid
 
@@ -134,6 +134,16 @@ def parse_dash(uri: str, text: str) -> list[StreamInfo]:
                     for segment in stream.segments:
                         if segment.index == -1:
                             segment.dash_subtitle_period = timing
+                if (
+                    not is_live and media_type == "audio" and codecs == "mp4a.40.2"
+                    and period_duration and math.isfinite(period_duration) and period_duration > 0
+                    and stream.segments and stream.segments[0].index == -1
+                    and any(
+                        item.get("schemeIdUri") == DASH_BOUNDED_AAC_PERIOD
+                        for item in adaptation.findall("{*}SupplementalProperty")
+                    )
+                ):
+                    stream.segments[0].dash_audio_period_duration = period_duration
                 if stream.segments:
                     stream.url = stream.segments[0].url
                 stream.size_bytes = _byte_range_segments_size(stream.segments)

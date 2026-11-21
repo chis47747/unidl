@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 DASH_SUBTITLE_PERIOD_ALIGNED = "dash_subtitle_period_aligned"
+DASH_BOUNDED_AAC_PERIOD = "urn:unidl:dash:bounded-aac-period:1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,8 @@ class SegmentInfo:
     restrict_request_headers: bool = False
     # Timing belongs to this init, not to its position in the unfiltered MPD.
     dash_subtitle_period: DashSubtitlePeriod | None = None
+    # Opt-in window of a zero-origin, independently playable AAC section.
+    dash_audio_period_duration: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -337,6 +337,7 @@ def decrypt_sections(
     section_expected_kids: list[list[str]] | None = None,
     preserve_subtitles: bool = False,
     keep_temp: bool = False,
+    audio_period_durations: list[float] | None = None,
 ) -> Path:
     if not section_paths:
         raise ValueError("No sections to decrypt.")
@@ -386,6 +387,7 @@ def decrypt_sections(
         return concat_media_files(
             decrypted_sections, output,
             **({"preserve_subtitles": True} if preserve_subtitles else {}),
+            **({"audio_period_durations": audio_period_durations} if audio_period_durations else {}),
         )
 
 
@@ -1576,7 +1578,16 @@ def repackage_ffmpeg(input_path: str | Path, output_path: str | Path | None = No
     return output
 
 
-def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, preserve_subtitles: bool = False) -> Path:
+def concat_media_files(
+    inputs: list[str | Path], output_path: str | Path, *,
+    preserve_subtitles: bool = False,
+    audio_period_durations: list[float] | None = None,
+) -> Path:
+    if audio_period_durations is not None and (
+        len(inputs) != len(audio_period_durations)
+        or not all(math.isfinite(duration) and duration > 0 for duration in audio_period_durations)
+    ):
+        raise ValueError("Audio period windows do not match the section files.")
     if any(stereo_configurations(Path(path)) for path in inputs):
         output = Path(output_path)
         _ensure_output_free_space(_paths_total_size([Path(path) for path in inputs]), output, "3D section concat output")
@@ -1586,16 +1597,30 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, pre
         raise RuntimeError("ffmpeg not found.")
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_output_free_space(_paths_total_size([Path(path) for path in inputs]), output, "section concat output")
+    input_bytes = _paths_total_size([Path(path) for path in inputs])
+    _ensure_output_free_space(input_bytes * (2 if audio_period_durations is not None else 1), output, "section concat output")
     fd, temporary_name = tempfile.mkstemp(prefix=".unidl-concat-", suffix=output.suffix, dir=output.parent)
     os.close(fd)
     temporary = Path(temporary_name)
     list_path = None
+    audio_work = None
     try:
+        if audio_period_durations is not None:
+            # MP4 edit lists can expose negative AAC preroll. The concat
+            # demuxer preserves those packets even with an inpoint of zero,
+            # which can make DTS run backward at the next Period. Stream-copy
+            # each audible window first, retaining the input edit list's clock.
+            audio_work = tempfile.TemporaryDirectory(prefix=".unidl-audio-periods-", dir=output.parent)
+            inputs = _trim_aac_periods(executable, inputs, audio_period_durations, Path(audio_work.name))
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as list_file:
             list_path = Path(list_file.name)
-            for item in inputs:
+            for index, item in enumerate(inputs):
                 list_file.write(f"file '{_ffmpeg_concat_path(Path(item))}'\n")
+                if audio_period_durations is not None:
+                    duration = audio_period_durations[index]
+                    # AAC sections start at zero. Drop packets starting beyond
+                    # this DASH window and do not use padding to start the next.
+                    list_file.write(f"inpoint 0\noutpoint {duration:.6f}\nduration {duration:.6f}\n")
         _run_external(
             [
                 executable,
@@ -1611,6 +1636,7 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, pre
                 "-i",
                 str(list_path),
                 *(["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-f", "mov"] if preserve_subtitles else []),
+                *(["-map", "0:a:0"] if audio_period_durations is not None else []),
                 "-c",
                 "copy",
                 "-avoid_negative_ts",
@@ -1624,6 +1650,8 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, pre
             raise RuntimeError("section concat produced an empty output")
         temporary.replace(output)
     finally:
+        if audio_work is not None:
+            audio_work.cleanup()
         for path in (temporary, list_path):
             if path is not None:
                 try:
@@ -1631,6 +1659,25 @@ def concat_media_files(inputs: list[str | Path], output_path: str | Path, *, pre
                 except OSError:
                     pass
     return output
+
+
+def _trim_aac_periods(
+    executable: str, inputs: list[str | Path], durations: list[float], work: Path,
+) -> list[Path]:
+    outputs = []
+    for index, (source, duration) in enumerate(zip(inputs, durations, strict=True)):
+        output = work / f"{index:04d}.m4a"
+        _run_external(
+            [
+                executable, "-hide_banner", "-y", "-xerror", "-i", str(source), "-map", "0:a:0",
+                "-ss", "0", "-t", f"{duration:.6f}", "-c:a", "copy", "-avoid_negative_ts", "disabled",
+                str(output),
+            ],
+            "DASH audio period trim",
+            reject_demux_errors=True,
+        )
+        outputs.append(output)
+    return outputs
 
 
 def _decrypted_output_path(input_path: Path) -> Path:

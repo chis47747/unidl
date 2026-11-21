@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0] - 2026-11-21
+
+### Audio/video sync
+
+- Fixed cumulative audio drift on multi-period DASH sources that declare bounded AAC sections. Trimmed each section to its declared playback window without re-encoding so preroll and padding no longer shifted the next period.
+- Kept the existing behavior for unmarked streams, live recordings, and partial segment downloads.
+
 ## [2.6.9] - 2026-11-21
 
 ### Multi-period DASH
