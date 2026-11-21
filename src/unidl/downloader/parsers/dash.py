@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from ..live_rules import join_dash_base_uri, should_skip_dash_period
-from ..models import SegmentInfo, StreamInfo
+from ..models import DashSubtitlePeriod, SegmentInfo, StreamInfo
 from ..utils import ceil_div_duration, join_uri, parse_frame_rate, parse_iso8601_duration, pretty_codec
 from ..video_range import HDR_VIVID, combine_dolby_vision_range, has_hdr_vivid_signal, is_hdr_vivid
 
@@ -122,6 +122,18 @@ def parse_dash(uri: str, text: str) -> list[StreamInfo]:
                     key_id=key_id,
                     live_context=live_context,
                 )
+                if (
+                    not is_live and media_type == "subtitle" and period_start is not None
+                    and (stream.extension == "m4s" or any(codec in (codecs or "").lower() for codec in ("wvtt", "stpp")))
+                ):
+                    timing = DashSubtitlePeriod(
+                        start=period_start,
+                        end=period_start + period_duration if period_duration is not None else None,
+                        presentation_offset=float(stream_extra.get("dash_presentation_time_offset") or 0.0),
+                    )
+                    for segment in stream.segments:
+                        if segment.index == -1:
+                            segment.dash_subtitle_period = timing
                 if stream.segments:
                     stream.url = stream.segments[0].url
                 stream.size_bytes = _byte_range_segments_size(stream.segments)
@@ -199,7 +211,11 @@ def _merge_period_streams(streams: list[StreamInfo], live: bool = False) -> list
             start = stream.extra.get("period_start")
             first = target.extra.get("period_start")
             if start is not None and first is not None and target.duration is not None:
-                if not math.isclose(start, first + target.duration, rel_tol=0, abs_tol=0.001):
+                expected_start = first + target.duration
+                # Allow float roundoff at the inclusive 1 ms boundary, not a
+                # relative tolerance that grows with the presentation offset.
+                roundoff = max(math.ulp(start), math.ulp(expected_start))
+                if not math.isclose(start, expected_start, rel_tol=0, abs_tol=0.001 + roundoff):
                     target = None
         last_period[key] = ordinal
         if target is None:

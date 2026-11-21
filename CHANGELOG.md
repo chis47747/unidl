@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.6.9] - 2026-11-21
+
+### Multi-period DASH
+
+- Fixed continuous tracks being split when floating-point rounding put a period boundary just outside the one-millisecond tolerance. Kept real gaps and overlaps separate.
+
+### Subtitles
+
+- Aligned fragmented WebVTT and TTML cues to each DASH period's timing and bounds, even when earlier periods were filtered out.
+- Prevented duplicate subtitle offsets during muxing and preserved subtitle alignment when resuming a download.
+
 ## [2.6.8] - 2026-11-20
 
 ### Storage paths

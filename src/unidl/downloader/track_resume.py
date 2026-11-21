@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..core.secureio import atomic_write_text, locked_path, private_directory
 from .downloader import DownloadResult
+from .models import DASH_SUBTITLE_PERIOD_ALIGNED
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, bounded_child_path, windows_long_path
 
 PHASES = ("downloaded", "decrypted", "repacked", "audio", "transcoded", "ready")
@@ -218,6 +219,8 @@ class TrackCheckpoint:
                 for key, value in data.get("shape", {}).items():
                     if key in {"extension", "codecs", "channels"} and isinstance(value, (str, type(None))):
                         setattr(stream, key, value)
+                if self.phase == "ready" and data.get(DASH_SUBTITLE_PERIOD_ALIGNED) is True:
+                    stream.extra[DASH_SUBTITLE_PERIOD_ALIGNED] = True
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 self.phase = ""
                 self.path = None
@@ -279,6 +282,11 @@ class TrackCheckpoint:
                     "source_name": self._source_name,
                     "temp_dir": str(result.temp_dir) if phase == "downloaded" and result.temp_dir else None,
                     "shape": {key: getattr(result.stream, key, None) for key in ("extension", "codecs", "channels")},
+                    **(
+                        {DASH_SUBTITLE_PERIOD_ALIGNED: True}
+                        if phase == "ready" and result.stream.extra.get(DASH_SUBTITLE_PERIOD_ALIGNED) is True
+                        else {}
+                    ),
                     **auxiliary,
                 }
                 atomic_write_text(self.record, json.dumps(payload, ensure_ascii=False, sort_keys=True))

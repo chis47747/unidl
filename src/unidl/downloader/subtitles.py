@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess  # noqa: F401 - retained as the module's patch seam for hosts/tests
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -50,6 +51,9 @@ def convert_subtitle_file(
     output_path: str | Path | None = None,
     auto_fix: bool = True,
     duration: float | None = None,
+    *,
+    mp4_sections: Sequence[Mapping[str, float | None]] | None = None,
+    on_mp4_sections_applied: Callable[[], None] | None = None,
 ) -> Path:
     input_path = Path(input_path)
     target = _normalize_output_format(output_format)
@@ -78,12 +82,17 @@ def convert_subtitle_file(
     )
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    mp4_cues, is_mp4_subtitle = _parse_mp4_subtitle_file_info(input_path)
+    mp4_cues, is_mp4_subtitle = _parse_mp4_subtitle_file_info(input_path, mp4_sections=mp4_sections)
     if mp4_cues or is_mp4_subtitle:
         if auto_fix:
             mp4_cues = _fix_cues(mp4_cues)
-            mp4_cues = _fit_cues_to_duration(mp4_cues, duration)
+            if mp4_sections is None:
+                # The reliable bounds for period-timed cues were already
+                # applied. A filtered track's summed duration isn't its end.
+                mp4_cues = _fit_cues_to_duration(mp4_cues, duration)
         _write_subtitle(output, mp4_cues, target)
+        if mp4_sections is not None and on_mp4_sections_applied is not None:
+            on_mp4_sections_applied()
         return output
 
     try:
@@ -198,17 +207,21 @@ def _parse_mp4_subtitle_file(path: Path) -> list[SubtitleCue]:
     return cues
 
 
-def _parse_mp4_subtitle_file_info(path: Path) -> tuple[list[SubtitleCue], bool]:
+def _parse_mp4_subtitle_file_info(
+    path: Path, *, mp4_sections: Sequence[Mapping[str, float | None]] | None = None,
+) -> tuple[list[SubtitleCue], bool]:
     try:
         data = path.read_bytes()
     except OSError:
         return [], False
     if not _looks_like_mp4(data):
         return [], False
+    if mp4_sections is not None and len(mp4_sections) != sum(box.type == b"moov" for box in _iter_mp4_boxes(data)):
+        raise SubtitleConversionError("DASH subtitle initialization sections do not match the period timing")
     if b"wvtt" in data:
-        return _parse_mp4_webvtt(data), True
+        return _parse_mp4_webvtt(data, mp4_sections=mp4_sections), True
     if b"stpp" in data or b"ttml" in data:
-        return _parse_mp4_ttml(data), True
+        return _parse_mp4_ttml(data, mp4_sections=mp4_sections), True
     return [], False
 
 
@@ -216,13 +229,22 @@ def _looks_like_mp4(data: bytes) -> bool:
     return len(data) >= 12 and data[4:8] == b"ftyp"
 
 
-def _parse_mp4_webvtt(data: bytes) -> list[SubtitleCue]:
+def _parse_mp4_webvtt(
+    data: bytes, *, mp4_sections: Sequence[Mapping[str, float | None]] | None = None,
+) -> list[SubtitleCue]:
     timescale = _mp4_mdhd_timescale(data) or 1000
     trex_duration, trex_size = _mp4_trex_defaults(data)
     pending_samples: list[tuple[int, int, int]] = []
     cues: list[SubtitleCue] = []
     blocks = _mp4_vtt_blocks(data)
+    section_index = -1
     for box in _iter_mp4_boxes(data):
+        if box.type == b"moov":
+            init = data[box.start:box.end]
+            timescale = _mp4_mdhd_timescale(init) or 1000
+            trex_duration, trex_size = _mp4_trex_defaults(init)
+            section_index += 1
+            continue
         if box.type == b"moof":
             pending_samples = _mp4_fragment_samples(data, box, trex_duration, trex_size)
             continue
@@ -235,19 +257,29 @@ def _parse_mp4_webvtt(data: bytes) -> list[SubtitleCue]:
                 continue
             sample = data[cursor : cursor + size]
             cursor += size
-            cues.extend(_parse_webvtt_sample_cues(
+            sample_cues = _parse_webvtt_sample_cues(
                 sample, decode_time / timescale, (decode_time + duration) / timescale, blocks,
-            ))
+            )
+            cues.extend(_mp4_section_cues(sample_cues, mp4_sections, section_index))
         pending_samples = []
     return cues
 
 
-def _parse_mp4_ttml(data: bytes) -> list[SubtitleCue]:
+def _parse_mp4_ttml(
+    data: bytes, *, mp4_sections: Sequence[Mapping[str, float | None]] | None = None,
+) -> list[SubtitleCue]:
     timescale = _mp4_mdhd_timescale(data) or 1000
     trex_duration, trex_size = _mp4_trex_defaults(data)
     pending_samples: list[tuple[int, int, int]] = []
     cues: list[SubtitleCue] = []
+    section_index = -1
     for box in _iter_mp4_boxes(data):
+        if box.type == b"moov":
+            init = data[box.start:box.end]
+            timescale = _mp4_mdhd_timescale(init) or 1000
+            trex_duration, trex_size = _mp4_trex_defaults(init)
+            section_index += 1
+            continue
         if box.type == b"moof":
             pending_samples = _mp4_fragment_samples(data, box, trex_duration, trex_size)
             continue
@@ -261,9 +293,31 @@ def _parse_mp4_ttml(data: bytes) -> list[SubtitleCue]:
             sample = data[cursor : cursor + size]
             cursor += size
             sample_cues = _parse_ttml_sample(sample, decode_time / timescale, (decode_time + duration) / timescale)
-            cues.extend(sample_cues)
+            cues.extend(_mp4_section_cues(sample_cues, mp4_sections, section_index))
         pending_samples = []
     return cues
+
+
+def _mp4_section_cues(
+    cues: list[SubtitleCue], sections: Sequence[Mapping[str, float | None]] | None, index: int,
+) -> list[SubtitleCue]:
+    if sections is None:
+        return cues
+    if index < 0 or index >= len(sections):
+        raise SubtitleConversionError("MP4 subtitle samples appeared outside a known initialization section")
+    timing = sections[index]
+    offset = float(timing.get("offset") or 0.0)
+    lower = float(timing.get("start") or 0.0)
+    upper = timing.get("end")
+    shifted: list[SubtitleCue] = []
+    for cue in cues:
+        start = max(lower, cue.start + offset)
+        end = cue.end + offset
+        if upper is not None:
+            end = min(float(upper), end)
+        if end > start:
+            shifted.append(replace(cue, start=start, end=end))
+    return shifted
 
 
 def _iter_mp4_boxes(data: bytes, start: int = 0, end: int | None = None) -> list[_Mp4Box]:

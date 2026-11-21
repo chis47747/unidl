@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+DASH_SUBTITLE_PERIOD_ALIGNED = "dash_subtitle_period_aligned"
+
+
+@dataclass(frozen=True, slots=True)
+class DashSubtitlePeriod:
+    start: float
+    end: float | None
+    presentation_offset: float
+
 
 @dataclass(slots=True)
 class SegmentInfo:
@@ -25,6 +34,8 @@ class SegmentInfo:
     # Internal: a URL handoff from a different origin must not regain the
     # original request's credentials when a range is later fetched directly.
     restrict_request_headers: bool = False
+    # Timing belongs to this init, not to its position in the unfiltered MPD.
+    dash_subtitle_period: DashSubtitlePeriod | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {

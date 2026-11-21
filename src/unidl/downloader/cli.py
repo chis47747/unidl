@@ -121,7 +121,7 @@ from .live_rules import (
     should_treat_live_stream_as_fragmented_mp4,
 )
 from .loader import LoadError, normalize_headers
-from .models import SegmentInfo, StreamInfo
+from .models import DASH_SUBTITLE_PERIOD_ALIGNED, SegmentInfo, StreamInfo
 from .mp4_metadata import video_signature_from_init
 from .mux_audio import normalize_default_audio, resolve_default_audio
 from .mux_subtitle import normalize_default_subtitle, resolve_default_subtitle
@@ -2229,6 +2229,11 @@ def _completed_track_cache_identity(stream, filename: str | None, args: argparse
         "audio_metadata": audio_metadata_signature(stream) if getattr(args, "audio_format", None) else None,
         "sub_format": (getattr(args, "sub_format", "srt") or "srt").lower(),
         "auto_subtitle_fix": bool(getattr(args, "auto_subtitle_fix", True)),
+        **(
+            {"dash_subtitle_period_timing": sections}
+            if (getattr(args, "sub_format", "srt") or "srt").lower() != "raw"
+            and (sections := _dash_subtitle_sections(stream)) else {}
+        ),
         "audio_vivid_decoder": getattr(args, "audio_vivid_decoder", None),
         "audio_vivid_decoder_args": getattr(args, "audio_vivid_decoder_args", None),
         "decode_audio_vivid": bool(getattr(args, "decode_audio_vivid", False)),
@@ -2287,6 +2292,8 @@ def _load_completed_track_cache(stream, filename: str | None, args: argparse.Nam
         for value in raw_cleanup:
             if isinstance(value, str) and value:
                 cleanup_paths.append(Path(value).expanduser())
+    if data.get(DASH_SUBTITLE_PERIOD_ALIGNED) is True:
+        stream.extra[DASH_SUBTITLE_PERIOD_ALIGNED] = True
     return _CompletedTrackCache(path=path, cleanup_paths=cleanup_paths)
 
 
@@ -2311,6 +2318,7 @@ def _write_completed_track_cache(
     payload = {
         "version": _COMPLETED_TRACK_CACHE_VERSION,
         "identity": _completed_track_cache_identity(stream, filename, args),
+        **({DASH_SUBTITLE_PERIOD_ALIGNED: True} if stream.extra.get(DASH_SUBTITLE_PERIOD_ALIGNED) is True else {}),
         "path": str(output_path),
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
@@ -2442,6 +2450,7 @@ def _download_selected_stream(
         enabled=not args.no_resume,
         keep=bool(args.keep_temp or not getattr(args, "del_after_done", True)),
     )
+    stream.extra.pop(DASH_SUBTITLE_PERIOD_ALIGNED, None)
     checkpoint.restore(stream)
     cached = (
         _CompletedTrackCache(checkpoint.path, [checkpoint.path])
@@ -5979,6 +5988,30 @@ def _audio_cover_path(stream, args: argparse.Namespace, headers: dict[str, str] 
     )
 
 
+def _dash_subtitle_sections(stream) -> list[dict[str, float | None]]:
+    """Build the timing list from the init segments still in the download."""
+    if not _is_subtitle_stream(stream):
+        return []
+    origin = _dash_mux_period_start(stream)
+    if origin is None:
+        return []
+    sections = []
+    for segment in stream.segments:
+        if segment.index != -1:
+            continue
+        timing = segment.dash_subtitle_period
+        if timing is None:
+            # Don't guess when only part of a track has reliable timing.
+            return []
+        start = timing.start - origin
+        sections.append({
+            "offset": start - timing.presentation_offset,
+            "start": start,
+            "end": timing.end - origin if timing.end is not None else None,
+        })
+    return sections
+
+
 def _convert_subtitle_output(
     current_path: Path,
     stream,
@@ -5989,9 +6022,16 @@ def _convert_subtitle_output(
 ) -> tuple[Path, list[Path]]:
     if not _is_subtitle_stream(stream):
         return current_path, []
+    stream.extra.pop(DASH_SUBTITLE_PERIOD_ALIGNED, None)
     sub_format = (getattr(args, "sub_format", "srt") or "srt").lower()
     if sub_format == "raw":
         return current_path, []
+    sections = _dash_subtitle_sections(stream)
+
+    def mark_period_aligned() -> None:
+        stream.extra[DASH_SUBTITLE_PERIOD_ALIGNED] = True
+
+    subtitle_timing = {"mp4_sections": sections, "on_mp4_sections_applied": mark_period_aligned} if sections else {}
     try:
         if status is not None:
             with status.spinning("Downloaded ✓", "Converting {spinner}"):
@@ -6000,6 +6040,7 @@ def _convert_subtitle_output(
                     output_format=sub_format,
                     auto_fix=getattr(args, "auto_subtitle_fix", True),
                     duration=getattr(stream, "duration", None),
+                    **subtitle_timing,
                 )
         else:
             converted = convert_subtitle_file(
@@ -6007,6 +6048,7 @@ def _convert_subtitle_output(
                 output_format=sub_format,
                 auto_fix=getattr(args, "auto_subtitle_fix", True),
                 duration=getattr(stream, "duration", None),
+                **subtitle_timing,
             )
     except SubtitleConversionError as exc:
         if status is not None:
@@ -9764,6 +9806,10 @@ def _mux_input_for_track(
 
 def _dash_mux_start(stream) -> float | None:
     period_start = _dash_mux_period_start(stream)
+    if (getattr(stream, "extra", None) or {}).get(DASH_SUBTITLE_PERIOD_ALIGNED) is True:
+        # Text cues already include the in-period offset. Only the track's
+        # Period origin is relative to the other selected tracks.
+        return period_start
     presentation_start = _dash_mux_presentation_start(stream)
     if presentation_start is None:
         return period_start
@@ -9797,6 +9843,8 @@ def _mux_delay_ms(start: float | None, base_start: float | None) -> int | None:
 
 
 def _dash_mux_preroll_trim_ms(stream) -> int | None:
+    if (getattr(stream, "extra", None) or {}).get(DASH_SUBTITLE_PERIOD_ALIGNED) is True:
+        return None  # Conversion has already clipped preroll at each boundary.
     start = _dash_mux_presentation_start(stream)
     if start is None or start >= -0.001:
         return None
