@@ -69,7 +69,39 @@ class LyricsScreen(ModalScreen[None]):
             )
 
     def on_mount(self) -> None:
-        self.query_one("#lyrics-list", VerticalScroll).focus()
+        listing = self.query_one("#lyrics-list", VerticalScroll)
+        listing.focus()
+        self.watch(listing, "scroll_y", self._sync_nav, init=False)
+        self.watch(listing, "virtual_size", self._sync_nav, init=False)
+        self.call_after_refresh(self._sync_nav)
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._sync_nav)
+
+    def relocalize(self) -> None:
+        timing = tr(f"lyrics.timing.{self.lyrics.timing}")
+        summary = tr(
+            "lyrics.summary",
+            count=len(self.lyrics.lines),
+            timing=timing,
+            language=self.lyrics.language or tr("lyrics.language_unknown"),
+        )
+        self.query_one("#lyrics-modal-title", Static).update(
+            f"{tr('lyrics.title')}  [$dim]{visual_markup(self.save_name)}[/]"
+        )
+        self.query_one("#lyrics-summary", Static).update(f"[$muted]{visual_markup(summary)}[/]")
+        self.query_one("#lyrics-previous", Button).label = f"‹ {tr('modal.previous')}"
+        self.query_one("#lyrics-next", Button).label = f"{tr('modal.next')} ›"
+        self.query_one("#lyrics-modal-hint", Static).update(f"[$muted]{tr('lyrics.close_hint')}[/]")
+
+    def _sync_nav(self) -> None:
+        if not self.is_attached:
+            return
+        listing = self.query_one("#lyrics-list", VerticalScroll)
+        self.query_one("#lyrics-previous", Button).disabled = listing.scroll_y <= 0
+        self.query_one("#lyrics-next", Button).disabled = (
+            listing.max_scroll_y <= 0 or listing.scroll_y >= listing.max_scroll_y
+        )
 
     def action_scroll(self, delta: int) -> None:
         self.query_one("#lyrics-list", VerticalScroll).scroll_relative(y=delta, animate=False)

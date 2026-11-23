@@ -121,6 +121,10 @@ class GlobalSearchScreen(Screen):
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "noop", "Open", show=True),
+        Binding("up", "move_list(-1)", "Up", show=False),
+        Binding("down", "move_list(1)", "Down", show=False),
+        Binding("pageup", "move_list(-10)", "Page up", show=False),
+        Binding("pagedown", "move_list(10)", "Page down", show=False),
         Binding("ctrl+y", "copy_key", "Copy key", show=True),
         Binding("ctrl+n", "add_keys", "Add keys", show=True),
     ]
@@ -152,6 +156,7 @@ class GlobalSearchScreen(Screen):
         self._remote_records: list[KeyRecord] = []
         self._remote_status = ""
         self._remote_busy = False
+        self._remote_generation = 0
         self._search_target_signature = ""
 
     @property
@@ -263,7 +268,7 @@ class GlobalSearchScreen(Screen):
                 local_names=self.local_vault_names,
             )
             self.query_one("#masthead", Static).update(
-                f"{tr('search.keys_title')}  [$dim]{self._service.NAME}[/]"
+                f"{tr('search.keys_title')}  [$dim]{visual_markup(self._service.NAME)}[/]"
             )
             self.query_one("#subhead", Static).update(
                 f"[$dim]{tr('search.subhead_scoped', count=count)}[/]"
@@ -283,12 +288,15 @@ class GlobalSearchScreen(Screen):
 
     def on_screen_resume(self, _event) -> None:
         signature = self._search_target_signature_value()
-        if signature == self._search_target_signature:
-            return
-        self._search_target_signature = signature
-        self._reset_remote_search()
+        if signature != self._search_target_signature:
+            self._search_target_signature = signature
+            self._reset_remote_search()
         self._render_masthead()
         self.rebuild(self._needle)
+
+    def on_unmount(self) -> None:
+        self._remote_generation += 1
+        self.workers.cancel_group(self, "remote-vault-search")
 
     # ------------------------------------------------------------- classifying
     def rebuild(self, needle: str = "") -> None:
@@ -342,12 +350,16 @@ class GlobalSearchScreen(Screen):
         # a URL routes straight to the owning service
         if not self._vault_only and needle.lower().startswith(("http://", "https://")):
             matched = self.app.registry.for_url(needle)
+            if matched is not None and matched not in self.app.services:
+                matched = None
             rows = [_Row("service", service=matched)] if matched else []
-            self._add_section(
-                option_list,
-                "url_match" if rows else "url_none",
-                rows,
-            )
+            if rows:
+                self._add_section(option_list, "url_match", rows)
+            else:
+                self._rows.append(_Row("header"))
+                option_list.add_option(
+                    Option(f"  [$dim]{tr('search.section.url_none')}[/]", disabled=True)
+                )
             self._focus_first(option_list)
             return
 
@@ -365,7 +377,13 @@ class GlobalSearchScreen(Screen):
         # includes one with a label still attached - "KID: 39a1…" is what a paste
         # out of a log looks like, and offering service names for it is noise.
         if key_query or self._vault_only:
-            self._add_remote_search_row(option_list, needle)
+            if key_query:
+                self._add_remote_search_row(option_list, needle)
+            elif not self._vault_search_enabled:
+                self._rows.append(_Row("header"))
+                option_list.add_option(
+                    Option(f"  [$dim]{tr('search.vault_off')}[/]", disabled=True)
+                )
             if self._remote_records and self._remote_query == needle:
                 self._add_section(
                     option_list,
@@ -384,10 +402,10 @@ class GlobalSearchScreen(Screen):
             ):
                 message = (
                     tr("search.no_local_key")
-                    if self.remote_vault_descriptors
-                    else tr("search.no_key_id")
+                    if key_query and self.remote_vault_descriptors
+                    else tr("search.no_key_id") if key_query else tr("search.no_key_matches")
                 )
-                option_list.add_option(Option(f"[dim]  {message}[/dim]", disabled=True))
+                option_list.add_option(Option(f"  [$dim]{message}[/]", disabled=True))
             self._focus_first(option_list)
             return
 
@@ -420,7 +438,7 @@ class GlobalSearchScreen(Screen):
             heading=tr("search.section.search_in", query=visual_markup(needle)),
         )
         self._add_section(option_list, "local_keys", key_rows)
-        self._focus_first(option_list)
+        self._focus_default(option_list)
 
     @property
     def _vault_search_enabled(self) -> bool:
@@ -449,21 +467,25 @@ class GlobalSearchScreen(Screen):
 
     def _remote_search_label(self, descriptors: list[vaults.VaultDescriptor]) -> str:
         scope = self._remote_scope_note()
+        vault_name = visual_markup(self._remote_vault)
+        scope_text = visual_markup(scope)
         if self._remote_busy:
-            return f"    [$accent]{tr('search.searching_remote')}[/]  [$dim]{self._remote_vault}{scope}…[/]"
+            return f"    [$accent]{tr('search.searching_remote')}[/]  [$dim]{vault_name}{scope_text}…[/]"
         if self._remote_status:
             return (
                 f"    [$accent]{tr('search.search_remote_again')}[/]  "
-                f"[$dim]{self._remote_vault}{scope} · {self._remote_status}[/]"
+                f"[$dim]{vault_name}{scope_text} · {visual_markup(self._remote_status)}[/]"
             )
         if len(descriptors) == 1:
-            return f"    [$accent]{tr('search.search_remote')}[/]  [$dim]{descriptors[0].name}[/]"
+            return f"    [$accent]{tr('search.search_remote')}[/]  [$dim]{visual_markup(descriptors[0].name)}[/]"
         return (
             f"    [$accent]{tr('search.search_remote')}[/]  "
             f"[$dim]{tr('search.search_remote_n', count=len(descriptors))}[/]"
         )
 
     def _reset_remote_search(self) -> None:
+        self._remote_generation += 1
+        self.workers.cancel_group(self, "remote-vault-search")
         self._remote_query = ""
         self._remote_vault = ""
         self._remote_service = ""
@@ -525,7 +547,7 @@ class GlobalSearchScreen(Screen):
             service = row.service
             name = service.NAME.removesuffix(" (script)")
             what = tr("search.action.search") if service.SUPPORTS_SEARCH else tr("search.action.open")
-            return f"    {_column(name)}[$gutter]{what}[/]"
+            return f"    {visual_markup(_column(name))}[$gutter]{what}[/]"
         record = row.record
         # the title came off a network or out of a command file, so it is escaped
         # and put in visual order; the ids are hex and need neither
@@ -552,6 +574,43 @@ class GlobalSearchScreen(Screen):
                 option_list.highlighted = index
                 return
 
+    def _focus_default(self, option_list: OptionList) -> None:
+        """Align the initial highlight with what Enter will actually open."""
+        target = self._first_actionable()
+        if target is not None:
+            for index, row in enumerate(self._rows):
+                if row is target and not option_list.get_option_at_index(index).disabled:
+                    option_list.highlighted = index
+                    return
+        self._focus_first(option_list)
+
+    def action_move_list(self, delta: int) -> None:
+        """Move the result cursor while the search input keeps focus."""
+        option_list = self.query_one("#service-table", OptionList)
+        count = option_list.option_count
+        if not count:
+            return
+        enabled = [i for i in range(count) if not option_list.get_option_at_index(i).disabled]
+        if not enabled:
+            return
+        current = option_list.highlighted
+        if current is None:
+            option_list.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            option_list.scroll_to_highlight()
+            return
+        if delta in (-1, 1):
+            pos = next((i for i, idx in enumerate(enabled) if idx == current), None)
+            if pos is None:
+                option_list.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            else:
+                option_list.highlighted = enabled[max(0, min(len(enabled) - 1, pos + delta))]
+            option_list.scroll_to_highlight()
+            return
+        target = max(0, min(count - 1, current + delta))
+        nearest = min(enabled, key=lambda idx: (abs(idx - target), idx))
+        option_list.highlighted = nearest
+        option_list.scroll_to_highlight()
+
     # ------------------------------------------------------------------ events
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
@@ -563,11 +622,14 @@ class GlobalSearchScreen(Screen):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        row = self._first_actionable()
+        option_list = self.query_one("#service-table", OptionList)
+        row = self._row_at(option_list.highlighted)
+        if row is None or row.kind == "more":
+            row = self._first_actionable()
         if row is not None:
             self._activate(row)
         else:
-            self.query_one("#service-table", OptionList).focus()
+            option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -722,6 +784,8 @@ class GlobalSearchScreen(Screen):
         service: str | None = None,
     ) -> None:
         query = self.query_one("#query", Input).value.strip()
+        self._remote_generation += 1
+        generation = self._remote_generation
         self._remote_query = query
         self._remote_vault = name
         self._remote_service = service or ""
@@ -729,7 +793,7 @@ class GlobalSearchScreen(Screen):
         self._remote_status = ""
         self._remote_busy = True
         self.rebuild(query)
-        self._search_remote(name, kids, query, service)
+        self._search_remote(name, kids, query, service, generation)
 
     @work(thread=True, exclusive=True, group="remote-vault-search")
     def _search_remote(
@@ -738,28 +802,37 @@ class GlobalSearchScreen(Screen):
         kids: tuple[str, ...],
         query: str,
         service: str | None,
+        generation: int,
     ) -> None:
         try:
             found = self.app.vaults.search_remote(kids, name=name, service=service)
         except Exception as exc:  # noqa: BLE001 - backend failures belong in the result row
             message = " ".join(str(exc).split())[:160] or tr("search.remote_failed")
+            try:
+                self.app.call_from_thread(
+                    self._finish_remote_search,
+                    name,
+                    service,
+                    query,
+                    [],
+                    message,
+                    generation,
+                )
+            except RuntimeError:
+                pass
+            return
+        try:
             self.app.call_from_thread(
                 self._finish_remote_search,
                 name,
                 service,
                 query,
-                [],
-                message,
+                found,
+                "",
+                generation,
             )
-            return
-        self.app.call_from_thread(
-            self._finish_remote_search,
-            name,
-            service,
-            query,
-            found,
-            "",
-        )
+        except RuntimeError:
+            pass
 
     def _finish_remote_search(
         self,
@@ -768,7 +841,12 @@ class GlobalSearchScreen(Screen):
         query: str,
         found: list[vaults.VaultSearchResult],
         error: str,
+        generation: int | None = None,
     ) -> None:
+        if not self.is_attached:
+            return
+        if generation is not None and generation != self._remote_generation:
+            return
         # A slow answer for an old input must never appear under a new KID.
         if query != self.query_one("#query", Input).value.strip():
             return
@@ -807,7 +885,12 @@ class GlobalSearchScreen(Screen):
             self.app.pop_screen()
             if query.lower().startswith(("http://", "https://")):
                 self.app.open_service(row.service, target=query)
-            elif row.service.SUPPORTS_SEARCH and query and not normalize_hex(query):
+            elif (
+                row.service.SUPPORTS_SEARCH
+                and query
+                and not normalize_hex(query)
+                and _rank(row.service, query.lower()) != 0
+            ):
                 self.app.open_service(row.service, search=query)
             else:
                 self.app.open_service(row.service)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import select
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover - platform-specific
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
+from textual import work
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.geometry import Size
@@ -362,6 +364,8 @@ class _QrModuleImage(Widget):
     """Paint QR cells directly, preserving per-cell backgrounds and exact size."""
 
     def __init__(self, matrix: Matrix) -> None:
+        if not matrix or not matrix[0]:
+            raise QrError("QR matrix is empty.")
         super().__init__(classes="qr-unicode-image")
         self._matrix = matrix
         self._width = len(matrix[0])
@@ -397,38 +401,58 @@ class QrWidget(Vertical):
         self.presentation = presentation
         self._image = None
         self._preview_dir = None
+        # Remote provider QR URLs can take up to 8s to download; load them
+        # off the UI thread while keeping generated / in-memory QRs instant.
+        self._remote_fetch = bool(
+            not presentation.image_data and presentation._image_source_url()
+        )
+
+    def _build_widgets(self, image: object, matrix: Matrix | None, protocol_image: type | None) -> list[Widget]:
+        from ..core.i18n import tr
+
+        widgets: list[Widget] = []
+        if protocol_image is not None:
+            widgets.append(
+                protocol_image(
+                    _protocol_qr_image(image, protocol_qr_canvas_size()),
+                    classes="qr-protocol-image",
+                )
+            )
+        else:
+            assert matrix is not None
+            widgets.append(_QrModuleImage(matrix))
+            warning = Static(tr("qr.too_wide"), classes="qr-render-error qr-size-error", markup=False)
+            warning.display = False
+            widgets.append(warning)
+        widgets.append(Button(tr("qr.open_image"), classes="qr-open-image"))
+        return widgets
+
+    def _error_widget(self) -> Static:
+        from ..core.i18n import tr
+
+        # The link/action rows remain usable.  Do not include the exception:
+        # it may contain a prefix of the data URI a service returned.
+        message = tr("qr.no_image_link") if self.presentation.open_url else tr("qr.no_image")
+        return Static(message, classes="qr-render-error", markup=False)
 
     def compose(self) -> ComposeResult:
         from ..core.i18n import tr
 
+        if self._remote_fetch:
+            yield Static(tr("audio.cover_loading"), classes="qr-loading", markup=False)
+            return
         try:
             protocol_image = protocol_image_class()
             self._image = self.presentation.image(
                 generated_canvas=protocol_qr_canvas_size() if protocol_image is not None else None,
             )
-            if protocol_image is not None:
-                yield protocol_image(
-                    _protocol_qr_image(self._image, protocol_qr_canvas_size()),
-                    classes="qr-protocol-image",
-                )
-            else:
-                yield _QrModuleImage(self.presentation.matrix(image=self._image))
-                warning = Static(tr("qr.too_wide"), classes="qr-render-error qr-size-error", markup=False)
-                warning.display = False
-                yield warning
-        except (QrError, OSError, ValueError):
-            # The link/action rows remain usable.  Do not include the exception:
-            # it may contain a prefix of the data URI a service returned.
-            message = tr("qr.no_image_link") if self.presentation.open_url else tr("qr.no_image")
-            yield Static(
-                message,
-                classes="qr-render-error",
-                markup=False,
-            )
-        if self._image is not None:
-            yield Button(tr("qr.open_image"), classes="qr-open-image")
+            matrix = None if protocol_image is not None else self.presentation.matrix(image=self._image)
+            yield from self._build_widgets(self._image, matrix, protocol_image)
+        except (QrError, ImportError, OSError, ValueError, RuntimeError):
+            self._image = None
+            yield self._error_widget()
 
-    def on_mount(self) -> None:
+    def _fit_parent_card(self) -> None:
         modules = self.query(".qr-unicode-image")
         if modules and self.parent is not None and self.parent.has_class("qr-card"):
             # Let a wide terminal show the whole grid, while the card's CSS
@@ -437,6 +461,44 @@ class QrWidget(Vertical):
                 78, modules.first()._width + self.parent.styles.gutter.width,
             )
         self.on_resize()
+
+    def on_mount(self) -> None:
+        if self._remote_fetch:
+            self._load_remote_qr()
+            return
+        self._fit_parent_card()
+
+    @work(exclusive=True, group="qr-fetch")
+    async def _load_remote_qr(self) -> None:
+        def fetch():
+            protocol_image = protocol_image_class()
+            image = self.presentation.image(
+                generated_canvas=protocol_qr_canvas_size() if protocol_image is not None else None,
+            )
+            matrix = None if protocol_image is not None else self.presentation.matrix(image=image)
+            return image, matrix, protocol_image
+
+        try:
+            image, matrix, protocol_image = await asyncio.to_thread(fetch)
+        except (QrError, ImportError, OSError, ValueError, RuntimeError):
+            if not self.is_attached:
+                return
+            await self.remove_children()
+            await self.mount(self._error_widget())
+            return
+        if not self.is_attached:
+            return
+        try:
+            self._image = image
+            widgets = self._build_widgets(image, matrix, protocol_image)
+        except (QrError, ImportError, OSError, ValueError, RuntimeError):
+            self._image = None
+            await self.remove_children()
+            await self.mount(self._error_widget())
+            return
+        await self.remove_children()
+        await self.mount_all(widgets)
+        self._fit_parent_card()
 
     def on_resize(self) -> None:
         modules = self.query(".qr-unicode-image")
@@ -452,15 +514,18 @@ class QrWidget(Vertical):
         if not event.button.has_class("qr-open-image") or self._image is None:
             return
         event.stop()
-        if self._preview_dir is None:
-            self._preview_dir = tempfile.TemporaryDirectory(prefix="unidl-qr-")
-        path = Path(self._preview_dir.name) / "qr.png"
-        self._image.save(path, format="PNG")
-        self.app.open_path(path)
+        try:
+            if self._preview_dir is None:
+                self._preview_dir = tempfile.TemporaryDirectory(prefix="unidl-qr-")
+            path = Path(self._preview_dir.name) / "qr.png"
+            self._image.save(path, format="PNG")
+            self.app.open_path(path)
+        except OSError as exc:
+            self.notify(str(exc), severity="error", timeout=6)
 
     def on_unmount(self) -> None:
         """Release a Kitty terminal-side image as soon as the wait ends."""
-
+        self.workers.cancel_group(self, "qr-fetch")
         found = self.query(".qr-protocol-image")
         child = found.first() if found else None
         renderable = getattr(child, "_renderable", None)

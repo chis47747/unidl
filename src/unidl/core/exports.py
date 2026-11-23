@@ -70,6 +70,9 @@ VERSION = 3
 # A complete batch of source manifests must fit this bound. Never replace
 # an earlier valid export with a truncated document or a partial batch.
 MAX_EXPORT_BYTES = 32 * 1024 * 1024
+# Separate read safety bound so reading/scanning untrusted files cannot exhaust
+# memory even if MAX_EXPORT_BYTES is lowered for write-path checks.
+MAX_READ_BYTES = 32 * 1024 * 1024
 
 #: what the file is, for anyone who opens it in an editor
 KIND = "unidl-export"
@@ -141,8 +144,10 @@ def _title_document(title: Title) -> dict[str, Any]:
     return document
 
 
-def _title_from(document: dict[str, Any]) -> Title:
+def _title_from(document: Any) -> Title:
     """A title back out of JSON, with anything unreadable left unset."""
+    if not isinstance(document, dict):
+        document = {}
     try:
         kind = TitleKind(str(document.get("kind") or "movie"))
     except ValueError:
@@ -423,20 +428,32 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         attachments = [Attachment.from_document(item) for item in attachment_documents]
     except (TypeError, ValueError) as exc:
         raise ExportError(f"invalid attachment metadata ({exc})") from exc
+    raw_headers = document.get("headers")
+    if raw_headers is not None and not isinstance(raw_headers, dict):
+        raise ExportError("headers must be an object")
+    raw_alternates = document.get("alternate_manifest_urls")
+    if raw_alternates is not None and not isinstance(raw_alternates, list):
+        raise ExportError("alternate_manifest_urls must be a list")
+    raw_keys = document.get("keys")
+    if raw_keys is not None and not isinstance(raw_keys, list):
+        raise ExportError("keys must be a list")
+    raw_tracks = document.get("tracks")
+    if raw_tracks is not None and not isinstance(raw_tracks, list):
+        raise ExportError("tracks must be a list")
     return Entry(
         save_name=_text(document.get("save_name")),
         release_name_base=_text(document.get("release_name_base")),
-        title=_title_from(document.get("title") or {}),
+        title=_title_from(document.get("title")),
         manifest_url=manifest,
         alternate_manifest_urls=tuple(
             str(url)
-            for url in (document.get("alternate_manifest_urls") or [])
+            for url in (raw_alternates or [])
             if str(url).strip()
         ),
         merge_manifests=bool(document.get("merge_manifests")),
         manifest_base_url=_text(document.get("manifest_base_url")),
         json_manifest=json_manifest if isinstance(json_manifest, dict) else None,
-        headers={str(k): str(v) for k, v in (document.get("headers") or {}).items()},
+        headers={str(k): str(v) for k, v in (raw_headers or {}).items()},
         proxy=_text(document.get("proxy")),
         is_live=bool(document.get("is_live")),
         note=_text(document.get("note")),
@@ -449,8 +466,8 @@ def _entry_from(document: dict[str, Any]) -> Entry:
         hls_key=_text(drm.get("hls_key")),
         hls_iv=_text(drm.get("hls_iv")),
         hls_method=_text(drm.get("hls_method")),
-        keys=[str(key) for key in (document.get("keys") or [])],
-        tracks=[str(row) for row in (document.get("tracks") or [])],
+        keys=[str(key) for key in (raw_keys or [])],
+        tracks=[str(row) for row in (raw_tracks or [])],
         summary=_text(document.get("summary")),
         chapters=chapters,
         attachments=attachments,
@@ -856,9 +873,21 @@ def write(path: Path, document: Document) -> Path:  # noqa: D417 - documented be
 
 
 def read(path: Path) -> Document:
+    source = Path(path)
     try:
-        text = Path(path).read_text("utf-8")
+        size = source.stat().st_size
     except OSError as exc:
+        raise ExportError(f"could not be read ({exc})") from exc
+    if size > MAX_READ_BYTES:
+        limit = (
+            f"{MAX_READ_BYTES // (1024 * 1024)} MiB"
+            if MAX_READ_BYTES >= 1024 * 1024
+            else f"{MAX_READ_BYTES} bytes"
+        )
+        raise ExportError(f"file exceeds the {limit} export safety limit")
+    try:
+        text = source.read_text("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         raise ExportError(f"could not be read ({exc})") from exc
     document = loads(text)
     for index, entry in enumerate(document.entries):
@@ -866,7 +895,7 @@ def read(path: Path) -> Document:
             try:
                 source_manifest(entry.json_manifest)
             except ManifestSourceError:
-                entry.legacy_source_path = str(Path(path).resolve())
+                entry.legacy_source_path = str(source.resolve())
                 entry.legacy_entry_index = index
     return document
 
@@ -937,7 +966,7 @@ def scan(folder: Path) -> list[tuple[Path, Document | None, str]]:
             continue
         try:
             entry: tuple[Document | None, str] = (read(path), "")
-        except ExportError as exc:
+        except (ExportError, TypeError, ValueError, KeyError, AttributeError) as exc:
             entry = (None, str(exc))
         if stamp is not None:
             if len(_cache) >= _CACHE_LIMIT:

@@ -51,6 +51,66 @@ class ServiceScreen(AskHost):
         self.refresh_banner()
         self.run_service_flow()
 
+    def on_screen_resume(self, event) -> None:
+        super().on_screen_resume(event)
+        if (
+            self.controller.aborted
+            and not self.waiting
+            and not self.controller.flow_error
+            and not self.panel_showing
+            and not getattr(self.controller, "import_session", False)
+            and not getattr(self.controller, "root_back_requested", False)
+            and self.app.screen is self
+        ):
+            self.call_after_refresh(self._restart_after_abort)
+
+    def _restart_after_abort(self) -> None:
+        """Reload the service menu after FlowScreen aborted a busy step."""
+        if (
+            not self.is_attached
+            or self.app.screen is not self
+            or not self.controller.aborted
+            or self.waiting
+            or self.panel_showing
+            or self.controller.flow_error
+        ):
+            return
+        from ..core.engine import Engine
+        from .session import SessionController
+
+        previous = self.controller
+        previous.detach(self)
+        extras = getattr(getattr(self.service, "ctx", None), "extras", None)
+        if isinstance(extras, dict):
+            for key in ("initial_target", "initial_search", "initial_import"):
+                extras.pop(key, None)
+        fresh = SessionController(
+            self.app,
+            self.service,
+            Engine(
+                self.app.config,
+                vault=self.app.vault,
+                vault_collection=self.app.vaults,
+            ),
+        )
+        fresh.log_lines = previous.log_snapshot()
+        fresh.root = self
+        fresh._worker_started()
+        fresh._flow_worker_reserved = True
+        self.controller = fresh
+        self.service = fresh.service
+        self.settings = fresh.settings
+        if hasattr(self.app, "register_session"):
+            self.app.register_session(fresh)
+        fresh.attach(self)
+        self.run_service_flow()
+
+    def on_unmount(self) -> None:
+        release = getattr(self.controller, "release_reserved_worker", None)
+        if callable(release):
+            release()
+        super().on_unmount()
+
     def on_resize(self) -> None:
         # super() as well as the banner: the host re-wraps the log and re-fits the
         # identity rows, and this override used to replace all of that with a

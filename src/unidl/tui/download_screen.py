@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
@@ -128,7 +129,12 @@ def _styled_progress_text(
             )
         )
         if not is_done and ("━" in clean or "─" in clean):
-            is_done = bool(re.search(r"━+.*\b100%\b", clean))
+            is_done = bool(re.search(r"━+\s+100%(?!\d)", clean)) and not bool(
+                re.search(
+                    r"(?<![A-Za-z0-9_])(?:Downloading|Failed|Stopped|Paused|Muxing|Decrypting|Converting)(?![A-Za-z0-9_])",
+                    clean,
+                )
+            )
         clean = localize_progress_line(clean)
         line = Text(clean, style=palette.fg)
         filled_style = palette.ok if is_done else palette.manifest
@@ -190,6 +196,11 @@ def _bar(done: int, total: int) -> str:
 class DownloadScreen(AskHost):
     """What UniDL is doing, while it is doing it."""
 
+    BINDINGS = [
+        *AskHost.BINDINGS,
+        Binding("p", "pause_shortcut", "Pause / Resume", show=False),
+    ]
+
     #: the log is visible here, but its compact default still leaves progress
     #: and the resolved stream details readable while work is active
     LOG_CLASSES = "delivery"
@@ -238,11 +249,11 @@ class DownloadScreen(AskHost):
         yield Static("", id="status-line")
 
     def chrome_widget(self) -> Chrome:
-        """Make stopping a visible control, not only a meaning hidden behind Back."""
+        """Make pausing a visible control, not only a meaning hidden behind Back."""
         return Chrome(
             can_go_back=self.CAN_GO_BACK,
             left_actions=(
-                ("■", "Pause", "screen.stop_resume", "chrome-stop"),
+                ("‖", "Pause", "screen.stop_resume", "chrome-stop"),
             ),
         )
 
@@ -277,42 +288,27 @@ class DownloadScreen(AskHost):
             "tall": "collapse the log",
             "collapsed": "show the log",
         }.get(self._log_state, "toggle the log")
-        return [("^b", back), *self.queue_hints(), ("^l", log_action),
-                ("drag", "select text to copy it"), ("^s", "settings")]
+        pause_hint: list[tuple[str, str]] = []
+        if (
+            getattr(self, "_current_ask", None) is None
+            and (self.controller.job_running or getattr(self.controller, "title_delay_active", False))
+            and not (self.controller.cancel_requested or getattr(self.controller, "recording_stop_requested", False))
+        ):
+            pause_hint = [("p", "resume" if self.controller.pause_requested else "pause")]
+        return [
+            ("^b", back),
+            *pause_hint,
+            *self.queue_hints(),
+            *self.chapter_hints(),
+            *self.lyrics_hints(),
+            *self.attachments_hints(),
+            ("^l", log_action),
+            ("drag", "select text to copy it"),
+            ("^s", "settings"),
+        ]
 
     def refresh_keys(self) -> None:
         super().refresh_keys()
-        chapters = self.query("#chrome-chapters")
-        if chapters:
-            chapter_button = chapters.first(ChromeButton)
-            count = len(self._chapter_playback.chapters) if self._chapter_playback else 0
-            chapter_button.display = count > 0
-            chapter_button.set_label(
-                "c",
-                tr("chrome.chapters_n", count=count) if count else "Chapters",
-            )
-            chapter_button.set_enabled(count > 0)
-        lyrics = self.query("#chrome-lyrics")
-        if lyrics:
-            lyric_button = lyrics.first(ChromeButton)
-            count = (
-                len(self._chapter_playback.lyrics.lines)
-                if self._chapter_playback is not None and self._chapter_playback.lyrics is not None
-                else 0
-            )
-            lyric_button.display = count > 0
-            lyric_button.set_label("l", tr("lyrics.lines_n", count=count) if count else "Lyrics")
-            lyric_button.set_enabled(count > 0)
-        attachments = self.query("#chrome-attachments")
-        if attachments:
-            attachment_button = attachments.first(ChromeButton)
-            count = len(self._chapter_playback.attachments) if self._chapter_playback else 0
-            attachment_button.display = count > 0
-            attachment_button.set_label(
-                "a",
-                tr("attachments.title") + (f" {count}" if count else ""),
-            )
-            attachment_button.set_enabled(count > 0)
         found = self.query("#chrome-stop")
         if not found:
             return
@@ -325,16 +321,22 @@ class DownloadScreen(AskHost):
                 button.set_label("▶", "Resume")
                 button.set_enabled(True)
             else:
-                button.set_label("■", "Pause")
+                button.set_label("‖", "Pause")
                 button.set_enabled(True)
             return
-        if self.controller._retry_pending:
+        if self.controller._retry_pending or getattr(self.controller, "batch_busy", False):
             button.set_label("…", "Starting")
             button.set_enabled(False)
             return
         retryable = any(job.retryable for job in self.controller.jobs)
-        button.set_label("▶", "Resume" if retryable else "Done")
+        button.set_label("▶" if retryable else "✓", "Resume" if retryable else "Done")
         button.set_enabled(retryable)
+
+    def action_pause_shortcut(self) -> None:
+        """Keyboard pause/resume only when no prompt owns the keyboard."""
+        if self._current_ask is not None:
+            return
+        self.action_stop_resume()
 
     def action_stop_resume(self) -> None:
         """Pause the active job in place, resume it, or retry a finished row."""
@@ -400,9 +402,48 @@ class DownloadScreen(AskHost):
         self._render_elapsed()
         self.set_interval(FRAME_SECONDS, self._flush_frame)
 
+    def relocalize(self) -> None:
+        """Redraw delivery header, details, queue, elapsed clock, and progress card."""
+        super().relocalize()
+        self._shown_elapsed = ""
+        if self._described is not None:
+            self.describe(
+                self._described,
+                self._described_tracks,
+                reset_clock=False,
+                refresh_audio=False,
+            )
+        elif getattr(self.controller, "queue_complete", False):
+            self.mark_done()
+        queue = getattr(self.controller, "queue_jobs", None)
+        self.render_queue(
+            queue() if callable(queue) else self.controller.jobs,
+            self.controller.batch_total,
+        )
+        version, rows = self.controller.frame_snapshot()
+        self.show_frame(rows, layout=False)
+        self._shown_frame_version = version
+        self._frame_rows = len(rows)
+        self._render_elapsed()
+
     def _theme_changed(self, theme=None) -> None:
-        """Repaint the in-place progress card with the new theme colours."""
+        """Repaint delivery header, details, queue, elapsed clock, and progress card."""
         super()._theme_changed(theme)
+        self._shown_elapsed = ""
+        if self._described is not None:
+            self.describe(
+                self._described,
+                self._described_tracks,
+                reset_clock=False,
+                refresh_audio=False,
+            )
+        elif getattr(self.controller, "queue_complete", False):
+            self.mark_done()
+        queue = getattr(self.controller, "queue_jobs", None)
+        self.render_queue(
+            queue() if callable(queue) else self.controller.jobs,
+            self.controller.batch_total,
+        )
         version, rows = self.controller.frame_snapshot()
         self.show_frame(rows, layout=False)
         self._shown_frame_version = version
@@ -623,19 +664,21 @@ class DownloadScreen(AskHost):
         tracks: TrackSet | None = None,
         *,
         reset_clock: bool = True,
+        refresh_audio: bool = True,
     ) -> None:
         """Describe the file, selected streams and DRM material being delivered."""
         found = self.query("#delivery-head")
         if not found:
             return
         palette = self.app.palette
-        audio_side = self.query("#delivery-audio-side")
-        if audio_side:
-            preview = self.query("#delivery-audio-preview")
-            if preview:
-                preview.first(AudioPreviewWidget).set_preview(
-                    AudioPreview.from_playback(playback) if playback.audio_only else None
-                )
+        if refresh_audio:
+            audio_side = self.query("#delivery-audio-side")
+            if audio_side:
+                preview = self.query("#delivery-audio-preview")
+                if preview:
+                    preview.first(AudioPreviewWidget).set_preview(
+                        AudioPreview.from_playback(playback) if playback.audio_only else None
+                    )
         widget = found.first(Static)
         lead = tr("delivery.downloading")
         separator = "  ·  "
@@ -705,7 +748,8 @@ class DownloadScreen(AskHost):
             def field(label: str, value: str | Text, style) -> None:
                 if body:
                     body.append("\n")
-                body.append(f"{label:<10}", style=palette.dim)
+                pad = max(2, 12 - cell_width(label)) if label else 12
+                body.append(f"{label}{' ' * pad}", style=palette.dim)
                 if isinstance(value, Text):
                     body.append_text(value)
                 else:
@@ -823,7 +867,8 @@ class DownloadScreen(AskHost):
         show_details = self._described is not None
         # Artwork is secondary to active work. A fixed-width preview otherwise
         # leaves only ~25 cells for conversion status in an 80-column terminal.
-        show_audio = bool(self._described and self._described.audio_only and self.size.width >= 112)
+        audio_playback = self._described or self._chapter_playback
+        show_audio = bool(audio_playback and audio_playback.audio_only and self.size.width >= 112)
         if asking:
             # AskHost restores these when the answer is submitted. Remember the
             # latest description, not the visibility from before the refresh.
@@ -847,7 +892,8 @@ class DownloadScreen(AskHost):
         if not found:
             return
         palette = self.app.palette
-        jobs = self.controller.jobs
+        queue = getattr(self.controller, "queue_jobs", None)
+        jobs = queue() if callable(queue) else list(self.controller.jobs)
         failed = sum(1 for job in jobs if job.state == FAILED)
         stopped = sum(1 for job in jobs if job.state == CANCELLED)
 
@@ -869,26 +915,39 @@ class DownloadScreen(AskHost):
         head.append("  ·  ", style=palette.dim)
         head.append(tr("delivery.back_hint"), style=palette.muted)
         found.first(Static).update(head)
-        chapters_found = self.query("#delivery-chapters")
-        if chapters_found:
-            chapters_found.first(StatusChip).display = False
-        lyrics_found = self.query("#delivery-lyrics")
-        if lyrics_found:
-            lyrics_found.first(StatusChip).display = False
+        # Keep the last playback's metadata chips clickable while the finished
+        # delivery screen is being inspected.
         # the header is no longer about one title, so a resize must leave it alone
         self._described = None
         self._described_tracks = None
         self.refresh_keys()
 
+    def _effective_frame_width(self) -> int:
+        left = self.query("#delivery-main-left")
+        if left and left.first().content_size.width > 0:
+            return left.first().content_size.width + 6
+        audio_side = self.query("#delivery-audio-side")
+        if audio_side and audio_side.first().display:
+            side_w = audio_side.first().size.width or 38
+            return max(40, self.size.width - side_w)
+        return self.size.width
+
     def on_resize(self) -> None:
         """Re-shorten the name for the width the window now has."""
         super().on_resize()
-        self.controller.update_frame_columns(self.size.width)
         # Repaint the latest picture at the new width even if a transfer happens
         # to be stalled between segment callbacks.
         self._shown_frame_version = -1
         if self._described is not None:
-            self.describe(self._described, self._described_tracks, reset_clock=False)
+            self.describe(
+                self._described,
+                self._described_tracks,
+                reset_clock=False,
+                refresh_audio=False,
+            )
+        else:
+            self._sync_delivery_context_visibility()
+        self.controller.update_frame_columns(self._effective_frame_width())
 
     # -------------------------------------------------------------- navigation
     def back_without_ask(self) -> bool:

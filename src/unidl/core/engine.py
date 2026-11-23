@@ -356,7 +356,7 @@ class _StructuredProgressScreen:
                 continue
             total, estimated = self._estimated_total(update, track)
             percent = self._percent(update, total)
-            if track is not None and track.manifest_type == "service" and not update.done:
+            if not update.done:
                 percent = min(99.0, percent)
             if update.live:
                 total_clock = (
@@ -371,7 +371,7 @@ class _StructuredProgressScreen:
                 size = f"{downloaded}/{estimate_mark}{_progress_size(total)}"
             segments = f"{update.completed_segments}/{update.total_segments or '?'}"
             speed = f"{_progress_size(int(update.speed_bytes_per_second or 0))}/s"
-            eta_seconds = self._eta(update, total)
+            eta_seconds = None if update.done else self._eta(update, total)
             eta = (
                 f"ETA {_progress_clock(eta_seconds)}"
                 if eta_seconds is not None
@@ -425,14 +425,34 @@ class _StructuredProgressScreen:
             state = done.split(" ", 1)[0]
             percent_text = f"{percent:3.0f}%" if percent or state not in {"Downloading", "Failed", "Stopped", "Paused"} else " --%"
             row = f"{label:<{label_width}}  {bar} {percent_text} {size:<{size_width}}"
-            # Keep speed ahead of optional metadata so a narrow delivery card
-            # still reports throughput instead of looking stalled.
-            extras = (done, speed, segments, eta) if state in {"Downloading", "Failed", "Stopped", "Paused"} else (speed, segments, eta, done)
-            for extra in extras:
-                if extra and len(row) + 1 + len(extra) <= width:
-                    row += f" {extra}"
+            # Keep completion / active status visible even on narrow cards;
+            # speed stays ahead of optional counters for live rows.
+            if state in {"Downloaded", "Recorded", "Done"}:
+                reserve = (1 + len(done)) if done else 0
+                for extra in (speed, segments):
+                    if extra and len(row) + 1 + len(extra) + reserve <= width:
+                        row += f" {extra}"
+                if done and len(row) + 1 + len(done) <= width:
+                    row += f" {done}"
+            else:
+                extras = (
+                    (done, speed, segments, eta)
+                    if state in {"Downloading", "Failed", "Stopped", "Paused"}
+                    else (speed, segments, eta, done)
+                )
+                for extra in extras:
+                    if extra and len(row) + 1 + len(extra) <= width:
+                        row += f" {extra}"
             rows.append(row[:width])
-        rows.extend(self._status_rows)
+        for status_row in self._status_rows:
+            if len(status_row) > width and " | " in status_row:
+                prefix, sep, tail = status_row.rpartition(" | ")
+                keep = max(4, width - len(sep) - len(tail))
+                if len(prefix) > keep:
+                    prefix = prefix[: max(1, keep - 1)] + "…"
+                rows.append(f"{prefix}{sep}{tail}"[:width])
+            else:
+                rows.append(status_row)
         return rows
 
     @staticmethod

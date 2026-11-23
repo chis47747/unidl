@@ -14,7 +14,15 @@ class ClipboardInput(TextualInput):
     @staticmethod
     def _single_line(value: str) -> str:
         """Keep one-line fields safe when a terminal pastes a document."""
-        return str(value or "").splitlines()[0] if value else ""
+        if not value:
+            return ""
+        lines = str(value).splitlines()
+        if not lines:
+            return ""
+        for line in lines:
+            if line.strip():
+                return line
+        return lines[0]
 
     def _insert_paste(self, value: str) -> None:
         value = self._single_line(value)

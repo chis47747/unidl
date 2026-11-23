@@ -24,11 +24,14 @@ silently ignores what you just put in it is a folder you stop trusting.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from rich.markup import escape as _escape_markup
 from rich.text import Text
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
@@ -49,7 +52,7 @@ NAME_LIMIT = 46
 
 def _esc(text: object) -> str:
     """Neutralise square brackets: release names are full of them."""
-    return str(text).replace("\\", "\\\\").replace("[", r"\[")
+    return _escape_markup(str(text))
 
 
 def _fit(text: str, limit: int = NAME_LIMIT) -> str:
@@ -82,7 +85,10 @@ class ImportScreen(Screen[None]):
     """The exports folder, and one keypress to finish any of them."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
+        Binding("ctrl+f", "app.global_search", "Search", show=False),
+        Binding("slash", "app.global_search", "Search", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "noop", "Import this one", show=True),
         Binding("ctrl+r", "reload", "Look again", show=True),
@@ -96,6 +102,8 @@ class ImportScreen(Screen[None]):
         super().__init__()
         #: one entry per row: the file, what it holds, and why it cannot be read
         self._rows: list[tuple[Path, exports.Document | None, str]] = []
+        self._scan_generation = 0
+        self._loaded = False
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True, show_settings=False)
@@ -112,12 +120,26 @@ class ImportScreen(Screen[None]):
         )
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self.rebuild()
         self.query_one("#import-list", OptionList).focus()
 
+    def on_unmount(self) -> None:
+        self._scan_generation += 1
+        self.workers.cancel_group(self, "import-scan")
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if self.is_attached and self._loaded:
+            self._render_rows()
+
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
-        self.rebuild()
+        if self._loaded:
+            self._render_rows()
+        else:
+            self.rebuild()
 
     @property
     def folder(self) -> Path:
@@ -125,15 +147,36 @@ class ImportScreen(Screen[None]):
 
     # -------------------------------------------------------------------- render
     def action_reload(self) -> None:
-        self.rebuild()
-        self.notify(tr("import.looked"), timeout=2)
+        self.rebuild(notify=True)
 
-    def rebuild(self) -> None:
+    def rebuild(self, *, notify: bool = False) -> None:
+        self._scan_generation += 1
+        generation = self._scan_generation
+        if not self._loaded:
+            palette = self.app.palette
+            head = Text()
+            head.append(tr("import.head"), style=f"bold {palette.accent}")
+            head.append("  ·  ", style=palette.dim)
+            head.append(tr("beta.exports_loading"), style=palette.muted)
+            self.query_one("#import-head", Static).update(head)
+        self._scan_exports(self.folder, generation, notify=notify)
+
+    @work(exclusive=True, group="import-scan")
+    async def _scan_exports(self, folder: Path, generation: int, *, notify: bool = False) -> None:
+        rows = await asyncio.to_thread(exports.scan, folder)
+        if not self.is_attached or generation != self._scan_generation:
+            return
+        self._rows = rows
+        self._loaded = True
+        self._render_rows()
+        if notify:
+            self.notify(tr("import.looked"), timeout=2)
+
+    def _render_rows(self) -> None:
         option_list = self.query_one("#import-list", OptionList)
         previous = option_list.highlighted
         option_list.clear_options()
         palette = self.app.palette
-        self._rows = exports.scan(self.folder)
 
         head = Text()
         head.append(tr("import.head"), style=f"bold {palette.accent}")
@@ -234,7 +277,11 @@ class ImportScreen(Screen[None]):
     def action_reveal(self) -> None:
         """Open the exports folder through the app's desktop boundary."""
         folder = self.folder
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.notify(tr("notify.open_fail", path=folder, error=exc), severity="error", timeout=6)
+            return
         self.app.open_path(folder)
 
 
@@ -254,7 +301,10 @@ class ExportEntryScreen(Screen[list[int] | None]):
     """
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
+        Binding("ctrl+f", "app.global_search", "Search", show=False),
+        Binding("slash", "app.global_search", "Search", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "confirm", "Open selected", show=True),
     ]
@@ -390,7 +440,7 @@ class ExportEntryScreen(Screen[list[int] | None]):
         if not selected:
             highlighted = entries.highlighted
             if highlighted is None:
-                self.notify("Select at least one title", severity="warning", timeout=3)
+                self.notify(tr("import.select_one"), severity="warning", timeout=3)
                 return
             selected = [int(entries.get_option_at_index(highlighted).value)]
         if self.queue_selection:

@@ -1729,8 +1729,13 @@ def _format_task_status_line(
     if include_elapsed:
         suffix += f" | Time Elapsed: {elapsed}"
     path_width = safe_width - _visible_text_len(prefix) - _visible_text_len(suffix)
-    path_text = _ellipsize(str(output_path), max(1, path_width))
-    return _ellipsize(f"{prefix}{path_text}{suffix}", safe_width)
+    if path_width >= 4:
+        path_text = _ellipsize(str(output_path), path_width)
+        return f"{prefix}{path_text}{suffix}"
+    if path_width >= 1:
+        path_text = _ellipsize(output_path.name, path_width)
+        return f"{prefix}{path_text}{suffix}"
+    return _ellipsize(f"{prefix}{suffix.lstrip(' |')}", safe_width)
 
 
 class _TaskStatusSpinner:

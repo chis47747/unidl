@@ -14,6 +14,8 @@ is too narrow to hold the art.
 
 from __future__ import annotations
 
+import os
+import shutil
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
@@ -102,39 +104,73 @@ _HALF_BLOCKS = {
     (True, True): "█",
 }
 
-#: First existing, loadable face wins.  Order prefers UI sans faces that cover
-#: CJK/Hangul/Kana over document serif faces.
+#: Terminal row count below which the six-row wordmark collapses to one row,
+#: matching ``app.ROOMY_ROWS`` so short terminals (e.g. 80x24) keep list space.
+COMPACT_HEIGHT = 28
+
+#: First existing, loadable face that covers the text wins.  Order prefers UI
+#: sans faces across macOS, Linux and Windows, including Hangul, Arabic and
+#: Hebrew faces so non-Latin titles never render as missing-glyph tofu boxes.
 _FONT_CANDIDATES = (
+    # macOS
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/STHeiti Light.ttc",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
     "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     "/System/Library/Fonts/Hiragino Sans W3.ttc",
+    "/System/Library/Fonts/GeezaPro.ttc",
+    "/System/Library/Fonts/SFArabic.ttf",
+    "/System/Library/Fonts/ArialHB.ttc",
+    "/System/Library/Fonts/SFHebrew.ttf",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
     "/Library/Fonts/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/SFNS.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    # Linux
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/arphic/uming.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    # Windows
     "C:/Windows/Fonts/msyh.ttc",
     "C:/Windows/Fonts/msyh.ttf",
-    "C:/Windows/Fonts/simhei.ttf",
-    "C:/Windows/Fonts/simsun.ttc",
     "C:/Windows/Fonts/malgun.ttf",
     "C:/Windows/Fonts/msgothic.ttc",
     "C:/Windows/Fonts/meiryo.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+)
+
+_WINDOWS_FONT_NAMES = (
+    "msyh.ttc",
+    "msyh.ttf",
+    "malgun.ttf",
+    "msgothic.ttc",
+    "meiryo.ttc",
+    "simhei.ttf",
+    "simsun.ttc",
+    "segoeui.ttf",
+    "arial.ttf",
+    "tahoma.ttf",
 )
 
 
-def art(width: int, colour: str) -> str:
+def art(width: int, colour: str, *, height: int | None = None) -> str:
     """The application banner, or a plain title when there is not room."""
-    if width < ART_WIDTH + 4:
+    if width < ART_WIDTH + 4 or (height is not None and height < COMPACT_HEIGHT):
         return f"[{colour}]unidl[/]"
     return "\n".join(f"[{colour}]{line}[/]" for line in ART)
 
@@ -207,10 +243,24 @@ def _font_paths() -> list[str]:
     it builds or resizes the service grid. Running ``fc-match`` and probing all
     platform font paths for every name made that path needlessly expensive.
     """
-    found = [candidate for candidate in _FONT_CANDIDATES if Path(candidate).is_file()]
-    extra = _fontconfig_face()
-    if extra and extra not in found and Path(extra).is_file():
-        found.append(extra)
+    candidates = list(_FONT_CANDIDATES)
+    if os.name == "nt":
+        windir = os.environ.get("WINDIR")
+        if windir:
+            win_fonts = Path(windir) / "Fonts"
+            candidates = [str(win_fonts / name) for name in _WINDOWS_FONT_NAMES] + candidates
+    found: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate not in seen and Path(candidate).is_file():
+            seen.add(candidate)
+            found.append(candidate)
+    if os.name != "nt" and shutil.which("fc-match"):
+        for lang in ("zh", "ko", "ar", "he"):
+            extra = _fontconfig_face(lang)
+            if extra and extra not in seen and Path(extra).is_file():
+                seen.add(extra)
+                found.append(extra)
     return found
 
 
@@ -220,12 +270,13 @@ def _banner_font_path() -> str | None:
     return paths[0] if paths else None
 
 
-def _fontconfig_face() -> str | None:
+@lru_cache(maxsize=8)
+def _fontconfig_face(lang: str = "zh") -> str | None:
     try:
         import subprocess
 
         result = subprocess.run(
-            ["fc-match", "-f", "%{file}", ":lang=zh"],
+            ["fc-match", "-f", "%{file}", f":lang={lang}"],
             capture_output=True,
             text=True,
             timeout=1,
@@ -237,20 +288,74 @@ def _fontconfig_face() -> str | None:
     return text or None
 
 
-@lru_cache(maxsize=8)
-def _load_font(pixel_height: int):
+@lru_cache(maxsize=1)
+def _pillow_has_raqm() -> bool:
+    """True when Pillow's HarfBuzz/FriBidi layout engine is available.
+
+    With ``raqm`` enabled, ``ImageDraw.text`` already performs Arabic shaping
+    and bidi reordering, so feeding ``visual_text()`` output would reverse RTL
+    text a second time.
+    """
+    try:
+        from PIL import features
+
+        return bool(features.check("raqm"))
+    except (ImportError, OSError, ValueError):
+        return False
+
+
+@lru_cache(maxsize=64)
+def _load_font_file(path: str, pixel_height: int):
     try:
         from PIL import ImageFont
     except ImportError:
         return None
     # Draw large, then downsample: a 6-pixel native size cannot hold CJK strokes.
     size = max(24, int(pixel_height) * 8)
+    for index in range(4):
+        try:
+            return ImageFont.truetype(path, size=size, index=index)
+        except OSError:
+            continue
+    return None
+
+
+def _font_covers(font, text: str) -> bool:
+    """Return True when ``font`` has real glyphs (not .notdef) for ``text``."""
+    try:
+        notdef = bytes(font.getmask("\ufffe"))
+    except (AttributeError, OSError, ValueError):
+        return True
+    notdef_has_ink = any(notdef)
+    for character in text:
+        if character.isspace() or unicodedata.category(character) in {"Cf", "Cc", "Mn", "Me"}:
+            continue
+        try:
+            mask = bytes(font.getmask(character))
+        except (AttributeError, OSError, ValueError):
+            return False
+        if not any(mask):
+            return False
+        if notdef_has_ink and mask == notdef:
+            return False
+    return True
+
+
+def _select_font(pixel_height: int, text: str):
+    """Pick the first installed face that actually covers every glyph in ``text``."""
     for path in _font_paths():
-        for index in range(4):
-            try:
-                return ImageFont.truetype(path, size=size, index=index)
-            except OSError:
-                continue
+        font = _load_font_file(path, pixel_height)
+        if font is not None and _font_covers(font, text):
+            return font
+    return None
+
+
+@lru_cache(maxsize=8)
+def _load_font(pixel_height: int):
+    for path in _font_paths():
+        font = _load_font_file(path, pixel_height)
+        if font is not None:
+            return font
     return None
 
 
@@ -263,10 +368,12 @@ def _mosaic_lines(text: str) -> list[str] | None:
         from PIL import Image, ImageDraw
     except ImportError:
         return None
-    font = _load_font(_MOSAIC_PIXEL_ROWS)
+    font = _select_font(_MOSAIC_PIXEL_ROWS, clean)
     if font is None:
         return None
-    drawn = visual_text(clean)
+    # When Pillow has raqm (HarfBuzz + FriBidi), it shapes and reorders RTL
+    # itself; pre-reordering with visual_text would flip RTL scripts twice.
+    drawn = clean if _pillow_has_raqm() else visual_text(clean)
     try:
         dummy = Image.new("L", (1, 1))
         left, top, right, bottom = ImageDraw.Draw(dummy).textbbox((0, 0), drawn, font=font)

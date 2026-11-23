@@ -17,13 +17,14 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, OptionList, Static
 from textual.widgets.option_list import Option
-from textual.worker import get_current_worker
+from textual.worker import Worker, WorkerState, get_current_worker
 
 from ..core import exports
 from ..core.i18n import cell_width, get_translator, load_catalogue, setting_help, setting_label, tr
 from ..core.service import Service
 from ..core.settings import BETA_AUTO_RESULT_TYPES, TRACK_SETTINGS
 from ..core.vault import KeyRecord, hex_ids, normalize_hex, split_pair
+from .bidi import visual_text
 from .chrome import CloseMark, KeyBar, StatusChip
 from .filterbox import matches
 from .home import HomeScreen
@@ -315,9 +316,9 @@ class _ChoicePicker(ModalScreen[object | None]):
             if not matches(query, label, detail):
                 continue
             self._visible.append(value)
-            text = Text(label, no_wrap=True, overflow="ellipsis")
+            text = Text(visual_text(label), no_wrap=True, overflow="ellipsis")
             if detail:
-                text.append(f"  {detail}", style="dim")
+                text.append(f"  {visual_text(detail)}", style=self.app.palette.dim)
             options.add_option(Option(text))
         if self._visible:
             options.highlighted = 0
@@ -391,6 +392,11 @@ class _SearchInput(ClipboardInput):
             super().__init__()
             self.delta = delta
 
+    class PageResult(Message):
+        def __init__(self, delta: int):
+            super().__init__()
+            self.delta = delta
+
     def on_key(self, event: events.Key) -> None:
         if event.character == "/" and not self.value:
             event.stop()
@@ -404,6 +410,10 @@ class _SearchInput(ClipboardInput):
             event.stop()
             event.prevent_default()
             self.post_message(self.MoveResult(1 if event.key == "down" else -1))
+        elif event.key in {"pageup", "pagedown"}:
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.PageResult(1 if event.key == "pagedown" else -1))
 
 
 @dataclass(frozen=True)
@@ -448,15 +458,35 @@ class _Result:
         return self.kind, self.service.ID if self.service else "", identity
 
 
+def _looks_like_path(query: str) -> bool:
+    """True for POSIX, home, UNC or Windows drive paths (including quoted ones)."""
+    raw = query.strip()
+    if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1]
+    if not raw:
+        return False
+    if raw.startswith(("/", "~", "\\")):
+        return True
+    return len(raw) >= 3 and raw[0].isalpha() and raw[1] == ":" and raw[2] in "\\/"
+
+
 class BetaHomeScreen(HomeScreen, inherit_bindings=False):
     USES_SERVICE_GRID = False
     BINDINGS = [
+        Binding("tab", "app.focus_next", show=False),
+        Binding("shift+tab", "app.focus_previous", show=False),
+        Binding("ctrl+c,super+c", "screen.copy_text", show=False),
+        Binding("b", "app.global_back", show=False),
         Binding("ctrl+b", "app.global_back", show=False),
+        Binding("s", "app.global_settings", show=False),
         Binding("ctrl+s", "app.global_settings", show=False),
+        Binding("d", "cycle_mode", show=False),
         Binding("ctrl+f", "app.global_search", show=False),
         Binding("escape", "app.global_quit", show=False),
         Binding("up", "move_result(-1)", show=False),
         Binding("down", "move_result(1)", show=False),
+        Binding("pageup", "page_result(-1)", show=False),
+        Binding("pagedown", "page_result(1)", show=False),
         Binding("ctrl+r", "reload_service", show=False),
         Binding("ctrl+y", "copy_key", show=False),
     ]
@@ -483,6 +513,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self._index_signature = None
         self._page_size = PAGE_SIZE
         self._navigated = False
+        self._rebuilding_results = False
         self._export_hits: list[_ExportHit] = []
         self._export_folder: Path | None = None
         self._export_generation = 0
@@ -540,6 +571,8 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self.check_updates()
 
     def on_resize(self, event: events.Resize) -> None:
+        self.refresh_banner()
+        self._fit_statusline()
         self._fit_beta()
 
     def _fit_beta(self) -> None:
@@ -567,10 +600,15 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         columns.first().styles.width = width
 
     def on_screen_resume(self, event) -> None:
+        if self._skip_resume_refresh:
+            self._skip_resume_refresh = False
+            self.call_later(self.app.refresh_home_interface)
+            return
         if self._rendered_locale != get_translator().locale:
             self.relocalize()
         else:
             self.refresh_after_settings()
+        self.call_later(self.app.refresh_home_interface)
 
     def refresh_after_settings(self) -> None:
         self.refresh_env()
@@ -656,6 +694,10 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
     def on__search_input_move_result(self, event: _SearchInput.MoveResult) -> None:
         event.stop()
         self.action_move_result(event.delta)
+
+    def on__search_input_page_result(self, event: _SearchInput.PageResult) -> None:
+        event.stop()
+        self.action_page_result(event.delta)
 
     def choose_mode(self) -> None:
         def chosen(value):
@@ -784,7 +826,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         query = self._query()
         eligible = bool(query and query != "/" and (
             self.search_mode == "vault" or self.search_mode == "auto" and self._auto_shows("vault")
-            and not query.startswith(("/", "~", "\\"))
+            and not _looks_like_path(query)
             and not query[:8].lower().startswith(("http://", "https://"))
         ))
         names = local_search_vault_names(self.app) if eligible else ()
@@ -841,7 +883,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
 
     def _refresh_exports(self, *, force: bool = False) -> None:
         folder = Path(self.app.config.paths.exports)
-        if folder == self._export_folder and (self._exports_loading or not force):
+        if folder == self._export_folder and not force:
             return
         if folder != self._export_folder:
             self._export_hits = []
@@ -851,6 +893,25 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self._export_generation += 1
         self._exports_loading = True
         self._index_exports(folder, self._export_generation)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state not in {WorkerState.CANCELLED, WorkerState.ERROR}:
+            return
+        group = event.worker.group
+        if group == "beta-export-index":
+            active = any(
+                worker.group == group and worker.state in {WorkerState.PENDING, WorkerState.RUNNING}
+                for worker in self.workers
+            )
+            if not active:
+                self._exports_loading = False
+        elif group == "beta-local-key-search":
+            active = any(
+                worker.group == group and worker.state in {WorkerState.PENDING, WorkerState.RUNNING}
+                for worker in self.workers
+            )
+            if not active:
+                self._local_keys_loading = False
 
     @work(thread=True, exclusive=True, group="beta-export-index")
     def _index_exports(self, folder: Path, generation: int) -> None:
@@ -941,12 +1002,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 else:
                     rows = [_Result("url", service.NAME, service.ID, service=service)
                             for service in link_matches(self.app.services, query)]
-            elif mode == "vault" or mode == "auto" and self._key_query(query):
-                if mode == "vault" or self._auto_shows("vault"):
-                    key_rows = self._local_key_rows()
-                    if mode == "auto":
-                        key_rows = key_rows[:AUTO_KEY_LIMIT]
-                    rows = [_Result("vault", tr("beta.action.vault")), *key_rows]
+            elif mode == "vault" or (mode == "auto" and self._auto_shows("vault") and self._key_query(query)):
+                key_rows = self._local_key_rows()
+                if mode == "auto":
+                    key_rows = key_rows[:AUTO_KEY_LIMIT]
+                rows = [_Result("vault", tr("beta.action.vault")), *key_rows]
             elif mode == "justwatch":
                 rows = [_Result("justwatch", tr("beta.action.justwatch"))]
             elif mode in {"catalog", "open"}:
@@ -960,7 +1020,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                             and (mode == "services" or self._auto_shows("services"))]
                 services.sort(key=lambda service: (service_rank(service, query), service.NAME.casefold()))
                 rows = [_Result("service", service.NAME, service.ID, service=service) for service in services]
-                if mode == "auto" and not query.startswith(("/", "~", "\\")):
+                if mode == "auto" and not _looks_like_path(query):
                     scoped_searches = [
                         _Result("catalog", tr("beta.action.catalog_scoped", query=keywords, service=service.NAME),
                                 service.ID, service=service, search_query=keywords)
@@ -984,33 +1044,46 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                     for kind in ("justwatch", "catalog"):
                         if self._auto_shows(kind):
                             rows.append(_Result(kind, tr(f"beta.action.{kind}")))
+        if query and query != "/" and (
+            mode in {"url", "exports"}
+            or (mode == "auto" and self._auto_shows("exports"))
+        ):
+            pasted = self._resolve_export_path(query)
+            if pasted is not None and not any(
+                row.export_path is not None and row.export_path == pasted for row in rows
+            ):
+                rows.insert(0, _Result("export", pasted.name, str(pasted), export_path=pasted))
         visible = rows[:self._page_size]
         if len(rows) > len(visible):
             visible.append(_Result("more", tr("search.load_more"), str(len(rows) - len(visible))))
         prompts = [self._result_prompt(row) for row in visible]
-        if visible != self._results or prompts != self._result_prompts:
-            options.clear_options()
-            options.add_options(Option(prompt) for prompt in prompts)
-        self._results, self._result_prompts = visible, prompts
-        options.display = bool(visible)
-        empty = self.query_one("#beta-empty", Static)
-        empty.display = bool(not visible and (mode == "exports" or query and query != "/"))
-        if empty.display:
-            message = "beta.none"
-            if mode == "exports":
-                if self._exports_loading and not self._exports_settled:
-                    message = "beta.exports_loading"
-                elif self._exports_failed:
-                    message = "beta.exports_failed"
-                elif not query:
-                    message = "import.empty"
-            elif mode == "url" and query:
-                message = "beta.no_url_match"
-            if empty.content != tr(message):
-                empty.update(tr(message))
-        if visible:
-            options.highlighted = next((i for i, row in enumerate(visible) if row.identity == wanted), 0)
-            options.scroll_to(y=scroll_y, animate=False)
+        self._rebuilding_results = True
+        try:
+            if visible != self._results or prompts != self._result_prompts:
+                options.clear_options()
+                options.add_options(Option(prompt) for prompt in prompts)
+            self._results, self._result_prompts = visible, prompts
+            options.display = bool(visible)
+            empty = self.query_one("#beta-empty", Static)
+            empty.display = bool(not visible and (mode == "exports" or query and query != "/"))
+            if empty.display:
+                message = "beta.none"
+                if mode == "exports":
+                    if self._exports_loading and not self._exports_settled:
+                        message = "beta.exports_loading"
+                    elif self._exports_failed:
+                        message = "beta.exports_failed"
+                    elif not query:
+                        message = "import.empty"
+                elif mode == "url" and query:
+                    message = "beta.no_url_match"
+                if empty.content != tr(message):
+                    empty.update(tr(message))
+            if visible:
+                options.highlighted = next((i for i, row in enumerate(visible) if row.identity == wanted), 0)
+                options.scroll_to(y=scroll_y, animate=False)
+        finally:
+            self._rebuilding_results = False
         summary = self.query_one("#beta-summary", Static)
         summary.display = bool(visible or mode == "vault" and query)
         status = tr("beta.results", count=len(rows)) if visible else ""
@@ -1035,11 +1108,12 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             )
         label_start = len(text)
         # Provider titles and filenames are plain text, never Rich markup.
-        text.append(row.label)
+        label_shown = row.label if row.kind == "key" else visual_text(row.label)
+        text.append(label_shown)
         if row.kind == "key" and row.record is not None:
             text.stylize(self.app.palette.accent, label_start + len(row.record.kid) + 1, len(text))
         if row.detail:
-            text.append(f"\n  {row.detail}", style="dim")
+            text.append(f"\n  {visual_text(row.detail)}", style=self.app.palette.dim)
         return text
 
     def build(self) -> None:
@@ -1049,11 +1123,23 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         options = self.query_one("#beta-results", OptionList)
         if not self._results:
             return
-        if not self._navigated:
+        if options.highlighted is None:
             options.highlighted = 0 if delta > 0 else len(self._results) - 1
         else:
             (options.action_cursor_down if delta > 0 else options.action_cursor_up)()
         self._navigated = True
+
+    def action_page_result(self, delta: int) -> None:
+        options = self.query_one("#beta-results", OptionList)
+        if not self._results:
+            return
+        (options.action_page_down if delta > 0 else options.action_page_up)()
+        self._navigated = True
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if not self._rebuilding_results and event.option_list.id == "beta-results":
+            if event.option_list.has_focus:
+                self._navigated = True
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -1108,9 +1194,8 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             else:
                 self.query_one("#beta-results").focus()
             return
-        if mode == "vault" or mode == "auto" and self._key_query(query):
-            if mode == "vault" or self._auto_shows("vault"):
-                self.activate(_Result("vault", ""))
+        if mode == "vault" or (mode == "auto" and self._auto_shows("vault") and self._key_query(query)):
+            self.activate(_Result("vault", ""))
             return
         if mode == "justwatch":
             self.activate(_Result("justwatch", ""))
@@ -1261,10 +1346,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
 
     def go_back(self) -> bool:
         options = self.query_one("#beta-results", OptionList)
+        field = self.query_one("#filter", _SearchInput)
         if options.has_focus:
             self.focus_search()
-        elif self._query():
-            self.query_one("#filter", _SearchInput).value = ""
+        elif field.value:
+            field.value = ""
         elif self.search_mode != "auto":
             self.set_mode("auto")
         self.focus_search()

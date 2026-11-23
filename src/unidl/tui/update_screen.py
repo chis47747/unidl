@@ -38,6 +38,12 @@ class UpdateScreen(ModalScreen[None]):
         Binding("x", "close", "Close", show=False),
         Binding("ctrl+b", "close", "Close", show=False),
         Binding("b", "close", "Close", show=False),
+        Binding("up", "scroll(-2)", "Up", show=False),
+        Binding("down", "scroll(2)", "Down", show=False),
+        Binding("pageup", "scroll(-10)", "Page up", show=False),
+        Binding("pagedown", "scroll(10)", "Page down", show=False),
+        Binding("home", "edge('top')", "Top", show=False),
+        Binding("end", "edge('bottom')", "Bottom", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -54,16 +60,27 @@ class UpdateScreen(ModalScreen[None]):
             with Horizontal(id="update-links"):
                 yield StatusChip("open_pypi", id="update-pypi")
                 yield StatusChip("open_github", id="update-github")
-            yield Static(tr("update.remote_notes"), id="update-remote-notes-title")
-            yield Static("", id="update-remote-notes", markup=False)
-            yield Static(tr("update.release_notes"), id="update-notes-title")
             with VerticalScroll(id="update-notes"):
+                yield Static(tr("update.remote_notes"), id="update-remote-notes-title")
+                yield Static("", id="update-remote-notes", markup=False)
+                yield Static(tr("update.release_notes"), id="update-notes-title")
                 for note in RELEASE_NOTES:
                     yield Static(f"[$accent]•[/] {tr(note)}", classes="update-note")
             yield Static(tr("update.close_hint"), id="update-modal-hint")
 
     def on_mount(self) -> None:
         self._render_remote()
+        self.query_one("#update-notes", VerticalScroll).focus()
+
+    def action_scroll(self, delta: int) -> None:
+        self.query_one("#update-notes", VerticalScroll).scroll_relative(y=delta, animate=False)
+
+    def action_edge(self, edge: str) -> None:
+        notes = self.query_one("#update-notes", VerticalScroll)
+        if edge == "top":
+            notes.scroll_home(animate=False)
+        else:
+            notes.scroll_end(animate=False)
 
     def set_update_info(self, update_info: UpdateInfo | None) -> None:
         """Refresh a dialog that was opened before the background check ended."""

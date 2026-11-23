@@ -17,7 +17,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
@@ -32,7 +32,7 @@ from ..core.vault import (
     parse_pairs,
 )
 from .bidi import visual_markup, visual_text
-from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .chrome import CloseMark, refresh_locale_widgets
 from .input import ClipboardInput as Input
 
 _PAIR_IN_ERROR = re.compile(
@@ -91,12 +91,12 @@ class AddKeysResult:
         return " · ".join(parts) or tr("vault.summary.none")
 
 
-class AddKeysScreen(Screen[AddKeysResult | None]):
+class AddKeysScreen(ModalScreen[AddKeysResult | None]):
     """Validate and store one or many manual KID:key pairs."""
 
     BINDINGS = [
         Binding("ctrl+b", "cancel", "Back", show=False),
-        Binding("escape", "app.global_quit", "Quit", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+s", "save", "Review and add", show=False, priority=True),
         Binding("up", "service_cursor(-1)", "Previous service", show=False),
         Binding("down", "service_cursor(1)", "Next service", show=False),
@@ -114,6 +114,13 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         self._service_rows: list[tuple[str, str, str]] = []
         self._visible_services: list[str] = []
         self._selected_service = ""
+
+    def _footer_hint(self) -> str:
+        return (
+            f"[$dim]^s {visual_markup(phrase('review and add'))}  ·  "
+            f"tab {visual_markup(phrase('move between fields'))}  ·  "
+            f"esc {visual_markup(phrase('cancel'))}[/]"
+        )
 
     def compose(self) -> ComposeResult:
         services = sorted(self.app.services, key=lambda service: service.NAME.lower())
@@ -133,50 +140,47 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         known = {service_id for service_id, _name, _search in self._service_rows}
         self._selected_service = self.service_id if self.service_id in known else ""
 
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="vault-add-body"):
-            with Vertical(id="vault-add-card"):
-                yield Static(tr("vault.add.title"), id="masthead")
-                yield Static(tr("vault.add.help"), id="subhead")
-                with VerticalScroll(id="vault-form-scroll"):
-                    with Horizontal(id="vault-add-metadata"):
-                        with Vertical(id="vault-service-field"):
-                            yield Label(tr("vault.field.service"), classes="vault-field-label")
-                            yield Input(
-                                value=self._selected_service,
-                                placeholder=tr("vault.placeholder.service"),
-                                id="vault-service-query",
-                            )
-                            yield Static("", id="vault-service-state")
-                            yield OptionList(id="vault-service-list")
-                        with Vertical(id="vault-title-field"):
-                            yield Label(tr("vault.field.title"), classes="vault-field-label")
-                            yield Input(placeholder=tr("vault.placeholder.title"), id="vault-title")
+        with Vertical(id="vault-add-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("vault.add.title"), id="masthead")
+                yield CloseMark(id="vault-add-close")
+            yield Static(tr("vault.add.help"), id="subhead")
+            with VerticalScroll(id="vault-form-scroll"):
+                with Horizontal(id="vault-add-metadata"):
+                    with Vertical(id="vault-service-field"):
+                        yield Label(tr("vault.field.service"), classes="vault-field-label")
+                        yield Input(
+                            value=self._selected_service,
+                            placeholder=tr("vault.placeholder.service"),
+                            id="vault-service-query",
+                        )
+                        yield Static("", id="vault-service-state")
+                        yield OptionList(id="vault-service-list")
+                    with Vertical(id="vault-title-field"):
+                        yield Label(tr("vault.field.title"), classes="vault-field-label")
+                        yield Input(placeholder=tr("vault.placeholder.title"), id="vault-title")
+                with Horizontal(id="vault-keys-head"):
                     yield Label(tr("vault.field.keys_short"), classes="vault-field-label")
-                    yield Static(tr("vault.field.keys_help"), id="vault-keys-help")
-                    yield TextArea(
-                        self.initial,
-                        soft_wrap=False,
-                        tab_behavior="focus",
-                        show_line_numbers=True,
-                        placeholder=tr("vault.placeholder.keys"),
-                        id="vault-pairs",
-                    )
-                    yield Static("", id="vault-validation")
-                yield Label(tr("vault.field.destinations"), classes="vault-field-label")
-                with Horizontal(id="vault-destination-row"):
+                    yield Static("", id="vault-keys-count")
+                yield Static(tr("vault.field.keys_help"), id="vault-keys-help")
+                yield TextArea(
+                    self.initial,
+                    soft_wrap=False,
+                    tab_behavior="focus",
+                    show_line_numbers=True,
+                    placeholder=tr("vault.placeholder.keys"),
+                    id="vault-pairs",
+                )
+                yield Static("", id="vault-validation")
+            with Horizontal(id="vault-destination-row"):
+                with Vertical(id="vault-destination-copy"):
+                    yield Label(tr("vault.field.destinations"), classes="vault-field-label")
                     yield Static("", id="vault-destination-state")
-                    yield Button(tr("vault.choose_vaults"), id="vault-destination-choose")
-                with Horizontal(id="vault-add-actions"):
-                    yield Button(phrase("Cancel"), id="vault-cancel")
-                    yield Static("", id="vault-action-gap")
-                    yield Button(tr("vault.review_add"), id="vault-save")
-        yield KeyBar(
-            ("^s", "review and add"),
-            ("tab", "move between fields"),
-            ("^b", "cancel"),
-            ("esc", "quit"),
-        )
+                yield Button(tr("vault.choose_vaults"), id="vault-destination-choose")
+            with Horizontal(id="vault-add-actions"):
+                yield Static(self._footer_hint(), id="vault-action-hint")
+                yield Button(phrase("Cancel"), id="vault-cancel")
+                yield Button(tr("vault.review_add"), variant="primary", id="vault-save")
 
     def on_mount(self) -> None:
         self._size_classes()
@@ -184,7 +188,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         configured_descriptors = [
             descriptor
             for descriptor in vaults.configured_vaults(self.app.config)
-            if descriptor.writable
+            if descriptor.writable and descriptor.enabled
         ]
         # Local manual entry is always available. Sending a manually pasted key
         # to a remote service is a separate, explicit policy switch and must not
@@ -213,6 +217,7 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         )
         self._update_destination_state()
         self._rebuild_services()
+        self._update_pair_count()
         target = "#vault-pairs" if self._selected_service else "#vault-service-query"
         self.query_one(target).focus()
         signal = getattr(self.app, "theme_changed_signal", None)
@@ -244,9 +249,12 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         return row
 
     def _refresh_service_rows(self, _theme=None) -> None:
-        if not self.is_mounted:
+        if not self.is_attached or not self.is_mounted:
             return
-        listing = self.query_one("#vault-service-list", OptionList)
+        found = self.query("#vault-service-list")
+        if not found:
+            return
+        listing = found.first(OptionList)
         names = {service_id: name for service_id, name, _search in self._service_rows}
         for index, service_id in enumerate(self._visible_services):
             listing.replace_option_prompt_at_index(index, self._service_prompt(service_id, names[service_id]))
@@ -279,12 +287,16 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         self.query_one("#vault-destination-choose", Button).label = tr("vault.choose_vaults")
         self._update_save_label()
         self.query_one("#vault-cancel", Button).label = phrase("Cancel")
+        hint = self.query("#vault-action-hint")
+        if hint:
+            hint.first(Static).update(self._footer_hint())
         if self._service_rows:
             service_id, _name, search = self._service_rows[-1]
             if service_id == "unknown":
                 self._service_rows[-1] = ("unknown", tr("vault.unknown_service"), search)
         self._rebuild_services()
         self._update_destination_state()
+        self._update_pair_count()
 
     # ---------------------------------------------------------- service picker
     def _rebuild_services(self, needle: str | None = None) -> None:
@@ -393,14 +405,31 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
 
     def _update_save_label(self) -> None:
         save = self.query_one("#vault-save", Button)
-        save.label = (
-            tr("vault.replace_add") if self._confirm_signature is not None else tr("vault.review_add")
-        )
+        armed = self._confirm_signature is not None
+        save.label = tr("vault.replace_add") if armed else tr("vault.review_add")
+        save.variant = "warning" if armed else "primary"
         # Button.label refreshes its paint, not its auto-width. The longer
         # conflict-confirmation label must not be clipped to the old width.
         save.refresh(layout=True)
 
+    def _update_pair_count(self) -> None:
+        found = self.query("#vault-keys-count")
+        if not found:
+            return
+        badge = found.first(Static)
+        raw = self.query_one("#vault-pairs", TextArea).text
+        if not raw.strip():
+            badge.update("")
+            return
+        try:
+            pairs = parse_pairs(raw)
+        except PairParseError as exc:
+            badge.update(f"[$warn]! {len(exc.issues)}[/]")
+            return
+        badge.update(f"[$ok]✓ {len(pairs)}[/]" if pairs else "")
+
     def on_text_area_changed(self, _event: TextArea.Changed) -> None:
+        self._update_pair_count()
         self._reset_confirmation()
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -565,13 +594,13 @@ class AddKeysScreen(Screen[AddKeysResult | None]):
         if len(conflicts) > 5:
             rows.append(tr("vault.conflict_more", count=len(conflicts) - 5))
         rows.append(tr("vault.conflict_review"))
-        self.query_one("#vault-validation", Static).update("\n".join(rows))
+        self.query_one("#vault-validation", Static).update(Text("\n".join(rows)))
         self.query_one("#vault-validation", Static).set_class(True, "warning")
         self._reveal_validation()
 
     def _problem(self, message: str) -> None:
         status = self.query_one("#vault-validation", Static)
-        status.update(message)
+        status.update(Text(message))
         status.set_class(True, "error")
         status.set_class(False, "warning")
         self._reveal_validation()

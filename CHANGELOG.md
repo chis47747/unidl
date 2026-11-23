@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.7.2] - 2026-11-23
+
+### Interface
+
+- Refined terminal layout, cell measurement, Unicode and right-to-left rendering, clipboard handling, Windows input, navigation, settings, overlays, logs, and status views.
+- Fixed a range of focus, sizing, redraw, and interaction errors across the TUI.
+
+### SABR/UMP delivery
+
+- Improved stateful VOD continuation, media-range tracking, retries, redirects, session context, and completion checks for SABR/UMP streams.
+- Preserved the existing live and legacy SABR paths while rejecting incomplete or ambiguous VOD responses clearly.
+
+### Exports and settings
+
+- Improved portable manifest/export handling, translated UI strings, and selection behavior for the updated interface.
+
 ## [2.7.1] - 2026-11-23
 
 ### JSON manifests

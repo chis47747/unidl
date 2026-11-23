@@ -79,7 +79,36 @@ class ChaptersScreen(ModalScreen[None]):
             )
 
     def on_mount(self) -> None:
-        self.query_one("#chapter-list", VerticalScroll).focus()
+        listing = self.query_one("#chapter-list", VerticalScroll)
+        listing.focus()
+        self.watch(listing, "scroll_y", self._sync_nav, init=False)
+        self.watch(listing, "virtual_size", self._sync_nav, init=False)
+        self.call_after_refresh(self._sync_nav)
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._sync_nav)
+
+    def relocalize(self) -> None:
+        self.query_one("#chapter-modal-title", Static).update(
+            f"{tr('chapters.title')}  [$dim]{visual_markup(self.save_name)}[/]"
+        )
+        self.query_one("#chapter-summary", Static).update(
+            f"[$muted]{visual_markup(summary(self.chapters))}  ·  {tr('chapters.meta')}[/]"
+        )
+        self.query_one("#chapter-previous", Button).label = f"‹ {tr('modal.previous')}"
+        self.query_one("#chapter-next", Button).label = f"{tr('modal.next')} ›"
+        self.query_one("#chapter-modal-hint", Static).update(
+            f"[$muted]{tr('chapters.close_hint', summary=count_label(self.chapters))}[/]"
+        )
+
+    def _sync_nav(self) -> None:
+        if not self.is_attached:
+            return
+        listing = self.query_one("#chapter-list", VerticalScroll)
+        self.query_one("#chapter-previous", Button).disabled = listing.scroll_y <= 0
+        self.query_one("#chapter-next", Button).disabled = (
+            listing.max_scroll_y <= 0 or listing.scroll_y >= listing.max_scroll_y
+        )
 
     def action_scroll(self, delta: int) -> None:
         self.query_one("#chapter-list", VerticalScroll).scroll_relative(

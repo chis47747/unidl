@@ -23,6 +23,7 @@ told apart by colour.
 from __future__ import annotations
 
 from rich.style import Style
+from rich.table import Table
 from textual import events
 from textual.geometry import Offset
 from textual.selection import Selection
@@ -52,6 +53,9 @@ class SelectableLog(RichLog):
         #: Rows of a manifest URL can join the next row without a newline.
         #: Other rows keep their visible breaks when copied.
         self._logical_breaks: list[bool] = []
+        #: Hanging layout indent (in cells) on wrapped continuation rows, so
+        #: copying a wrapped URL or command omits the gutter/label padding.
+        self._continuation_indents: list[int] = []
         self._drag_anchor: Offset | None = None
         self._drag_pointer: Offset | None = None
         self._drag_moved = False
@@ -61,6 +65,7 @@ class SelectableLog(RichLog):
         #: separate from a text selection: live logs should respect either kind
         #: of inspection, and resume only when the user scrolls back to the end.
         self._follow_paused = False
+        self._auto_scrolling = False
 
     @property
     def has_selection(self) -> bool:
@@ -77,6 +82,12 @@ class SelectableLog(RichLog):
         return self.text_selection is not None
 
     # ------------------------------------------------------------- last line
+    @staticmethod
+    def _hanging_indent(renderable: object) -> int:
+        if isinstance(renderable, Table) and len(renderable.columns) > 1:
+            return sum(int(column.width or 0) for column in renderable.columns[:-1])
+        return 0
+
     def write_counted(self, renderable: object, *, join_wrapped: bool = False) -> int:
         """Write at the pane's own width, and say how many rows it took.
 
@@ -105,13 +116,26 @@ class SelectableLog(RichLog):
         new_rows = after - remaining
         if len(self._logical_breaks) != before:
             self._logical_breaks = [True] * before
+        if len(self._continuation_indents) != before:
+            self._continuation_indents = [0] * before
         if remaining < before:
             del self._logical_breaks[:before - remaining]
-        if new_rows:
+            del self._continuation_indents[:before - remaining]
+        indent = self._hanging_indent(renderable)
+        if new_rows > 0:
             self._logical_breaks.extend([not join_wrapped] * (new_rows - 1) + [True])
+            self._continuation_indents.extend([0] + [indent] * (new_rows - 1))
+        if len(self._logical_breaks) > after:
+            self._logical_breaks = self._logical_breaks[-after:]
+        elif len(self._logical_breaks) < after:
+            self._logical_breaks = [True] * (after - len(self._logical_breaks)) + self._logical_breaks
+        if len(self._continuation_indents) > after:
+            self._continuation_indents = self._continuation_indents[-after:]
+        elif len(self._continuation_indents) < after:
+            self._continuation_indents = [0] * (after - len(self._continuation_indents)) + self._continuation_indents
         if follow_tail:
             self.call_after_refresh(self._follow_tail)
-        self._last_rows = new_rows
+        self._last_rows = min(new_rows, after)
         return self._last_rows
 
     def _follow_tail(self) -> None:
@@ -122,7 +146,11 @@ class SelectableLog(RichLog):
         if not self.is_attached:
             return
         if self.auto_scroll and not self._follow_paused and not self.has_selection:
-            self.scroll_end(animate=False, immediate=True, x_axis=False)
+            self._auto_scrolling = True
+            try:
+                self.scroll_end(animate=False, immediate=True, x_axis=False)
+            finally:
+                self._auto_scrolling = False
 
     def redraw_last(self, renderable: object, *, join_wrapped: bool = False) -> bool:
         """Draw ``renderable`` over the last line, in place.
@@ -141,6 +169,10 @@ class SelectableLog(RichLog):
             del self._logical_breaks[-rows:]
         else:
             self._logical_breaks = []
+        if rows <= len(self._continuation_indents):
+            del self._continuation_indents[-rows:]
+        else:
+            self._continuation_indents = []
         # The cache is keyed by row, and the rows from here down have just changed
         # meaning. Cheaper than it looks: the pane re-renders what is visible.
         self._line_cache.clear()
@@ -163,6 +195,9 @@ class SelectableLog(RichLog):
         breaks = self._logical_breaks
         if len(breaks) != len(self.lines):
             breaks = [True] * len(self.lines)
+        indents = getattr(self, "_continuation_indents", ())
+        if len(indents) != len(self.lines):
+            indents = [0] * len(self.lines)
         pieces: list[str] = []
         previous_row: int | None = None
         for row, strip in enumerate(self.lines):
@@ -173,13 +208,19 @@ class SelectableLog(RichLog):
             line_length = strip.cell_length
             if end == -1:
                 end = line_length
+            is_continuation = (
+                previous_row is not None
+                and row == previous_row + 1
+                and not breaks[previous_row]
+            )
+            if previous_row is not None and not is_continuation:
+                pieces.append("\n")
+            if is_continuation and indents[row] > 0:
+                start = max(start, indents[row])
             start = min(max(start, 0), line_length)
             end = min(max(end, start), line_length)
-            if previous_row is not None:
-                if row != previous_row + 1 or breaks[previous_row]:
-                    pieces.append("\n")
             piece = strip.crop(start, end).text.rstrip()
-            if row and not breaks[row - 1]:
+            if is_continuation and indents[row] == 0:
                 piece = piece.lstrip(" ")
             pieces.append(piece)
             previous_row = row
@@ -187,6 +228,8 @@ class SelectableLog(RichLog):
 
     def clear(self, *args, **kwargs):
         self._logical_breaks = []
+        self._continuation_indents = []
+        self._last_rows = 0
         return super().clear(*args, **kwargs)
 
     def selection_updated(self, selection: Selection | None) -> None:
@@ -237,7 +280,23 @@ class SelectableLog(RichLog):
         }
         self._follow_paused = False
         self.auto_scroll = True
-        self.scroll_end(animate=False, immediate=True, x_axis=False)
+        self._auto_scrolling = True
+        try:
+            self.scroll_end(animate=False, immediate=True, x_axis=False)
+        finally:
+            self._auto_scrolling = False
+        self.call_after_refresh(self._follow_tail)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if getattr(self, "_auto_scrolling", False) or new_value == old_value:
+            return
+        if new_value < old_value and self.max_scroll_y > 0 and new_value < self.max_scroll_y:
+            self._follow_paused = True
+            self.auto_scroll = False
+        elif new_value >= self.max_scroll_y and not self.has_selection:
+            self._follow_paused = False
+            self.auto_scroll = True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         # Shift/Ctrl-wheel is horizontal in Textual and does not mean the user is
@@ -378,7 +437,7 @@ class SelectableLog(RichLog):
         if span is not None:
             start, end = span
             if end == -1:
-                end = len(line.text)
+                end = line.cell_length
             if end > start:
                 palette = self.app.palette
                 # Textual's inherited screen selection style can resolve to the

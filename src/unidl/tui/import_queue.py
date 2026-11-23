@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -94,12 +96,22 @@ class ImportQueueScreen(Screen[None]):
     """
 
     BINDINGS = [
+        Binding("b", "app.global_back", show=False),
         Binding("ctrl+b", "app.global_back", show=False),
+        Binding("ctrl+f", "app.global_search", show=False),
+        Binding("slash", "app.global_search", show=False),
         Binding("escape", "app.global_quit", show=False),
         Binding("ctrl+r", "reload", show=False),
         Binding("ctrl+o", "reveal", show=False),
+        Binding("g", "start", show=False),
+        Binding("ctrl+g", "start", show=False),
         Binding("ctrl+enter", "start", show=False),
-        Binding("delete", "remove", show=False),
+        Binding("delete", "remove_focused", show=False),
+        Binding("backspace", "remove_focused", show=False),
+        Binding("[", "move_up", show=False),
+        Binding("]", "move_down", show=False),
+        Binding("shift+up", "move_up", show=False),
+        Binding("shift+down", "move_down", show=False),
         Binding("ctrl+up", "move_up", show=False),
         Binding("ctrl+down", "move_down", show=False),
     ]
@@ -109,6 +121,7 @@ class ImportQueueScreen(Screen[None]):
         self.items: list[ImportQueueItem] = []
         self._rows: list[tuple[Path, exports.Document | None, str]] = []
         self._drawing = False
+        self._scan_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True, show_settings=False)
@@ -133,8 +146,8 @@ class ImportQueueScreen(Screen[None]):
             yield Static("", id="queue-action-gap")
             yield Button("", id="queue-start")
         yield KeyBar(
-            ("enter", tr("import.queue.choose")), ("^enter", tr("import.queue.start")),
-            ("^↑↓", tr("import.queue.reorder")), ("^r", "look again"),
+            ("enter", tr("import.queue.choose")), ("g", tr("import.queue.start")),
+            ("[ / ]", tr("import.queue.reorder")), ("^r", "look again"),
             ("^o", "open the folder"), ("^b", "back"), ("esc", "quit"),
         )
 
@@ -162,16 +175,33 @@ class ImportQueueScreen(Screen[None]):
         self.action_reload()
         self._render_queue()
         self.query_one(KeyBar).render_pairs(
-            ("enter", tr("import.queue.choose")), ("^enter", tr("import.queue.start")),
-            ("^↑↓", tr("import.queue.reorder")), ("^r", "look again"),
+            ("enter", tr("import.queue.choose")), ("g", tr("import.queue.start")),
+            ("[ / ]", tr("import.queue.reorder")), ("^r", "look again"),
             ("^o", "open the folder"), ("^b", "back"), ("esc", "quit"),
         )
 
+    def on_unmount(self) -> None:
+        self._scan_generation += 1
+        self.workers.cancel_group(self, "import-queue-scan")
+
     def action_reload(self) -> None:
+        self._scan_generation += 1
+        generation = self._scan_generation
+        folder = Path(self.app.config.paths.exports)
+        self._scan_files(folder, generation)
+
+    @work(exclusive=True, group="import-queue-scan")
+    async def _scan_files(self, folder: Path, generation: int) -> None:
+        rows = await asyncio.to_thread(exports.scan, folder)
+        if not self.is_attached or generation != self._scan_generation:
+            return
+        self._rows = rows
+        self._render_files()
+
+    def _render_files(self) -> None:
         listing = self.query_one("#import-queue-files", OptionList)
         previous = listing.highlighted
         listing.clear_options()
-        self._rows = exports.scan(Path(self.app.config.paths.exports))
         for path, document, problem in self._rows:
             listing.add_option(Option(self._file_prompt(path, document, problem)))
         if not self._rows:
@@ -271,7 +301,11 @@ class ImportQueueScreen(Screen[None]):
 
     def action_reveal(self) -> None:
         folder = Path(self.app.config.paths.exports)
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.notify(tr("notify.open_fail", path=folder, error=exc), severity="error", timeout=6)
+            return
         self.app.open_path(folder)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -316,6 +350,8 @@ class ImportQueueScreen(Screen[None]):
             self._drawing = False
         listing.display = bool(self.items)
         self.query_one("#import-queue-empty", Static).display = not self.items
+        if not self.items and self.focused is listing:
+            self.query_one("#import-queue-files", OptionList).focus()
         self._render_head()
         self._sync_actions()
         # A previously empty queue's list was hidden and has no measured width
@@ -325,6 +361,11 @@ class ImportQueueScreen(Screen[None]):
     def _queue_index(self) -> int | None:
         index = self.query_one("#import-queue-items", OptionList).highlighted
         return index if index is not None and 0 <= index < len(self.items) else None
+
+    def action_remove_focused(self) -> None:
+        """Keyboard Delete/Backspace only removes items when the queue pane has focus."""
+        if self.focused is self.query_one("#import-queue-items", OptionList):
+            self.action_remove()
 
     def action_remove(self) -> None:
         if (index := self._queue_index()) is not None:

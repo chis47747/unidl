@@ -12,7 +12,10 @@ and this one only has to be believed.
 
 from __future__ import annotations
 
+import asyncio
+
 from rich.text import Text
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -20,7 +23,7 @@ from textual.screen import Screen
 from textual.widgets import Static
 
 from ..core import readiness
-from ..core.i18n import tr
+from ..core.i18n import cell_width, tr
 from .bidi import visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 
@@ -64,7 +67,10 @@ class ReadinessScreen(Screen[None]):
     """One page: DRM systems, tools, assets, folders."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
+        Binding("ctrl+f", "app.global_search", "Search", show=False),
+        Binding("slash", "app.global_search", "Search", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "reload", "Check again", show=True),
         Binding("ctrl+y", "copy_all", "Copy the report", show=True),
@@ -73,6 +79,7 @@ class ReadinessScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._report: readiness.Report | None = None
+        self._survey_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True)
@@ -81,25 +88,64 @@ class ReadinessScreen(Screen[None]):
         yield KeyBar(("^r", "check again"), ("^y", "copy the report"), ("^b", "back"))
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
+        self.query_one("#ready-body", VerticalScroll).focus()
         self.build()
+
+    def on_unmount(self) -> None:
+        self._survey_generation += 1
+        self.workers.cancel_group(self, "readiness-survey")
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if self.is_attached and self._report is not None:
+            self._render_report(self._report)
 
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
-        self.build()
+        if self._report is not None:
+            self._render_report(self._report)
+        else:
+            self.build()
 
     # ------------------------------------------------------------------ content
     def action_reload(self) -> None:
         # the one thing that really goes and looks again: everything else is
         # answered from what the last survey found
-        self.build(fresh=True)
-        self.notify(tr("ready.checked"), timeout=2)
+        self.build(fresh=True, notify=True)
 
-    def build(self, *, fresh: bool = False) -> None:
-        """Survey, then draw. Both here: the survey is what takes the time."""
-        palette = self.app.palette
-        report = readiness.survey(self.app.config, self.app.registry, fresh=fresh, settings=self.app.globals)
+    def build(self, *, fresh: bool = False, notify: bool = False) -> None:
+        """Survey tools off the UI thread, then paint."""
+        self._survey_generation += 1
+        generation = self._survey_generation
+        if self._report is None:
+            palette = self.app.palette
+            head = Text()
+            head.append(tr("ready.head"), style=f"bold {palette.accent}")
+            head.append("  ·  ", style=palette.dim)
+            head.append("…", style=palette.muted)
+            self.query_one("#ready-head", Static).update(head)
+        self._run_survey(fresh=fresh, notify=notify, generation=generation)
+
+    @work(exclusive=True, group="readiness-survey")
+    async def _run_survey(self, *, fresh: bool, notify: bool, generation: int) -> None:
+        report = await asyncio.to_thread(
+            readiness.survey,
+            self.app.config,
+            self.app.registry,
+            fresh=fresh,
+            settings=self.app.globals,
+        )
+        if not self.is_attached or generation != self._survey_generation:
+            return
         self._report = report
+        self._render_report(report)
+        if notify:
+            self.notify(tr("ready.checked"), timeout=2)
 
+    def _render_report(self, report: readiness.Report) -> None:
+        palette = self.app.palette
         head = Text()
         head.append(tr("ready.head"), style=f"bold {palette.accent}")
         head.append("  ·  ", style=palette.dim)
@@ -121,7 +167,10 @@ class ReadinessScreen(Screen[None]):
             if not items:
                 continue
             heading = Text()
-            heading.append(readiness.GROUP_LABEL[group].upper(), style=palette.muted)
+            heading.append(
+                tr(f"ready.group.{group}", default=readiness.GROUP_LABEL[group]).upper(),
+                style=palette.muted,
+            )
             heading.append(f"   {len(items)}", style=palette.gutter)
             rows.append(Static(heading, classes="ready-group"))
             rows += [Static(self._row(item), classes="ready-row") for item in items]
@@ -136,7 +185,8 @@ class ReadinessScreen(Screen[None]):
         # padded to a column, but never joined to the next one: a label longer than
         # the column still gets its two spaces rather than running into the detail
         label = visual_text(item.label)
-        line.append(f"{label:<{LABEL_WIDTH}}  ", style=palette.fg if item.ok else palette.fg2)
+        pad = " " * max(0, LABEL_WIDTH - cell_width(label))
+        line.append(f"{label}{pad}  ", style=palette.fg if item.ok else palette.fg2)
         detail = visual_text(item.detail) if item.group == "folders" else _first_line(item.detail)
         line.append(detail, style=palette.dim if item.ok else palette.fg2)
         if not item.ok:
@@ -165,7 +215,7 @@ class ReadinessScreen(Screen[None]):
             items = report.group(group)
             if not items:
                 continue
-            lines.append(f"{readiness.GROUP_LABEL[group]}:")
+            lines.append(f"{tr(f'ready.group.{group}', default=readiness.GROUP_LABEL[group])}:")
             for item in items:
                 glyph, _ = mark_for(item)
                 # the whole first line here, not the shortened one: this is going

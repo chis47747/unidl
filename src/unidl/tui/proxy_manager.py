@@ -11,11 +11,12 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import HorizontalScroll, Vertical
+from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Label, OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
@@ -25,9 +26,10 @@ from ..core.proxy import PROVIDER_LABELS, PROVIDER_ORDER, safe_proxy_label
 from ..core.proxy_express import DeviceAuthorization, ExpressVPNClient
 from ..core.settings import Settings
 from .bidi import visual_markup
-from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
+from .vault_targets import VaultCheckbox
 
 PROXY_ROUTING_ROWS = (
     ("proxy", "route", "proxy.row.route"),
@@ -58,29 +60,70 @@ def _parse_map(value: str, *, allow_empty: bool = False) -> dict[str, str]:
     return found
 
 
+_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+
+
+def _valid_proxy_uri(value: str) -> bool:
+    """Validate a proxy URI (scheme://host[:port] or legacy host:port)."""
+    text = value.strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    probe = text if "://" in text else f"http://{text}"
+    try:
+        parsed = urlsplit(probe)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in _PROXY_SCHEMES:
+        return False
+    if not parsed.hostname:
+        return False
+    try:
+        _ = parsed.port
+    except ValueError:
+        return False
+    if "://" not in text and parsed.port is None:
+        return False
+    return True
+
+
 class _RouteEditor(ModalScreen[str | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
     def __init__(self, current: str) -> None:
         super().__init__()
         self.current = current
-        self.add_class("editor")
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="proxy-route-card", classes="proxy-editor-card"):
-                yield Label(tr("proxy.route.title"), classes="ask-title")
-                yield Label(tr("proxy.route.help"), classes="ask-hint")
-                yield Input(value=self.current, placeholder=tr("proxy.route.placeholder"), id="proxy-route-input")
-        yield KeyBar(("enter", "save"), ("^b", "cancel"), ("esc", "cancel"))
+        with Vertical(id="proxy-route-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.route.title"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(tr("proxy.route.help"), classes="proxy-editor-help")
+            yield Input(value=self.current, placeholder=tr("proxy.route.placeholder"), id="proxy-route-input")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="proxy-editor-save")
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#proxy-route-input", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.dismiss(event.value.strip())
+        self.action_save()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-editor-save":
+            self.action_save()
+        else:
+            self.action_cancel()
+
+    def action_save(self) -> None:
+        self.dismiss(self.query_one("#proxy-route-input", Input).value.strip())
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -91,22 +134,34 @@ class _RouteEditor(ModalScreen[str | None]):
 
 
 class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
-    def __init__(self, current: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        current: dict[str, Any] | None = None,
+        *,
+        existing_names: set[str] | None = None,
+        original_name: str = "",
+    ) -> None:
         super().__init__()
         self.current = current or {}
-        self.add_class("editor")
+        self.existing_names = set(existing_names or ())
+        self.original_name = original_name or str(self.current.get("name", "") or "").strip()
 
     def compose(self) -> ComposeResult:
         urls = self.current.get("urls", self.current.get("url", self.current.get("uri", "")))
         if isinstance(urls, list):
             urls = ", ".join(str(item) for item in urls)
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="proxy-named-card", classes="proxy-editor-card"):
-                yield Label(tr("proxy.named.title"), classes="ask-title")
-                yield Label(tr("proxy.named.help"), classes="ask-hint")
+        with Vertical(id="proxy-named-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.named.title"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(tr("proxy.named.help"), classes="proxy-editor-help")
+            with VerticalScroll(classes="proxy-editor-fields"):
                 yield Label(tr("proxy.field.name"), classes="proxy-field-label")
                 yield Input(value=str(self.current.get("name", "")), id="proxy-name")
                 yield Label(tr("proxy.field.uris"), classes="proxy-field-label")
@@ -115,12 +170,15 @@ class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
                     placeholder=tr("proxy.placeholder.uris"),
                     id="proxy-urls",
                 )
-                yield Checkbox(
+                yield VaultCheckbox(
                     tr("proxy.enabled"),
                     value=bool(self.current.get("enabled", self.current.get("enable", True))),
                     id="proxy-enabled",
                 )
-        yield KeyBar(("enter", "save"), ("^b", "cancel"), ("esc", "cancel"))
+            yield Static("", id="proxy-editor-error")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="proxy-editor-save")
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#proxy-name", Input).focus()
@@ -132,11 +190,32 @@ class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
             return
         self._save()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-editor-save":
+            self._save()
+        else:
+            self.action_cancel()
+
+    def action_save(self) -> None:
+        self._save()
+
+    def _fail(self, message: str, selector: str) -> None:
+        self.query_one("#proxy-editor-error", Static).update(f"[$bad]{visual_markup(message)}[/]")
+        self.query_one(selector, Input).focus()
+
     def _save(self) -> None:
         name = self.query_one("#proxy-name", Input).value.strip()
         urls = [value.strip() for value in self.query_one("#proxy-urls", Input).value.split(",") if value.strip()]
         if not name or not urls:
-            self.notify(tr("proxy.need_named"), severity="error", timeout=5)
+            self._fail(tr("proxy.need_named"), "#proxy-name" if not name else "#proxy-urls")
+            return
+        if name in self.existing_names and name != self.original_name:
+            self._fail(tr("resource.notify.exists", name=name), "#proxy-name")
+            return
+        invalid = next((uri for uri in urls if not _valid_proxy_uri(uri)), "")
+        if invalid:
+            self._fail(f"{tr('proxy.placeholder.uris')}: {safe_proxy_label(invalid)}", "#proxy-urls")
             return
         self.dismiss({"name": name, "urls": urls, "enabled": self.query_one("#proxy-enabled", Checkbox).value})
 
@@ -149,35 +228,53 @@ class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
 
 
 class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
     def __init__(self, provider: str, current: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.provider = provider
         self.current = current or {}
-        self.add_class("editor")
 
     def compose(self) -> ComposeResult:
         server_map = self.current.get("server_map") or {}
         mapping = ", ".join(f"{key}={value}" for key, value in server_map.items()) if isinstance(server_map, dict) else ""
         label = PROVIDER_LABELS[self.provider]
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="proxy-provider-card", classes="proxy-editor-card"):
-                yield Label(tr("proxy.provider.title", label=label), classes="ask-title")
-                yield Label(tr("proxy.provider.help"), classes="ask-hint")
+        has_password = bool(str(self.current.get("password", "") or ""))
+        password_label = (
+            tr("proxy.field.password") + tr("resource.field.secret_keep")
+            if has_password
+            else tr("proxy.field.password")
+        )
+        password_placeholder = tr("resource.field.secret_keep").strip(" ·") if has_password else ""
+        with Vertical(id="proxy-provider-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.provider.title", label=label), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(tr("proxy.provider.help"), classes="proxy-editor-help")
+            with VerticalScroll(classes="proxy-editor-fields"):
                 yield Label(tr("proxy.field.username"), classes="proxy-field-label")
                 yield Input(value=str(self.current.get("username", "")), id="provider-username")
-                yield Label(tr("proxy.field.password"), classes="proxy-field-label")
-                yield Input(value=str(self.current.get("password", "")), password=True, id="provider-password")
+                yield Label(password_label, classes="proxy-field-label")
+                yield Input(
+                    password=True,
+                    placeholder=password_placeholder,
+                    id="provider-password",
+                )
                 yield Label(tr("proxy.field.pinned"), classes="proxy-field-label")
                 yield Input(value=mapping, placeholder=tr("proxy.placeholder.map"), id="provider-map")
-                yield Checkbox(
+                yield VaultCheckbox(
                     tr("proxy.enabled"),
                     value=bool(self.current.get("enabled", self.current.get("enable", True))),
                     id="provider-enabled",
                 )
-        yield KeyBar(("enter", "save"), ("^b", "cancel"), ("esc", "cancel"))
+            yield Static("", id="proxy-editor-error")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="proxy-editor-save")
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#provider-username", Input).focus()
@@ -190,11 +287,26 @@ class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
             return
         self._save()
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-editor-save":
+            self._save()
+        else:
+            self.action_cancel()
+
+    def action_save(self) -> None:
+        self._save()
+
+    def _fail(self, message: str, selector: str) -> None:
+        self.query_one("#proxy-editor-error", Static).update(f"[$bad]{visual_markup(message)}[/]")
+        self.query_one(selector, Input).focus()
+
     def _save(self) -> None:
         username = self.query_one("#provider-username", Input).value.strip()
-        password = self.query_one("#provider-password", Input).value
+        entered_password = self.query_one("#provider-password", Input).value
+        password = entered_password or str(self.current.get("password", "") or "")
         if not username or not password:
-            self.notify(tr("proxy.need_creds"), severity="error", timeout=5)
+            self._fail(tr("proxy.need_creds"), "#provider-username" if not username else "#provider-password")
             return
         server_map: dict[str, str] = {}
         for item in self.query_one("#provider-map", Input).value.split(","):
@@ -223,19 +335,23 @@ class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
 class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
     """ExpressVPN has a device login, not manually entered service credentials."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False), Binding("ctrl+b", "cancel", "Back", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
     def __init__(self, current: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.current = current or {}
-        self.add_class("editor")
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="proxy-provider-card", classes="proxy-editor-card"):
-                yield Label(tr("proxy.express.title"), classes="ask-title")
-                yield Label(tr("proxy.express.help"), classes="ask-hint")
+        with Vertical(id="proxy-provider-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.express.title"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(tr("proxy.express.help"), classes="proxy-editor-help")
+            with VerticalScroll(classes="proxy-editor-fields"):
                 yield Label(tr("proxy.field.presets"), classes="proxy-field-label")
                 yield Input(
                     value=_format_map(self.current.get("region_map")),
@@ -254,12 +370,14 @@ class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
                     placeholder=tr("proxy.placeholder.account_json"),
                     id="express-account-json",
                 )
-                yield Checkbox(
+                yield VaultCheckbox(
                     tr("proxy.enabled"),
                     value=bool(self.current.get("enabled", self.current.get("enable", True))),
                     id="provider-enabled",
                 )
-        yield KeyBar(("enter", "save"), ("^b", "cancel"), ("esc", "cancel"))
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="proxy-editor-save")
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#express-region-map", Input).focus()
@@ -270,6 +388,16 @@ class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
         if event.input.id in ids[:2]:
             self.query_one(f"#{ids[ids.index(event.input.id) + 1]}", Input).focus()
             return
+        self._save()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-editor-save":
+            self._save()
+        else:
+            self.action_cancel()
+
+    def action_save(self) -> None:
         self._save()
 
     def _save(self) -> None:
@@ -298,14 +426,14 @@ class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
         return True
 
 
-class ExpressLoginScreen(Screen[bool]):
+class ExpressLoginScreen(ModalScreen[bool]):
     """Run ExpressVPN's OAuth device grant without blocking Textual's event loop."""
 
     BINDINGS = [
         Binding("ctrl+b", "cancel", "Cancel", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("o", "open", "Open browser", show=True),
-        Binding("c", "copy", "Copy code", show=True),
+        Binding("o", "open", "Open browser", show=False),
+        Binding("c", "copy", "Copy code", show=False),
     ]
 
     def __init__(self, client: ExpressVPNClient) -> None:
@@ -315,16 +443,29 @@ class ExpressLoginScreen(Screen[bool]):
         self.cancelled = threading.Event()
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        yield Static(tr("proxy.login.title"), id="masthead")
-        with Vertical(id="body"):
+        with Vertical(id="express-login-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.login.title"), classes="proxy-editor-title")
+                yield CloseMark(id="express-login-close")
             yield Static(tr("proxy.login.requesting"), id="express-login-status")
             yield Static("", id="express-login-code")
             yield Static("", id="express-login-url")
-        yield KeyBar(("o", "open browser"), ("c", "copy code"), ("^b", "cancel"), ("esc", "cancel"))
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("open browser"), variant="primary", id="express-login-open", disabled=True)
+                yield Button(phrase("copy code"), id="express-login-copy", disabled=True)
+                yield Button(phrase("Cancel"), id="express-login-cancel")
 
     def on_mount(self) -> None:
+        self.query_one("#express-login-cancel", Button).focus()
         self._authorize()
+
+    def _call_ui(self, callback, *args) -> None:
+        if self.cancelled.is_set():
+            return
+        try:
+            self.app.call_from_thread(callback, *args)
+        except RuntimeError:
+            pass
 
     @work(thread=True, exclusive=True, group="expressvpn-login")
     def _authorize(self) -> None:
@@ -332,7 +473,7 @@ class ExpressLoginScreen(Screen[bool]):
             authorization = self.client.request_device_authorization()
             if self.cancelled.is_set():
                 return
-            self.app.call_from_thread(self._show_authorization, authorization)
+            self._call_ui(self._show_authorization, authorization)
             while time.time() < authorization.expires_at:
                 if self.cancelled.wait(authorization.interval):
                     return
@@ -340,14 +481,16 @@ class ExpressLoginScreen(Screen[bool]):
                 if tokens is None:
                     continue
                 self.client.save_device_tokens(tokens)
-                self.app.call_from_thread(self._finish, True, tr("proxy.login.saved"))
+                self._call_ui(self._finish, True, tr("proxy.login.saved"))
                 return
-            self.app.call_from_thread(self._finish, False, tr("proxy.login.timeout"))
+            self._call_ui(self._finish, False, tr("proxy.login.timeout"))
         except Exception as exc:
             if not self.cancelled.is_set():
-                self.app.call_from_thread(self._finish, False, tr("proxy.login.failed", error=exc))
+                self._call_ui(self._finish, False, tr("proxy.login.failed", error=exc))
 
     def _show_authorization(self, authorization: DeviceAuthorization) -> None:
+        if not self.is_attached:
+            return
         self.authorization = authorization
         self.query_one("#express-login-status", Static).update(tr("proxy.login.prompt"))
         self.query_one("#express-login-code", Static).update(
@@ -356,12 +499,23 @@ class ExpressLoginScreen(Screen[bool]):
         self.query_one("#express-login-url", Static).update(
             f"[$muted]{tr('proxy.login.open')}[/]  [$foreground]{visual_markup(authorization.verification_uri)}[/]"
         )
+        self.query_one("#express-login-open", Button).disabled = False
+        self.query_one("#express-login-copy", Button).disabled = False
 
     def _finish(self, success: bool, message: str) -> None:
-        if self.cancelled.is_set():
+        if self.cancelled.is_set() or not self.is_attached:
             return
         self.notify(message, severity="information" if success else "error", timeout=8)
         self.dismiss(success)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "express-login-open":
+            self.action_open()
+        elif event.button.id == "express-login-copy":
+            self.action_copy()
+        else:
+            self.action_cancel()
 
     def action_open(self) -> None:
         if self.authorization is not None:
@@ -393,16 +547,17 @@ class _ProviderTypeEditor(ModalScreen[str | None]):
         self.providers = providers
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="proxy-provider-type-card", classes="proxy-editor-card"):
-                yield Label(tr("proxy.add_provider"), classes="ask-title")
-                yield Label(tr("proxy.add_provider_help"), classes="ask-hint")
-                yield OptionList(
-                    *[Option(PROVIDER_LABELS[name], id=name) for name in self.providers],
-                    id="proxy-provider-types",
-                )
-        yield KeyBar(("enter", "choose"), ("^b", "cancel"), ("esc", "cancel"))
+        with Vertical(id="proxy-provider-type-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.add_provider"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(tr("proxy.add_provider_help"), classes="proxy-editor-help")
+            yield OptionList(
+                *[Option(PROVIDER_LABELS[name], id=name) for name in self.providers],
+                id="proxy-provider-types",
+            )
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#proxy-provider-types", OptionList).focus()
@@ -410,6 +565,10 @@ class _ProviderTypeEditor(ModalScreen[str | None]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         self.dismiss(str(event.option.id))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -419,13 +578,60 @@ class _ProviderTypeEditor(ModalScreen[str | None]):
         return True
 
 
+class _ConfirmProxyDelete(ModalScreen[bool]):
+    """Confirm before removing a configured proxy endpoint or VPN provider."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Cancel", show=False),
+        Binding("n", "cancel", "Cancel", show=False),
+        Binding("y", "confirm", "Delete", show=False),
+    ]
+
+    def __init__(self, label: str, kind: str) -> None:
+        super().__init__()
+        self.target_label = label
+        self.target_kind = kind
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resource-confirm-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(f"{phrase('Delete')} {self.target_label}?", id="resource-confirm-title")
+                yield CloseMark(id="resource-confirm-close")
+            yield Static(
+                f"{visual_markup(self.target_kind)}: [$warn]{visual_markup(self.target_label)}[/]",
+                id="resource-confirm-help",
+            )
+            with Horizontal(id="resource-confirm-actions"):
+                yield Button(phrase("Delete"), variant="error", id="proxy-confirm-delete")
+                yield Button(phrase("Cancel"), id="proxy-confirm-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#proxy-confirm-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "proxy-confirm-delete")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def go_back(self) -> bool:
+        self.dismiss(False)
+        return True
+
+
 class ProxyManagerScreen(Screen[None]):
     """Manage routing, static endpoints and provider credentials in one place."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
-        Binding("enter", "activate", "Edit", show=True),
+        Binding("enter", "noop", "Edit", show=True),
         Binding("a", "add", "Add", show=True),
         Binding("e", "activate", "Edit", show=False),
         Binding("d", "delete", "Delete", show=True),
@@ -433,6 +639,9 @@ class ProxyManagerScreen(Screen[None]):
         Binding("t", "test", "Test route", show=True),
         Binding("l", "authorize", "Authorize", show=True),
     ]
+
+    def action_noop(self) -> None:
+        """Footer-only hint; Enter is handled by the focused list or button."""
 
     def __init__(self, globals_scope: Settings) -> None:
         super().__init__()
@@ -561,12 +770,15 @@ class ProxyManagerScreen(Screen[None]):
             self.query_one("#proxy-preview", Static).update(
                 f"[$dim]{tr('proxy.preview.route')}[/] {visual_markup(route or tr('proxy.direct'))}"
             )
+        elif row.kind == "download":
+            state = tr("proxy.downloads_on") if self.globals.get("proxy_downloads") else tr("proxy.downloads_off")
+            self.query_one("#proxy-preview", Static).update(f"[$dim]{visual_markup(state)}[/]")
         elif row.kind == "endpoint":
             urls = row.value.get("urls", row.value.get("url", "")) if isinstance(row.value, dict) else row.value
             if isinstance(urls, list):
                 urls = urls[0] if urls else ""
             self.query_one("#proxy-preview", Static).update(
-                f"[$dim]{tr('proxy.preview.endpoint')}[/] {safe_proxy_label(str(urls or ''))}"
+                f"[$dim]{tr('proxy.preview.endpoint')}[/] {visual_markup(safe_proxy_label(str(urls or '')))}"
             )
         elif row.name == "expressvpn":
             client = ExpressVPNClient(
@@ -582,7 +794,7 @@ class ProxyManagerScreen(Screen[None]):
         index = self.query_one("#proxy-list", OptionList).highlighted
         return self._rows[index] if index is not None and index < len(self._rows) else None
 
-    def on_option_list_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         event.stop()
         self._preview()
         self._refresh_actions()
@@ -613,6 +825,7 @@ class ProxyManagerScreen(Screen[None]):
         if self._tab == "routing":
             actions["edit"].label = tr("proxy.edit_route")
             actions["edit"].display = True
+            actions["edit"].disabled = False
             actions["add"].display = False
             actions["toggle"].label = (
                 tr("proxy.downloads_on") if self.globals.get("proxy_downloads") else tr("proxy.downloads_off")
@@ -629,6 +842,7 @@ class ProxyManagerScreen(Screen[None]):
             actions["edit"].disabled = not (is_endpoint or is_provider)
             actions["add"].display = True
             actions["add"].disabled = False
+            actions["toggle"].label = tr("common.toggle")
             actions["toggle"].display = True
             actions["toggle"].disabled = not (is_endpoint or is_provider)
             actions["delete"].display = True
@@ -650,10 +864,19 @@ class ProxyManagerScreen(Screen[None]):
             return
         if row.kind == "route":
             self.app.push_screen(_RouteEditor(str(self.globals.get("proxy") or "")), self._save_route)
+        elif row.kind == "download":
+            self.globals.set("proxy_downloads", not bool(self.globals.get("proxy_downloads")))
+            self.rebuild()
         elif row.kind == "endpoint":
             current = dict(row.value) if isinstance(row.value, dict) else {"url": row.value, "name": row.name}
             current["name"] = row.name
-            self.app.push_screen(_NamedProxyEditor(current), lambda value: self._save_endpoint(value, row.name) if value else None)
+            existing_names = {
+                str(name) for name in (self.app.config.raw.get("proxies") or {})
+            }
+            self.app.push_screen(
+                _NamedProxyEditor(current, existing_names=existing_names, original_name=row.name),
+                lambda value: self._save_endpoint(value, row.name) if value else None,
+            )
         elif row.kind == "provider":
             self._edit_provider(row.name, dict(row.value) if isinstance(row.value, dict) else {})
 
@@ -677,7 +900,13 @@ class ProxyManagerScreen(Screen[None]):
         if self._tab == "routing":
             self.action_activate()
         elif self._tab == "endpoints":
-            self.app.push_screen(_NamedProxyEditor(), lambda value: self._save_endpoint(value) if value else None)
+            existing_names = {
+                str(name) for name in (self.app.config.raw.get("proxies") or {})
+            }
+            self.app.push_screen(
+                _NamedProxyEditor(existing_names=existing_names),
+                lambda value: self._save_endpoint(value) if value else None,
+            )
         else:
             configured = {row.name for row in self._tab_rows()}
             available = [name for name in PROVIDER_ORDER if name != "basic" and name not in configured]
@@ -714,10 +943,8 @@ class ProxyManagerScreen(Screen[None]):
         except Exception as exc:
             self.notify(tr("proxy.notify.save_provider", error=exc), severity="error", timeout=8)
 
-    def action_delete(self) -> None:
-        row = self._selected()
-        if row is None or row.kind not in {"endpoint", "provider"}:
-            self.notify(tr("proxy.notify.delete_kind"), timeout=4)
+    def _confirm_delete(self, row: ProxyRow, confirmed: bool | None) -> None:
+        if not confirmed:
             return
         entries = dict(self.app.config.raw.get("proxies" if row.kind == "endpoint" else "proxy_providers") or {})
         entries.pop(row.name, None)
@@ -730,12 +957,24 @@ class ProxyManagerScreen(Screen[None]):
         except Exception as exc:
             self.notify(tr("proxy.notify.delete_fail", name=row.name, error=exc), severity="error", timeout=8)
 
-    def action_toggle(self) -> None:
+    def action_delete(self) -> None:
         row = self._selected()
         if row is None or row.kind not in {"endpoint", "provider"}:
-            if row and row.kind == "download":
-                self.globals.set("proxy_downloads", not bool(self.globals.get("proxy_downloads")))
-                self.rebuild()
+            self.notify(tr("proxy.notify.delete_kind"), timeout=4)
+            return
+        kind_label = tr("proxy.static") if row.kind == "endpoint" else tr("proxy.provider")
+        self.app.push_screen(
+            _ConfirmProxyDelete(self._row_label(row), kind_label),
+            lambda confirmed: self._confirm_delete(row, confirmed),
+        )
+
+    def action_toggle(self) -> None:
+        if self._tab == "routing":
+            self.globals.set("proxy_downloads", not bool(self.globals.get("proxy_downloads")))
+            self.rebuild()
+            return
+        row = self._selected()
+        if row is None or row.kind not in {"endpoint", "provider"}:
             return
         entries = dict(self.app.config.raw.get("proxies" if row.kind == "endpoint" else "proxy_providers") or {})
         current = entries.get(row.name)
@@ -772,13 +1011,19 @@ class ProxyManagerScreen(Screen[None]):
     def _test_route(self, route: str) -> None:
         try:
             resolved = self.app.config.proxy(route)
-            self.app.call_from_thread(
-                self.notify, tr("proxy.notify.resolves", route=safe_proxy_label(resolved)), timeout=6
-            )
+            try:
+                self.app.call_from_thread(
+                    self.notify, tr("proxy.notify.resolves", route=safe_proxy_label(resolved)), timeout=6
+                )
+            except RuntimeError:
+                pass
         except Exception as exc:
-            self.app.call_from_thread(
-                self.notify, tr("proxy.notify.test_fail", error=exc), severity="error", timeout=8
-            )
+            try:
+                self.app.call_from_thread(
+                    self.notify, tr("proxy.notify.test_fail", error=exc), severity="error", timeout=8
+                )
+            except RuntimeError:
+                pass
 
     def go_back(self) -> bool:
         self.dismiss(None)

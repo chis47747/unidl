@@ -27,9 +27,10 @@ from textual.widgets import Static
 from ..core import drm as drm_registry
 from ..core.credentials import mask_in
 from ..core.flow import SCOPE_ROOT, TextAsk
-from ..core.i18n import tr
+from ..core.i18n import cell_width, phrase, tr
 from ..core.redact import redact
-from .asks import BACK, AskWidget, ManualStep, PanelWidget, widget_for
+from ..core.terminal_cells import crop as crop_cells
+from .asks import BACK, AskWidget, AwaitWidget, ManualStep, PanelWidget, widget_for
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
 from .logline import LIVE_STATE, LogLine, status_line
@@ -92,7 +93,7 @@ _TAGS = re.compile(r"\[/?[^\]]*\]")
 
 def visible_width(markup: str) -> int:
     """How many columns ``markup`` will occupy once its tags are gone."""
-    return len(_TAGS.sub("", str(markup or "")))
+    return cell_width(_TAGS.sub("", str(markup or "")))
 
 
 def join_fitted(
@@ -116,7 +117,7 @@ def join_fitted(
     gap = visible_width(separator)
     kept = list(parts)
     while len(kept) > 1:
-        used = sum(len(plain) for _, plain in kept) + gap * (len(kept) - 1)
+        used = sum(cell_width(plain) for _, plain in kept) + gap * (len(kept) - 1)
         if used <= room:
             break
         kept.pop()
@@ -161,6 +162,12 @@ class AskHost(Screen):
         # the queue, from wherever the session has got to
         Binding("ctrl+r", "retry_failed", "Run the failed ones again", show=False),
         Binding("ctrl+x", "skip_one", "Skip this one", show=False),
+        # Media metadata viewers: shared by FlowScreen and DownloadScreen; use
+        # ``m`` (media attachments) rather than ``a`` so multi-pick lists keep
+        # ``a`` for select-all without collision.
+        Binding("c", "show_chapters", "Chapters", show=False),
+        Binding("l", "show_lyrics", "Lyrics", show=False),
+        Binding("m", "show_attachments", "Attachments", show=False),
         # A card can be taller than the area it sits in - ten commands is fifty
         # rows - and it takes no focus, so there is nothing else for these keys to
         # reach. A focused list is asked first, so they still move the list.
@@ -306,6 +313,12 @@ class AskHost(Screen):
 
     def on_screen_resume(self, _event: events.ScreenResume) -> None:
         self.call_after_refresh(self.controller.resume_deferred_leave)
+        if self._current_ask is not None and self.app.screen is self:
+            self.call_after_refresh(self._focus_mounted_ask)
+
+    def _focus_mounted_ask(self) -> None:
+        if self._current_ask is not None and self.is_attached and self.app.screen is self:
+            self._current_ask.focus_first()
 
     def _theme_changed(self, _theme=None) -> None:
         """Draw everything that carries a baked-in colour again. UI thread."""
@@ -422,25 +435,35 @@ class AskHost(Screen):
             return
         mode = str(self.settings.get("after_resolve", "download"))
         quality = self.settings.get("video_quality", "best")
-        quality_label = "best available" if quality in ("best", "worst") else f"{quality}p"
+        if quality == "best":
+            quality_label = tr("ask.quality.best")
+        elif quality == "worst":
+            quality_label = tr("ask.quality.lowest")
+        else:
+            quality_label = f"{quality}p"
         tracks_label = (
-            "choose tracks myself"
+            tr("setting.track_mode.option.interactive")
             if self.settings.get("track_mode") == "interactive"
-            else "tracks picked automatically"
+            else tr("setting.track_mode.option.auto")
         )
-        mode_label = MODE_LABEL.get(mode, mode)
+        mode_label = phrase(MODE_LABEL.get(mode, mode))
         drm_label = self._drm_label()
+        after_word = tr("home.chip.after_picking")
+        drm_word = tr("home.chip.drm")
         # Same treatment as the row above: whole segments are dropped from the
         # right when they will not fit, because "quality best available" clipped
         # to "quality best" is a different claim, and "tracks picked" is not one
         # at all. The keyboard hint leads, so it is the last thing to go.
         parts = [
             (
-                f"[$accent]^s[/] [$muted]after picking[/] "
+                f"[$accent]^s[/] [$muted]{after_word}[/] "
                 f"[$foreground]{visual_markup(mode_label)}[/]",
-                f"^s after picking {mode_label}",
+                f"^s {after_word} {mode_label}",
             ),
-            (f"[$muted]drm[/] [$foreground]{visual_markup(drm_label)}[/]", f"drm {drm_label}"),
+            (
+                f"[$muted]{drm_word}[/] [$foreground]{visual_markup(drm_label)}[/]",
+                f"{drm_word} {drm_label}",
+            ),
             (
                 f"[$muted]quality[/] [$foreground]{visual_markup(quality_label)}[/]",
                 f"quality {quality_label}",
@@ -448,7 +471,8 @@ class AskHost(Screen):
             (f"[$muted]{tracks_label}[/]", tracks_label),
         ]
         if self.settings.get("debug"):
-            parts.append(("[$warn]debug[/]", "debug"))
+            debug_word = tr("home.chip.debug")
+            parts.append((f"[$warn]{debug_word}[/]", debug_word))
         line.first(Static).update(join_fitted(parts, self.size.width, "  [$dim]·[/]  "))
 
     def _drm_label(self) -> str:
@@ -607,7 +631,8 @@ class AskHost(Screen):
         width = widget.scrollable_content_region.width
         if width <= 0 or width == self._drawn_width:
             return
-        lines = list(getattr(self.controller, "log_lines", None) or ())
+        snapshot = getattr(self.controller, "log_snapshot", None)
+        lines = snapshot() if callable(snapshot) else list(getattr(self.controller, "log_lines", None) or ())
         # Not while a drag is in progress: the selection is a range of rows, and
         # re-wrapping moves the text under it. Do not record the new width until
         # the redraw really happened; otherwise a resize during a selection is
@@ -691,7 +716,7 @@ class AskHost(Screen):
             # still answered a click, by copying nothing
             chip = share.first()
             chip.display = bool(self._log_lines)
-            chip.update("[$dim]copy for a report[/]" if self._log_lines else "")
+            chip.update(f"[$dim]{tr('log.copy_report')}[/]" if self._log_lines else "")
         found = self.query("#log-header")
         if not found:
             return
@@ -699,10 +724,11 @@ class AskHost(Screen):
         # clamped: the pane holds at most LOG_LIMIT, so counting every line ever
         # written had the header claiming 6000 over a pane with 4000 in it
         count = min(self._log_lines, LOG_LIMIT)
-        label = "1 line" if count == 1 else f"{count} lines"
+        label = tr("log.lines", count=count)
+        note = tr(f"log.note.{state}", default=LOG_NOTE[state])
         found.first(Static).update(
-            f"[$accent]{LOG_ARROW[state]}[/] [$muted]log[/]  "
-            f"[$muted]{label}[/]  [$dim]^l · {LOG_NOTE[state]}[/]"
+            f"[$accent]{LOG_ARROW[state]}[/] [$muted]{tr('log.title')}[/]  "
+            f"[$muted]{label}[/]  [$dim]^l · {note}[/]"
         )
 
     def action_toggle_log(self) -> None:
@@ -728,24 +754,23 @@ class AskHost(Screen):
         the way to the clipboard, and the notification says which half was masked so
         nobody has to guess before pasting it into an issue.
         """
-        lines = getattr(self.controller, "log_lines", None) or ()
+        snapshot = getattr(self.controller, "log_snapshot", None)
+        lines = snapshot() if callable(snapshot) else list(getattr(self.controller, "log_lines", None) or ())
         text = "\n".join(
             redact(line, preserve_manifest_urls=_is_manifest_field(line)) for line in lines
         )
         if not text.strip():
-            self.notify("The log is empty", timeout=3)
+            self.notify(tr("log.empty"), timeout=3)
             return
         try:
             if self.app.copy_text(text) is False:
                 return
         except Exception:  # noqa: BLE001 - a terminal that refuses the clipboard
-            self.notify("This terminal would not take the clipboard", timeout=4)
+            self.notify(tr("log.clipboard_refused"), timeout=4)
             return
         self.notify(
-            f"Copied {len(text.splitlines())} lines. Non-manifest credentials and your "
-            "home path are masked; signed manifest URLs, content keys and titles are retained. "
-            "Share only with trusted recipients.",
-            title="Log copied",
+            tr("log.copied", count=len(text.splitlines())),
+            title=tr("log.copied_title"),
             timeout=6,
         )
 
@@ -811,12 +836,11 @@ class AskHost(Screen):
 
     def attachments_hints(self) -> list[tuple[str, str]]:
         _name, attachments = self.attachments_payload()
-        return [("a", tr("attachments.title"))] if attachments else []
+        return [("m", tr("attachments.title"))] if attachments else []
 
     def action_show_lyrics(self) -> None:
         name, lyrics = self.lyrics_payload()
         if lyrics is None:
-            self.notify(tr("lyrics.none"), timeout=3)
             return
         from .lyrics_screen import LyricsScreen
 
@@ -825,7 +849,6 @@ class AskHost(Screen):
     def action_show_chapters(self) -> None:
         name, chapters = self.chapter_payload()
         if not chapters:
-            self.notify(tr("chapters.none"), timeout=3)
             return
         from .chapters_screen import ChaptersScreen
 
@@ -834,7 +857,6 @@ class AskHost(Screen):
     def action_show_attachments(self) -> None:
         name, attachments = self.attachments_payload()
         if not attachments:
-            self.notify("This title has no attachments", timeout=3)
             return
         from .attachments_screen import AttachmentsScreen
 
@@ -851,8 +873,13 @@ class AskHost(Screen):
         hints: list[tuple[str, str]] = []
         if controller.job_running and not controller.cancel_requested:
             hints.append(("^x", "skip just this one"))
+        busy = getattr(
+            controller,
+            "batch_busy",
+            controller.job_running or controller._retry_pending,
+        )
         rescuable = sum(1 for job in controller.jobs if job.retryable)
-        if rescuable and not controller.job_running and not controller._retry_pending:
+        if rescuable and not busy:
             hints.append(
                 (
                     "^r",
@@ -865,28 +892,31 @@ class AskHost(Screen):
         """Run every row that failed or was stopped, in queue order."""
         started = self.controller.retry()
         if not started:
+            busy = getattr(
+                self.controller,
+                "batch_busy",
+                self.controller.job_running or self.controller._retry_pending,
+            )
             self.notify(
-                "Wait for the one in flight to finish first"
-                if self.controller.job_running or self.controller._retry_pending
-                else "Nothing to run again",
+                tr("queue.retry_busy") if busy else tr("queue.retry_nothing"),
                 timeout=3,
             )
             return
-        self.notify(f"Running {started} again", timeout=3)
+        self.notify(tr("queue.retrying_n", count=started), timeout=3)
         self.refresh_keys()
 
     def retry_job(self, job) -> None:
         """Run one row again, from a click on it."""
         if self.controller.retry([job]):
-            self.notify(f"Running {job.name} again", timeout=3)
+            self.notify(tr("queue.retrying_name", name=job.name), timeout=3)
             self.refresh_keys()
         else:
-            self.notify("Wait for the one in flight to finish first", timeout=3)
+            self.notify(tr("queue.retry_busy"), timeout=3)
 
     def action_skip_one(self) -> None:
         """Stop what is in flight and let the rest of the queue carry on."""
         if self.controller.request_skip():
-            self.notify("Skipping this one. The rest of the queue carries on.", timeout=4)
+            self.notify(tr("queue.skipping"), timeout=4)
             self.refresh_keys()
 
     def action_confirm(self) -> None:
@@ -907,6 +937,16 @@ class AskHost(Screen):
 
     def show_ask(self, ask: Ask, box: dict[str, Any], event: threading.Event) -> None:
         """Mount the widget for ``ask``. The worker is waiting on ``event``."""
+        # Never strand an earlier worker if a second ask arrives before the first
+        # was answered: release the superseded waiter cleanly before replacing it.
+        if self._ask_event is not None and self._ask_event is not event:
+            previous_box = self._ask_box
+            previous_event = self._ask_event
+            self._ask_box = None
+            self._ask_event = None
+            if previous_box is not None and "value" not in previous_box and "quit" not in previous_box:
+                previous_box["value"] = BACK
+            previous_event.set()
         self._clear_ask()
         # a question takes the middle of the screen back: it is what the user has
         # to deal with now, and the artefact it replaces is in the log
@@ -957,8 +997,14 @@ class AskHost(Screen):
         # Asked of the widget rather than the ask: "is this drawn as a card" is the
         # widget's own answer, and three different asks can be.
         card = widget.has_class("manual-card")
+        tall_card = card and (
+            widget.has_class("qr-card")
+            or self.app.has_class("short")
+            or len(getattr(ask, "lines", ()) or ()) > self.CENTRE_ROWS + 4
+        )
         target.set_class(isinstance(ask, TextAsk) and not card, "bottom")
-        target.set_class(card, "centre")
+        target.set_class(card and not tall_card, "centre")
+        target.set_class(tall_card, "centre-top")
         target.mount(widget)
         self._render_waiting()
         widget.focus_first()
@@ -976,7 +1022,7 @@ class AskHost(Screen):
         self._delivery_details_display = None
         area = self.query("#ask-area")
         if area:
-            area.first(VerticalScroll).remove_class("active-ask")
+            area.first(VerticalScroll).remove_class("active-ask", "bottom", "centre", "centre-top")
         if self._current_ask is not None:
             self._current_ask.remove()
             self._current_ask = None
@@ -1047,7 +1093,7 @@ class AskHost(Screen):
                     release()
             area = self.query("#ask-area")
             if area:
-                area.first(VerticalScroll).remove_class("centre-top")
+                area.first(VerticalScroll).remove_class("bottom", "centre", "centre-top")
             self._render_waiting()
             self.refresh_keys()
 
@@ -1103,10 +1149,10 @@ class AskHost(Screen):
         except Exception:
             # a terminal that refuses the clipboard is not a failure worth an
             # error: show the value instead, so it can still be read off
-            self.notify(text, title=label or "Copy", timeout=10)
+            self.notify(text, title=label or tr("copy.title"), timeout=10)
             return
-        shown = text if len(text) <= 60 else f"{text[:57]}..."
-        self.notify(f"Copied {shown}", title=label or "Copy", timeout=3)
+        shown = text if cell_width(text) <= 60 else f"{crop_cells(text, 57)}..."
+        self.notify(tr("copy.copied_value", value=shown), title=label or tr("copy.title"), timeout=3)
 
     def action_copy_await(self, number: int) -> None:
         self.copy_await_value(number)
@@ -1129,13 +1175,13 @@ class AskHost(Screen):
             if self.app.copy_text(text) is False:
                 return
         except Exception:
-            self.notify(text, title="Copy", timeout=10)
+            self.notify(text, title=tr("copy.title"), timeout=10)
             return
-        self.notify(f"Copied {count} value(s)", title="Copy", timeout=3)
+        self.notify(tr("copy.copied_count", count=count), title=tr("copy.title"), timeout=3)
 
     def action_scroll_panel(self, delta: int) -> None:
         """Move a card that is taller than the space it is in."""
-        if self._panel is None:
+        if self._panel is None and not isinstance(self._current_ask, AwaitWidget):
             return
         area = self.query("#ask-area")
         if area:

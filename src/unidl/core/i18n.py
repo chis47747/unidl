@@ -36,6 +36,7 @@ _PHRASES: dict[str, str] = {
     "Starting": "chrome.starting",
     "Done": "chrome.done",
     "Chapters": "chrome.chapters",
+    "Lyrics": "chrome.lyrics",
     "back": "keys.back",
     "confirm": "keys.confirm",
     "move": "keys.move",
@@ -49,6 +50,7 @@ _PHRASES: dict[str, str] = {
     "open": "keys.open",
     "scroll": "keys.scroll",
     "chapters": "keys.chapters",
+    "lyrics": "keys.lyrics",
     "stopping...": "keys.stopping",
     "stop everything": "keys.stop_everything",
     "expand the log": "keys.log_expand",
@@ -123,6 +125,13 @@ _PHRASES: dict[str, str] = {
     "open in a service": "keys.open_service",
     "copy link": "keys.copy_link",
     "regions": "keys.regions",
+    "select / clear": "keys.select_clear",
+    "select all": "keys.select_all",
+    "clear all": "keys.clear_all",
+    "open selected": "keys.open_selected",
+    "back to exports": "keys.back_exports",
+    "register": "keys.register",
+    "use default": "keys.use_default",
     "Enabled": "value.enabled",
     "Cancel": "common.cancel",
     "Delete": "common.delete",
@@ -143,6 +152,8 @@ _PROGRESS_TOKENS: tuple[tuple[str, str], ...] = (
     ("Decrypting", "progress.decrypting"),
     ("Decrypted", "progress.decrypted"),
     ("Transcoding", "progress.transcoding"),
+    ("Converting", "progress.converting"),
+    ("Converted", "progress.converted"),
     ("Remuxing", "progress.remuxing"),
     ("Finalizing", "progress.finalizing"),
     ("Repacking", "progress.repacking"),
@@ -158,6 +169,7 @@ _PROGRESS_TOKENS: tuple[tuple[str, str], ...] = (
     ("Paused", "progress.paused"),
     ("Stopped", "progress.stopped"),
     ("Muxing", "progress.muxing"),
+    ("Muxed", "progress.muxed"),
     ("Cached", "progress.cached"),
     ("Failed", "progress.failed"),
     ("Error", "progress.error"),
@@ -882,7 +894,7 @@ def localize_progress_line(text: str) -> str:
         if separator or segment.lstrip().startswith(english):
             pattern = rf"(?<![A-Za-z0-9_]){re.escape(english)}(?=$|[^A-Za-z0-9_])"
         else:
-            pattern = rf"(?<![A-Za-z0-9_]){re.escape(english)}(?=\s*(?:✓|[⣾⣽⣻⢿⡿⣟⣯⢿]|$))"
+            pattern = rf"(?<![A-Za-z0-9_]){re.escape(english)}(?=\s*(?:✓|[⣾⣽⣻⢿⡿⣟⣯⣷]|$))"
         segment = re.sub(pattern, translated, segment)
     return head + segment
 

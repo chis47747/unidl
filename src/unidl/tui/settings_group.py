@@ -178,7 +178,28 @@ class SettingsGroupScreen(Screen[None]):
         self.app.push_screen(editor, lambda value: self._apply(spec, value) if value is not None else None)
 
     def _apply(self, spec: Setting, value: Any) -> None:
+        from .settings_screen import validate_setting_value
+
+        problems = validate_setting_value(spec, value)
+        if problems:
+            self.notify(
+                "  ·  ".join(problems),
+                title=tr("settings.not_saved", label=setting_label(spec)),
+                severity="error",
+                timeout=10,
+            )
+            return
         self.scope.set(spec.key, value)
+        store_problem = getattr(self.scope._store, "problem", "")
+        if store_problem:
+            self.notify(
+                store_problem,
+                title=tr("settings.not_saved", label=setting_label(spec)),
+                severity="error",
+                timeout=10,
+            )
+            self.rebuild()
+            return
         if spec.key == "theme":
             self.app.apply_theme()
         if spec.key == "interface_locale":

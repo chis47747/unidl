@@ -36,8 +36,9 @@ _ROW = re.compile(r"^\d{1,5}$")
 _LABELLED = re.compile(r"\bs(?P<season>\d{1,3})\s*e(?P<episode>\d{1,4})\b", re.I)
 _EPISODE_ONLY = re.compile(r"\be(?:p(?:isode)?)?\.?\s*(?P<episode>\d{1,4})\b", re.I)
 
-#: what "everything" may be written as
-EVERYTHING = ("all", "*", "a")
+#: what "everything" may be written as (do not include bare "a", which collides
+#: with typing filters like "aac", "atmos", or "arabic")
+EVERYTHING = ("all", "*")
 
 #: An episode number this side of absurd. A span that ends at a season rather than
 #: an episode runs to here, which is cheaper than carrying "unbounded" through

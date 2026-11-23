@@ -16,6 +16,7 @@ restart. Settings that invalidate a login are marked and drop the session.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Label, OptionList, Static
+from textual.widgets import Button, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import cdmrules, naming, template, vaults
@@ -39,19 +40,13 @@ from ..core.service import Service
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, cookie_profile_setting
 from .bidi import visual_markup
-from .chrome import Chrome, KeyBar, StatusChip
+from .chrome import Chrome, CloseMark, KeyBar, StatusChip
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
 
 
 class _Editor(ModalScreen[Any]):
-    """Base for the two value editors.
-
-    These carry the chrome bar and the key bar like every other screen. Without
-    them, opening a setting made Back and Quit vanish from the top-left - the
-    shortcuts still worked, but a control you cannot see is not a control, and
-    the frame is supposed to be in the same place everywhere.
-    """
+    """Base for centered Vault-style setting editor popups."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
@@ -62,32 +57,32 @@ class _Editor(ModalScreen[Any]):
         super().__init__()
         self.setting = setting
         self.current = current
-        # opaque: a see-through modal shows the settings screen's own chrome and
-        # key bar behind its own, so you get two of each and neither is
-        # obviously the live one
-        self.add_class("editor")
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        # the card is centred inside this, so the chrome and key bar stay where
-        # they are on every other screen instead of floating with it
-        with Vertical(id="modal-body"):
-            with Vertical(id="modal-card"):
-                yield from self.compose_title()
-                help_text = setting_help(self.setting)
-                if help_text:
-                    yield Label(help_text, classes="ask-hint")
-                yield from self.compose_editor()
-        yield KeyBar(*self.key_hints())
+        with Vertical(id="modal-card"):
+            yield from self.compose_title()
+            help_text = setting_help(self.setting)
+            if help_text:
+                yield Label(help_text, classes="modal-card-help")
+            yield from self.compose_editor()
+            yield from self.compose_actions()
 
     def compose_title(self) -> ComposeResult:
-        yield Label(setting_label(self.setting), classes="ask-title")
+        with Horizontal(classes="modal-head"):
+            yield Label(setting_label(self.setting), classes="modal-card-title")
+            yield CloseMark(id="modal-close")
 
     def compose_editor(self) -> ComposeResult:
         yield from ()
 
-    def key_hints(self) -> list[tuple[str, str]]:
-        return [("enter", "confirm"), ("^b", "cancel"), ("esc", "cancel")]
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-cancel":
+            self.action_cancel()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -109,9 +104,6 @@ class _ChoiceEditor(_Editor):
             ]
         )
 
-    def key_hints(self) -> list[tuple[str, str]]:
-        return [("enter", "use this value"), ("↑↓", "move"), ("^b", "cancel"), ("esc", "cancel")]
-
     def on_mount(self) -> None:
         option_list = self.query_one(OptionList)
         for index, option in enumerate(self.setting.options):
@@ -131,6 +123,7 @@ class _MultiChoiceEditor(_Editor):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "apply", "Apply", show=False, priority=True),
         Binding("space", "toggle", "Toggle", show=False),
         Binding("a", "apply", "Apply", show=False),
     ]
@@ -141,7 +134,7 @@ class _MultiChoiceEditor(_Editor):
 
     def compose_title(self) -> ComposeResult:
         with Horizontal(classes="multi-setting-title-row"):
-            yield Label(setting_label(self.setting), classes="ask-title")
+            yield Label(setting_label(self.setting), classes="modal-card-title")
             confirm = StatusChip(
                 "apply",
                 id="multi-setting-confirm",
@@ -153,13 +146,17 @@ class _MultiChoiceEditor(_Editor):
     def compose_editor(self) -> ComposeResult:
         yield OptionList(id="multi-setting-options")
 
-    def key_hints(self) -> list[tuple[str, str]]:
-        return [
-            ("enter/space", "toggle"),
-            ("a", "apply"),
-            ("^b", "cancel"),
-            ("esc", "cancel"),
-        ]
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Apply"), variant="primary", id="modal-apply")
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-apply":
+            self.action_apply()
+        else:
+            self.action_cancel()
 
     def on_mount(self) -> None:
         self._rebuild_options()
@@ -225,6 +222,12 @@ class _MultiChoiceEditor(_Editor):
 class _DefaultAudioEditor(_Editor):
     """A single preference: two presets or one user-entered language."""
 
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
+
     def compose_editor(self) -> ComposeResult:
         yield OptionList(
             Option(tr("setting.default_audio.option.auto"), id="auto"),
@@ -238,6 +241,11 @@ class _DefaultAudioEditor(_Editor):
             classes="ask-input",
             id="default-audio-language",
         )
+
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Save"), variant="primary", id="modal-save")
+            yield Button(phrase("Cancel"), id="modal-cancel")
 
     def on_mount(self) -> None:
         options = self.query_one(OptionList)
@@ -256,20 +264,49 @@ class _DefaultAudioEditor(_Editor):
         field.display = True
         field.focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def _submit_value(self, raw: str) -> None:
         from ..downloader.mux_audio import normalize_default_audio
 
-        event.stop()
         try:
-            value = normalize_default_audio(event.value)
+            value = normalize_default_audio(raw)
         except ValueError:
             self.notify(tr("mux_audio.invalid_language"), severity="warning")
             return
         self.dismiss(value)
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._submit_value(event.value)
+
+    def action_save(self) -> None:
+        field = self.query_one(Input)
+        if field.display:
+            self._submit_value(field.value)
+            return
+        options = self.query_one(OptionList)
+        idx = options.highlighted
+        if idx in (0, 1):
+            self.dismiss("auto" if idx == 0 else "original")
+            return
+        field.display = True
+        field.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-save":
+            self.action_save()
+        else:
+            self.action_cancel()
+
 
 class _DefaultSubtitleEditor(_Editor):
     """A single subtitle preference: presets or one language tag."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
     def compose_editor(self) -> ComposeResult:
         yield OptionList(
@@ -285,6 +322,11 @@ class _DefaultSubtitleEditor(_Editor):
             id="default-subtitle-language",
         )
 
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Save"), variant="primary", id="modal-save")
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
     def on_mount(self) -> None:
         options = self.query_one(OptionList)
         field = self.query_one(Input)
@@ -302,19 +344,82 @@ class _DefaultSubtitleEditor(_Editor):
         field.display = True
         field.focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def _submit_value(self, raw: str) -> None:
         from ..downloader.mux_subtitle import normalize_default_subtitle
 
-        event.stop()
         try:
-            value = normalize_default_subtitle(event.value)
+            value = normalize_default_subtitle(raw)
         except ValueError:
             self.notify(tr("mux_subtitle.invalid_language"), severity="warning")
             return
         self.dismiss(value)
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._submit_value(event.value)
+
+    def action_save(self) -> None:
+        field = self.query_one(Input)
+        if field.display:
+            self._submit_value(field.value)
+            return
+        options = self.query_one(OptionList)
+        idx = options.highlighted
+        if idx in (0, 1):
+            self.dismiss("auto" if idx == 0 else "original")
+            return
+        field.display = True
+        field.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-save":
+            self.action_save()
+        else:
+            self.action_cancel()
+
+
+_SPEED_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt]?)(?:i?b(?:ps|/s)?|ps)?$", re.IGNORECASE)
+_INT_MINIMUMS = {
+    "retries": 0,
+    "http_timeout": 1,
+    "workers": 1,
+}
+
+
+def validate_setting_value(spec: Setting, value: Any) -> list[str]:
+    """Validate free-text and numeric setting values before persisting them."""
+    problems = _template_problems(spec, value)
+    if problems:
+        return problems
+    text = str(value or "").strip()
+    if spec.kind == "int":
+        try:
+            number = int(text)
+        except ValueError:
+            return [tr("settings.invalid_int", default="Enter a whole number.")]
+        minimum = _INT_MINIMUMS.get(spec.key)
+        if minimum is not None and number < minimum:
+            return [tr("settings.invalid_min", default=f"Must be at least {minimum}.", min=minimum)]
+    elif spec.key == "drop_video" and text:
+        try:
+            re.compile(text)
+        except re.error as exc:
+            return [tr("settings.invalid_regex", default=f"Invalid regular expression: {exc}", error=str(exc))]
+    elif spec.key == "max_speed" and text:
+        match = _SPEED_RE.match(text)
+        if not match or float(match.group(1)) <= 0:
+            return [tr("settings.invalid_speed", default="Use a positive rate such as 15M, 100K, or 2Mbps (or leave empty).")]
+    return []
+
 
 class _TextEditor(_Editor):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
+
     def compose_editor(self) -> ComposeResult:
         yield Input(
             value="" if self.current is None else str(self.current),
@@ -322,16 +427,49 @@ class _TextEditor(_Editor):
             classes="ask-input",
         )
 
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Save"), variant="primary", id="modal-save")
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
+    def _submit(self, value: str) -> None:
+        problems = validate_setting_value(self.setting, value)
+        if problems:
+            self.notify(
+                "  ·  ".join(problems),
+                title=tr("settings.not_saved", label=setting_label(self.setting)),
+                severity="warning",
+                timeout=8,
+            )
+            return
+        self.dismiss(value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.dismiss(event.value)
+        self._submit(event.value)
+
+    def action_save(self) -> None:
+        self._submit(self.query_one(Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-save":
+            self.action_save()
+        else:
+            self.action_cancel()
 
 
 class _TitleDelayEditor(_Editor):
     """Validate the batch-only inter-title delay before saving it."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
 
     def compose_editor(self) -> ComposeResult:
         yield Input(
@@ -340,15 +478,19 @@ class _TitleDelayEditor(_Editor):
             classes="ask-input",
         )
 
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Save"), variant="primary", id="modal-save")
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def _submit(self, raw: str) -> None:
         from ..core.title_delay import normalize_title_delay
 
-        event.stop()
         try:
-            value = normalize_title_delay(event.value)
+            value = normalize_title_delay(raw)
         except ValueError as exc:
             self.notify(
                 tr(
@@ -360,6 +502,20 @@ class _TitleDelayEditor(_Editor):
             )
             return
         self.dismiss(value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._submit(event.value)
+
+    def action_save(self) -> None:
+        self._submit(self.query_one(Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "modal-save":
+            self.action_save()
+        else:
+            self.action_cancel()
 
 
 #: Which settings are name templates, and which fields each may use. A table rather
@@ -420,7 +576,7 @@ class SettingsScreen(Screen):
         if self.service is None:
             title = f"{tr('settings.title')}  [$dim]{tr('settings.global')}[/]"
         else:
-            title = f"{tr('settings.title')}  [$dim]{self.service.NAME}[/]"
+            title = f"{tr('settings.title')}  [$dim]{visual_markup(self.service.NAME)}[/]"
         self.query_one("#masthead", Static).update(title)
         self.set_hint("")
         self.rebuild()
@@ -436,7 +592,7 @@ class SettingsScreen(Screen):
         if self.service is None:
             title = f"{tr('settings.title')}  [$dim]{tr('settings.global')}[/]"
         else:
-            title = f"{tr('settings.title')}  [$dim]{self.service.NAME}[/]"
+            title = f"{tr('settings.title')}  [$dim]{visual_markup(self.service.NAME)}[/]"
         found = self.query("#masthead")
         if found:
             found.first(Static).update(title)
@@ -518,8 +674,8 @@ class SettingsScreen(Screen):
             if not visible_specs:
                 return
             self._rows.append(None)
-            suffix = f"  [$gutter]{note}[/]" if note else ""
-            option_list.add_option(Option(f"  [$dim]{name.upper()}[/]{suffix}", disabled=True))
+            suffix = f"  [$gutter]{visual_markup(note)}[/]" if note else ""
+            option_list.add_option(Option(f"  [$dim]{visual_markup(name.upper())}[/]{suffix}", disabled=True))
             for spec in visible_specs:
                 self._refresh_cookie_setting(spec, scope)
                 self._rows.append((spec, scope))
@@ -713,7 +869,7 @@ class SettingsScreen(Screen):
         def _done(value: Any) -> None:
             if value is None:
                 return
-            problems = _template_problems(spec, value)
+            problems = validate_setting_value(spec, value)
             if problems:
                 # Refused rather than saved and worked around later: a template with
                 # a mistyped field in it puts that mistake in the name of every file
@@ -852,6 +1008,16 @@ class SettingsScreen(Screen):
 
     def _apply(self, spec: Setting, scope: Settings, value: Any) -> None:
         resets = scope.set(spec.key, value)
+        store_problem = getattr(scope._store, "problem", "")
+        if store_problem:
+            self.notify(
+                store_problem,
+                title=tr("settings.not_saved", label=setting_label(spec)),
+                severity="error",
+                timeout=10,
+            )
+            self.rebuild()
+            return
         paired_device = ""
         if spec.key == "drm_system" and scope is self.globals:
             # The main-screen DRM chip already moves the global CDM with the
@@ -894,6 +1060,16 @@ class SettingsScreen(Screen):
                 return
             if spec.inherit_global and scope is not self.globals:
                 scope.clear(spec.key)
+                store_problem = getattr(scope._store, "problem", "")
+                if store_problem:
+                    self.notify(
+                        store_problem,
+                        title=tr("settings.not_saved", label=setting_label(spec)),
+                        severity="error",
+                        timeout=10,
+                    )
+                    self.rebuild()
+                    return
                 self.rebuild()
                 self.set_hint(tr("settings.inherited_global", label=setting_label(spec)))
                 return

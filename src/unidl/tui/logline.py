@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from rich.table import Table
 from rich.text import Text
 
+from ..core.i18n import cell_width
 from .bidi import visual_text
 
 #: The state dot. One cell wide in Rich's own measurement, which is what the
@@ -155,9 +156,11 @@ class LogLine:
         row.add_column(width=GUTTER_WIDTH, no_wrap=True)
         cells = [Text(f"{DOT}  ", style=getattr(palette, "gutter" if dim else dot_role, ""))]
         if self.label:
-            row.add_column(width=LABEL_WIDTH, no_wrap=True)
+            pad = max(2, LABEL_WIDTH - cell_width(self.label))
+            col_width = cell_width(self.label) + pad
+            row.add_column(width=col_width, no_wrap=True)
             cells.append(
-                Text(f"{self.label:<{LABEL_WIDTH}}", style=palette.muted)
+                Text(f"{self.label}{' ' * pad}", style=palette.muted)
             )
         # folded rather than broken on spaces alone: a key or a URL is one word and
         # has to be allowed to continue on the next row

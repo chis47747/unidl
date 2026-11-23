@@ -147,28 +147,74 @@ def _run(command: list[str]) -> str | None:
     return result.stdout
 
 
+def _windows_clipboard_read_apis():
+    """Declare pointer-sized Win32 signatures for reading CF_UNICODETEXT."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    signatures = (
+        (user32.OpenClipboard, [wintypes.HWND], wintypes.BOOL),
+        (user32.IsClipboardFormatAvailable, [wintypes.UINT], wintypes.BOOL),
+        (user32.GetClipboardData, [wintypes.UINT], wintypes.HANDLE),
+        (user32.CloseClipboard, [], wintypes.BOOL),
+        (kernel32.GlobalLock, [wintypes.HANDLE], wintypes.LPVOID),
+        (kernel32.GlobalUnlock, [wintypes.HANDLE], wintypes.BOOL),
+        (kernel32.GlobalSize, [wintypes.HANDLE], ctypes.c_size_t),
+    )
+    for function, arguments, result in signatures:
+        function.argtypes = arguments
+        function.restype = result
+    return user32, kernel32
+
+
+def _read_windows_clipboard() -> str | None:
+    """Read CF_UNICODETEXT directly via Win32 without spawning PowerShell."""
+    import ctypes
+
+    try:
+        user32, kernel32 = _windows_clipboard_read_apis()
+    except (AttributeError, OSError):
+        return None
+    opened = False
+    try:
+        for attempt in range(5):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            if attempt < 4:
+                time.sleep(0.02)
+        if not opened:
+            return None
+        if not user32.IsClipboardFormatAvailable(13):  # CF_UNICODETEXT
+            return ""
+        handle = user32.GetClipboardData(13)
+        if not handle:
+            return None
+        address = kernel32.GlobalLock(handle)
+        if not address:
+            return None
+        try:
+            size = int(kernel32.GlobalSize(handle) or 0)
+            if size >= 2:
+                raw = ctypes.string_at(address, size - (size % 2))
+                return raw.decode("utf-16-le", errors="replace").split("\x00", 1)[0]
+            return ctypes.wstring_at(address)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    except (OSError, ValueError):
+        return None
+    finally:
+        if opened:
+            user32.CloseClipboard()
+
+
 def read_system_clipboard() -> str | None:
     """Read text from the native clipboard for the current desktop platform."""
 
     if sys.platform == "win32":
-        for name in ("powershell.exe", "powershell", "pwsh.exe", "pwsh"):
-            executable = shutil.which(name)
-            if executable is None:
-                continue
-            value = _run(
-                [
-                    executable,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-STA",
-                    "-Command",
-                    "[Console]::Out.Write((Get-Clipboard -Raw))",
-                ]
-            )
-            if value is not None:
-                return value
-        return None
+        return _read_windows_clipboard()
 
     if sys.platform == "darwin":
         executable = shutil.which("pbpaste")

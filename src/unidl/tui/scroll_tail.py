@@ -25,13 +25,7 @@ class JumpToBottom(Static):
         padding: 0;
         margin: 0;
         content-align: center middle;
-        color: $muted;
-        background: $recessed;
         visibility: hidden;
-    }
-    JumpToBottom:hover {
-        color: $foreground;
-        background: $highlight;
     }
     """
 
@@ -86,6 +80,16 @@ class JumpToBottom(Static):
     def on_mouse_up(self, event: events.MouseUp) -> None:
         event.stop()
         event.prevent_default()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        event.stop()
+        if self.target.is_attached:
+            self.target.scroll_up(animate=False)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        event.stop()
+        if self.target.is_attached:
+            self.target.scroll_down(animate=False)
 
     async def on_click(self, event: events.Click) -> None:
         event.stop()

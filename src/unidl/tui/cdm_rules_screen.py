@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 
 from ..core import cdmrules
 from ..core.cdmrules import Rule
-from ..core.i18n import tr
+from ..core.i18n import cell_width, tr
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting
 from .bidi import visual_text
@@ -45,13 +45,16 @@ CONDITION_WIDTH = 20
 
 def _esc(text: object) -> str:
     """Neutralise square brackets: real device names are full of them."""
-    return str(text).replace("\\", "\\\\").replace("[", r"\[")
+    from rich.markup import escape as _escape_markup
+
+    return _escape_markup(str(text))
 
 
 class CdmRulesScreen(Screen[str | None]):
     """Returns the rules as canonical text, or ``None`` when nothing changed."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "noop", "Change the device", show=True),
@@ -83,8 +86,15 @@ class CdmRulesScreen(Screen[str | None]):
         )
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self.rebuild()
         self.query_one("#rules-list", OptionList).focus()
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if self.is_attached:
+            self.rebuild()
 
     def relocalize(self) -> None:
         refresh_locale_widgets(self)
@@ -119,6 +129,7 @@ class CdmRulesScreen(Screen[str | None]):
         self.query_one("#rules-head", Static).update(head)
 
         devices = self.devices()
+        device_map = {device.name: device for device in devices}
         problems = cdmrules.problems(
             self._rules,
             [device.name for device in devices],
@@ -141,7 +152,7 @@ class CdmRulesScreen(Screen[str | None]):
             )
             for rule in cdmrules.order(self._rules):
                 self._rows.append(rule)
-                option_list.add_option(Option(self._row_markup(rule)))
+                option_list.add_option(Option(self._row_markup(rule, device_map)))
         self._rows.append(None)
         option_list.add_option(Option(f"  [$dim]{tr('cdmrules.new')}[/]", disabled=True))
         self._rows.append(ADD)
@@ -151,14 +162,18 @@ class CdmRulesScreen(Screen[str | None]):
             )
         )
 
-        if previous is not None and self._rows:
-            option_list.highlighted = min(previous, len(self._rows) - 1)
-        else:
-            option_list.highlighted = 1 if len(self._rows) > 1 else 0
+        enabled = [i for i, item in enumerate(self._rows) if item is not None]
+        if enabled:
+            if previous is not None and previous in enabled:
+                option_list.highlighted = previous
+            elif previous is not None:
+                option_list.highlighted = min(enabled, key=lambda i: (abs(i - previous), i))
+            else:
+                option_list.highlighted = enabled[0]
 
-    def _row_markup(self, rule: Rule) -> str:
+    def _row_markup(self, rule: Rule, device_map: dict | None = None) -> str:
         """One rule: when it applies, which device answers, and where that is."""
-        device = self._device(rule.device)
+        device = device_map.get(rule.device) if device_map is not None else self._device(rule.device)
         where = ""
         if device is None:
             where = tr("cdmrules.not_found")
@@ -166,7 +181,8 @@ class CdmRulesScreen(Screen[str | None]):
             where = tr("cdmrules.remote", where=device.where)
         elif device.level:
             where = device.level
-        condition = f"{rule.label():<{CONDITION_WIDTH}}"
+        label = rule.label()
+        condition = f"{label}{' ' * max(0, CONDITION_WIDTH - cell_width(label))}"
         row = f"    {condition}[$accent]{_esc(visual_text(rule.device))}[/]"
         if where:
             row += f"  [$dim]{_esc(where)}[/]"

@@ -16,7 +16,6 @@ would expect.
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.widgets import Static
 
 from .askhost import AskHost
@@ -27,11 +26,28 @@ class FlowScreen(AskHost):
 
     WAITING_TEXT = "working - the next prompt will appear here"
     WAITING_TEXT_ID = "ask.waiting.flow"
-    BINDINGS = [
-        Binding("c", "show_chapters", "Chapters", show=False),
-        Binding("l", "show_lyrics", "Lyrics", show=False),
-        Binding("a", "show_attachments", "Attachments", show=False),
-    ]
+
+    def on_screen_resume(self, event) -> None:
+        super().on_screen_resume(event)
+        if (
+            getattr(self.controller, "_close_flow_on_delivery_dismiss", False)
+            and self.controller.delivery is None
+            and not self.waiting
+            and not self.panel_showing
+            and self.app.screen is self
+        ):
+            self.controller._close_flow_on_delivery_dismiss = False
+            self.call_after_refresh(self._pop_stale_flow)
+
+    def _pop_stale_flow(self) -> None:
+        if (
+            self.is_attached
+            and self.app.screen is self
+            and not self.waiting
+            and not self.panel_showing
+            and len(self.app.screen_stack) > 1
+        ):
+            self.app.pop_screen()
 
     def compose_identity(self) -> ComposeResult:
         yield Static("", id="ident-line")

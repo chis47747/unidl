@@ -190,12 +190,9 @@ def tracks_panel(save_name: str, tracks: TrackSet) -> Panel:
         mark = TAKEN if index in chosen else LEFT
         rows.append(f"{mark}  {stream.format_line()}")
     return Panel(
-        title=f"tracks  ·  {save_name}",
+        title=tr("session.panel.tracks_title", name=save_name),
         lines=rows,
-        hint=(
-            f"{TAKEN} would be taken · {LEFT} would be left · nothing was downloaded "
-            "and no licence was requested  ·  1 copies the list  ·  enter or ^b to go back"
-        ),
+        hint=tr("session.panel.tracks_hint", taken=TAKEN, left=LEFT),
     )
 
 
@@ -374,7 +371,7 @@ def _chapter_metadata_lines(playback: Playback, *, limit: int | None = None) -> 
     head = max(1, limit - 2)
     rows = [row(index, chapter) for index, chapter in enumerate(chapters[:head], start=1)]
     omitted = len(chapters) - head - 1
-    rows.append(f"  …  {omitted} more chapter{'s' if omitted != 1 else ''} in the saved command")
+    rows.append(f"  …  {tr('session.panel.more_chapters', count=omitted)}")
     rows.append(row(len(chapters), chapters[-1]))
     return rows
 
@@ -397,40 +394,42 @@ def command_panel(
     """
     count = len(entries)
     if count < 2:
-        titles, copying, saved = "nothing was downloaded", "1 copies it", "saved to a file too"
+        titles = tr("session.panel.command_none_downloaded")
+        copying = tr("session.panel.command_copy_one")
+        saved = tr("session.panel.command_saved_one")
     else:
-        titles = f"{count} of them, nothing was downloaded"
-        copying = "1-9 copy one · click any of them · ^y copies all"
-        saved = "each saved to a file too"
+        titles = tr("session.panel.command_n_none_downloaded", count=count)
+        copying = tr("session.panel.command_copy_many")
+        saved = tr("session.panel.command_saved_many")
     lines: list[str | tuple[str, str]] = []
     for index, entry in enumerate(entries):
         metadata = list(audio_metadata[index]) if audio_metadata and index < len(audio_metadata) else []
         if metadata:
             if lines:
                 lines.append("")
-            lines.append(f"audio metadata  ·  {entry[0]}")
+            lines.append(tr("session.panel.audio_metadata", name=entry[0]))
             lines.extend(metadata)
         subtitles = list(subtitle_metadata[index]) if subtitle_metadata and index < len(subtitle_metadata) else []
         if subtitles:
             if lines:
                 lines.append("")
-            lines.append(f"all available subtitle URLs  ·  {entry[0]}")
+            lines.append(tr("session.panel.subtitle_urls", name=entry[0]))
             lines.extend(subtitles)
         chapters = list(chapter_metadata[index]) if chapter_metadata and index < len(chapter_metadata) else []
         if chapters:
             if lines:
                 lines.append("")
-            lines.append(f"chapters  ·  {entry[0]}")
+            lines.append(tr("session.panel.chapters", name=entry[0]))
             lines.extend(chapters)
         lines.append(entry)
     return Panel(
-        title=f"command only  ·  {titles}",
+        title=tr("session.panel.command_title", titles=titles),
         lines=lines,
         # Said out loud, because the card is holding the flow until one of them is
         # pressed and a card that waits without saying so reads as a hang. Both
         # keys, because they do the same thing here: go on to whatever the flow was
         # about to ask, which is the list this title was picked from.
-        hint=f"{copying}  ·  {saved}  ·  enter or ^b to go back",
+        hint=tr("session.panel.command_hint", copying=copying, saved=saved),
     )
 
 
@@ -444,23 +443,20 @@ def export_panel(path: Path, document: exports.Document) -> Panel:
     count = len(document.entries)
     rows: list[str | tuple[str, str]] = []
     for entry in document.entries:
-        detail = f"{len(entry.keys)} key(s)"
+        detail = tr("session.panel.export_keys_n", count=len(entry.keys))
         if entry.chapters:
-            detail += f"  ·  {len(entry.chapters)} chapter(s)"
+            detail += f"  ·  {tr('session.panel.export_chapters_n', count=len(entry.chapters))}"
         if entry.attachments:
-            detail += f"  ·  {len(entry.attachments)} attachment(s)"
+            detail += f"  ·  {tr('session.panel.export_attachments_n', count=len(entry.attachments))}"
         rows.append(f"{entry.label()}  ·  {detail}")
     rows.append("")
-    rows.append("It holds the content keys and the manifest link, so treat it like a password. Nothing was downloaded.")
-    rows.append(("File", str(path)))
-    titles = "1 title" if count == 1 else f"{count} titles"
+    rows.append(tr("session.panel.export_sensitive"))
+    rows.append((tr("session.panel.export_file"), str(path)))
+    titles = tr("session.panel.export_titles", count=count)
     return Panel(
-        title=f"export  ·  {titles}, {document.keys} key(s)",
+        title=tr("session.panel.export_title", titles=titles, keys=document.keys),
         lines=rows,
-        hint=(
-            "1 copies the path · click it · import it from the main screen, here or "
-            "anywhere else  ·  enter or ^b to go back"
-        ),
+        hint=tr("session.panel.export_hint"),
     )
 
 
@@ -605,52 +601,75 @@ class TextualPresenter:
             raise Back()
 
         if isinstance(ask, SettingsAsk):
-            controller.app.call_from_thread(controller.app.action_global_settings)
+            done = threading.Event()
+            try:
+                controller.app.call_from_thread(
+                    controller.app.action_global_settings, on_dismiss=done.set
+                )
+            except RuntimeError as exc:
+                raise Quit() from exc
+            while not done.wait(_ANSWER_POLL):
+                if controller.aborted:
+                    raise Quit()
             return None
         if isinstance(ask, Suspend):
-            return controller.app.call_from_thread(controller.run_suspended, ask)
+            try:
+                return controller.app.call_from_thread(controller.run_suspended, ask)
+            except RuntimeError as exc:
+                raise Quit() from exc
         if isinstance(ask, Await):
             return controller.run_await(ask)
         if isinstance(ask, PartnerHandoff):
             return controller.route_partner_authorization(ask.authorization)
 
-        event = threading.Event()
-        box: dict[str, Any] = {}
-        controller.app.call_from_thread(controller.mount_ask, ask, box, event)
-        # Polled rather than waited on for ever. The screens release a pending ask
-        # when they go away, but there is a window either side of that - while the
-        # mount is still being marshalled, or if the loop stops before the answer
-        # arrives - where nothing will ever set this event, and an unbounded wait
-        # there is a thread that keeps the process from exiting.
-        while not event.wait(_ANSWER_POLL):
-            if controller.aborted:
+        while True:
+            event = threading.Event()
+            box: dict[str, Any] = {}
+            try:
+                controller.app.call_from_thread(controller.mount_ask, ask, box, event)
+            except RuntimeError as exc:
+                raise Quit() from exc
+            # Polled rather than waited on for ever. The screens release a pending ask
+            # when they go away, but there is a window either side of that - while the
+            # mount is still being marshalled, or if the loop stops before the answer
+            # arrives - where nothing will ever set this event, and an unbounded wait
+            # there is a thread that keeps the process from exiting.
+            while not event.wait(_ANSWER_POLL):
+                if controller.aborted:
+                    raise Quit()
+                if delivery_ask and controller.cancel_requested:
+                    controller._on_ui(controller._cancel_delivery_asks)
+                    raise Back()
+            controller.awaiting_answer = False
+
+            if box.get("quit") or controller.aborted:
                 raise Quit()
-            if delivery_ask and controller.cancel_requested:
-                controller._on_ui(controller._cancel_delivery_asks)
+            value = box.get("value")
+            if value is BACK:
                 raise Back()
-        controller.awaiting_answer = False
 
-        if box.get("quit") or controller.aborted:
-            raise Quit()
-        value = box.get("value")
-        if value is BACK:
-            raise Back()
-
-        # A multi-select that returned several things is a batch about to happen.
-        # Reading it here means every service gets a queue and a confirmation
-        # without having to say so, which matters when there are 149 of them and
-        # most will never be edited again. ctx.batch() overrides this for the
-        # cases where the service knows a total before a picker can reveal it.
-        if isinstance(ask, Pick) and ask.multi and ask.scope != SCOPE_DELIVERY:
-            wanted = _selections(ask, value)
-            if len(wanted) > 1:
-                controller.hint_batch(len(wanted), choices=[
-                    choice for choice in ask.choices
-                    if any(choice.value is item or (
-                        isinstance(item, (str, int)) and choice.value == item
-                    ) for item in wanted)
-                ])
-        return value
+            # A multi-select that returned several things is a batch about to happen.
+            # Reading it here means every service gets a queue and a confirmation
+            # without having to say so, which matters when there are 149 of them and
+            # most will never be edited again. ctx.batch() overrides this for the
+            # cases where the service knows a total before a picker can reveal it.
+            if isinstance(ask, Pick) and ask.multi and ask.scope != SCOPE_DELIVERY:
+                wanted = _selections(ask, value)
+                if len(wanted) > 1:
+                    try:
+                        controller.hint_batch(len(wanted), choices=[
+                            choice for choice in ask.choices
+                            if any(choice.value is item or (
+                                isinstance(item, (str, int)) and choice.value == item
+                            ) for item in wanted)
+                        ])
+                    except Back:
+                        # Declining or backing out of the batch confirmation
+                        # returns to this multi-select picker so the user can
+                        # change their selection instead of jumping up a level.
+                        controller.batch_declined = False
+                        continue
+            return value
 
 
 class SessionController:
@@ -663,6 +682,7 @@ class SessionController:
         self.settings = service.settings
 
         #: the session's log, replayed by every screen that appears
+        self._state_lock = threading.Lock()
         self.log_lines: list[Any] = []
         self.hosts: list[AskHost] = []
         #: the last frame UniDL drew, so a screen that appears mid-download shows
@@ -784,6 +804,9 @@ class SessionController:
         #: does anyway.
         self._card_read = asyncio.Event()
         self._card_read.set()
+        self._delivery_dismissed = asyncio.Event()
+        self._delivery_dismissed.set()
+        self._close_flow_on_delivery_dismiss = False
         #: the session ended while a card was still up, so leaving is what happens
         #: once the user is done reading rather than immediately
         self._leave_when_read = False
@@ -842,24 +865,64 @@ class SessionController:
             )
 
     # ---------------------------------------------------------- host bookkeeping
+    def log_snapshot(self) -> list[Any]:
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return list(self.log_lines)
+        with lock:
+            return list(self.log_lines)
+
+    def _signal_event(self, event: asyncio.Event | None) -> None:
+        if event is None:
+            return
+        if self._on_ui_thread():
+            event.set()
+            return
+        loop = getattr(self.app, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(event.set)
+                return
+            except RuntimeError:
+                pass
+        event.set()
+
+    def _maybe_unregister(self) -> None:
+        self._ensure_worker_state()
+        with self._worker_lock:
+            idle = self._worker_count == 0
+        if idle and (self.finished or self.aborted) and not self.hosts:
+            unregister = getattr(self.app, "unregister_session", None)
+            if callable(unregister):
+                unregister(self)
+
+    def release_reserved_worker(self) -> None:
+        """Release a pre-reserved flow worker slot if drive() never started."""
+        if getattr(self, "_flow_worker_reserved", False):
+            self._flow_worker_reserved = False
+            self._worker_finished()
+
     def attach(self, host: AskHost) -> None:
         if host not in self.hosts:
             self.hosts.append(host)
-        host.replay(self.log_lines)
+        host.replay(self.log_snapshot())
 
     def detach(self, host: AskHost) -> None:
         if host in self.hosts:
             self.hosts.remove(host)
         if host is self.flow_screen:
             self.flow_screen = None
+            self._close_flow_on_delivery_dismiss = False
         if host is self.delivery:
             self.delivery = None
+            self._signal_event(getattr(self, "_delivery_dismissed", None))
         if host is self.root:
             # All three, not two. Keeping a reference to an unmounted screen 2
             # meant `host_for` handed the flow a screen with no widgets left, which
             # answers every later question with None instead of ending the session
             # - and it kept the whole controller alive in a reference cycle.
             self.root = None
+        self._maybe_unregister()
 
     def abort(self) -> None:
         """Leaving the service: stop the download and unblock the worker.
@@ -880,12 +943,15 @@ class SessionController:
         # for sockets and external downloader processes.  Keep this call
         # idempotent because both Back and application shutdown may reach it.
         self._shutdown_active_download()
-        # and a worker held behind a command card is waiting on something the user
-        # has just walked away from
+        # and a worker held behind a command card or held delivery screen is
+        # waiting on something the user has just walked away from
         self._leave_when_read = False
-        self._card_read.set()
+        self._signal_event(getattr(self, "_card_read", None))
+        self._signal_event(getattr(self, "_delivery_dismissed", None))
         for host in list(self.hosts):
             host.release()
+        self.release_reserved_worker()
+        self._maybe_unregister()
 
     def mark_root_back(self) -> None:
         """Remember a Back answered on the service menu itself.
@@ -943,6 +1009,7 @@ class SessionController:
             self._worker_count = max(0, self._worker_count - 1)
             if self._worker_count == 0:
                 self._workers_done.set()
+        self._maybe_unregister()
 
     def wait_for_workers(self, timeout: float | None = None) -> bool:
         """Wait a bounded time for service/retry workers to finish cleanup."""
@@ -1017,12 +1084,19 @@ class SessionController:
         if not isinstance(renderable, LogLine):
             text = str(renderable if renderable is not None else "")
             renderable = LogLine(blank=not text.strip(), body=text)
-        self.log_lines.append(renderable)
-        if len(self.log_lines) > LOG_LIMIT:
-            # Bounded like the widget it feeds. Unbounded, a long live capture
-            # grew this for ever while the screen could only ever show the last
-            # LOG_LIMIT lines anyway, so the extra was memory nobody could read.
-            del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                self.log_lines.append(renderable)
+                if len(self.log_lines) > LOG_LIMIT:
+                    del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
+        else:
+            self.log_lines.append(renderable)
+            if len(self.log_lines) > LOG_LIMIT:
+                # Bounded like the widget it feeds. Unbounded, a long live capture
+                # grew this for ever while the screen could only ever show the last
+                # LOG_LIMIT lines anyway, so the extra was memory nobody could read.
+                del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
         self._on_ui(self._write_all, renderable)
 
     def _write_all(self, renderable: Any) -> None:
@@ -1176,14 +1250,20 @@ class SessionController:
 
     def _remember_interface_failure(self, exc: Exception) -> None:
         """Record a UI failure without trying that failed UI route again."""
-        self.log_lines.append(
-            LogLine(
-                body=f"interface update failed: {type(exc).__name__}: {exc}",
-                state="error",
-            )
+        entry = LogLine(
+            body=f"interface update failed: {type(exc).__name__}: {exc}",
+            state="error",
         )
-        if len(self.log_lines) > LOG_LIMIT:
-            del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                self.log_lines.append(entry)
+                if len(self.log_lines) > LOG_LIMIT:
+                    del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
+        else:
+            self.log_lines.append(entry)
+            if len(self.log_lines) > LOG_LIMIT:
+                del self.log_lines[: len(self.log_lines) - LOG_LIMIT]
 
     def refresh_after_settings(self) -> None:
         for host in list(self.hosts):
@@ -1249,15 +1329,18 @@ class SessionController:
             return
         presenter = TextualPresenter(self)
         ctx = FlowContext(settings=self.settings, sink=_Sink(self))
-        answer = presenter.present(
-            ctx.confirm(
-                f"Download all {self.batch_total} titles?",
-                default=True,
-                # asked on screen 3, where the selection was made: no job exists
-                # yet, so there is nothing for screen 4 to be about
-                scope=SCOPE_FLOW,
+        try:
+            answer = presenter.present(
+                ctx.confirm(
+                    tr("session.batch.confirm", count=self.batch_total),
+                    default=True,
+                    # asked on screen 3, where the selection was made: no job exists
+                    # yet, so there is nothing for screen 4 to be about
+                    scope=SCOPE_FLOW,
+                )
             )
-        )
+        except Back:
+            answer = False
         if answer is False:
             self.batch_declined = True
             # The batch is over before it began, so the queue must stop waiting
@@ -1267,6 +1350,13 @@ class SessionController:
             # picked - a different title, from the menu - was skipped as though
             # it had been part of the batch that was turned down.
             self.batch_total = None
+            lock = getattr(self, "_state_lock", None)
+            if lock is not None:
+                with lock:
+                    self.pending_jobs = []
+            else:
+                self.pending_jobs = []
+            self.render_queue()
             self.post_log("batch cancelled", "warning")
             raise Back()
 
@@ -1287,6 +1377,11 @@ class SessionController:
     def title_delay_active(self) -> bool:
         return self._title_delay_active
 
+    def _refresh_delivery_keys(self) -> None:
+        delivery = self.delivery
+        if delivery is not None and getattr(delivery, "is_attached", True):
+            delivery.refresh_keys()
+
     def request_pause(self) -> bool:
         """Hold the running transfer without cancelling it. Returns False if already paused."""
         if (
@@ -1299,8 +1394,7 @@ class SessionController:
         self.pause_event.set()
         self.post_log("paused; Resume continues from this point", "warning")
         self.post_status(tr("delivery.status.paused"))
-        if self.delivery is not None:
-            self._on_ui(self.delivery.refresh_keys)
+        self._on_ui(self._refresh_delivery_keys)
         return True
 
     def request_resume_pause(self) -> bool:
@@ -1311,8 +1405,7 @@ class SessionController:
         self.post_log("resumed", "ok")
         if self.job_running:
             self.post_status(tr("delivery.status.downloading"))
-        if self.delivery is not None:
-            self._on_ui(self.delivery.refresh_keys)
+        self._on_ui(self._refresh_delivery_keys)
         return True
 
     def clear_pause(self) -> None:
@@ -1337,8 +1430,7 @@ class SessionController:
             self.batch_total = None
             self.post_log(tr("delivery.notify.finishing_recording"), "info")
             self.post_status(tr("delivery.status.finishing_recording"))
-            if self.delivery is not None:
-                self._on_ui(self.delivery.refresh_keys)
+            self._on_ui(self._refresh_delivery_keys)
         return True  # Repeated Back never escalates to a hard cancellation.
 
     def request_cancel(self) -> bool:
@@ -1371,8 +1463,7 @@ class SessionController:
             # only while there is something to stop: a cancellation asked for
             # between two titles must also wake the interruptible title delay.
             self.post_status(tr("delivery.status.cancelling"))
-        if self.delivery is not None:
-            self._on_ui(self.delivery.refresh_keys)
+        self._on_ui(self._refresh_delivery_keys)
         return True
 
     def _cancel_delivery_asks(self) -> None:
@@ -1399,8 +1490,7 @@ class SessionController:
         self._on_ui(self._cancel_delivery_asks)
         self.post_log("skipping this one; the rest of the queue carries on", "warning")
         self.post_status(tr("delivery.status.skipping"))
-        if self.delivery is not None:
-            self._on_ui(self.delivery.refresh_keys)
+        self._on_ui(self._refresh_delivery_keys)
         return True
 
     def clear_cancel(self) -> None:
@@ -1432,20 +1522,39 @@ class SessionController:
 
     def _start_job(self, playback: Playback) -> Job:
         identity = self._title_identity(getattr(playback, "title", None))
-        pending = self.pending_jobs
-        job = next((item for item in pending if item.state == QUEUED and (
-            (identity is not None and item.identity == identity)
-            or (item.details.save_name and item.details.save_name == playback.save_name)
-        )), None)
-        if job is None:
-            job = next((item for item in pending if item.state == QUEUED), None)
-        if job is not None:
-            pending.remove(job)
-            job.name, job.state, job.playback, job.attempts = playback.save_name, RUNNING, playback, 1
+        lock = getattr(self, "_state_lock", None)
+        abandoned = bool(self.batch_cancelled or self.batch_declined or self.leaving)
+
+        def _claim() -> Job:
+            pending = self.pending_jobs
+            job = next((item for item in pending if item.state == QUEUED and (
+                (identity is not None and item.identity == identity)
+                or (item.details.save_name and item.details.save_name == playback.save_name)
+            )), None)
+            if job is None:
+                job = next((item for item in pending if item.state == QUEUED), None)
+            if job is None and abandoned and pending:
+                # Pending rows were already settled as CANCELLED/SKIPPED before
+                # the generator finished unwinding; reuse the slot instead of
+                # duplicating rows in queue_jobs().
+                job = next((item for item in pending if (
+                    (identity is not None and item.identity == identity)
+                    or (item.details.save_name and item.details.save_name == playback.save_name)
+                )), pending[0])
+            if job is not None:
+                pending.remove(job)
+                job.name, job.state, job.playback, job.attempts = playback.save_name, RUNNING, playback, 1
+            else:
+                job = Job(name=playback.save_name, state=RUNNING, playback=playback,
+                          details=JobDetails(save_name=playback.save_name), identity=identity)
+            self.jobs.append(job)
+            return job
+
+        if lock is not None:
+            with lock:
+                job = _claim()
         else:
-            job = Job(name=playback.save_name, state=RUNNING, playback=playback,
-                      details=JobDetails(save_name=playback.save_name), identity=identity)
-        self.jobs.append(job)
+            job = _claim()
         self._snapshot_job(playback)
         self.render_queue()
         return job
@@ -1474,13 +1583,25 @@ class SessionController:
 
     def queue_jobs(self) -> list[Job]:
         """Visible rows, without changing authorization/retry queue semantics."""
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                return [*self.jobs, *self.pending_jobs]
         return [*self.jobs, *self.pending_jobs]
 
     def _settle_pending(self, state: str) -> None:
-        for job in getattr(self, "pending_jobs", ()):
-            if job.state == QUEUED:
-                job.state = state
-                job.note = tr("job.not_started")
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                for job in getattr(self, "pending_jobs", ()):
+                    if job.state == QUEUED:
+                        job.state = state
+                        job.note = tr("job.not_started")
+        else:
+            for job in getattr(self, "pending_jobs", ()):
+                if job.state == QUEUED:
+                    job.state = state
+                    job.note = tr("job.not_started")
         self.render_queue()
 
     def _seed_import_jobs(self, document: exports.Document) -> None:
@@ -1661,6 +1782,32 @@ class SessionController:
         host.show_ask(ask, box, event)
 
     @property
+    def batch_busy(self) -> bool:
+        """True while any job, retry, or inter-title batch delay is active."""
+        return bool(
+            self.job_running
+            or getattr(self, "_title_delay_active", False)
+            or self._retry_pending
+            or (not self.queue_complete and not self.aborted and not self.finished)
+        )
+
+    @property
+    def hold_delivery(self) -> bool:
+        """Keep screen 4 in front when a completed batch has failed rows.
+
+        Single-title failures still return straight to the parent picker, and
+        mid-batch failures never delay subsequent queued titles. Once the whole
+        batch has finished with any failed job, the next parent ask mounts
+        underneath DownloadScreen so the user can inspect details or retry
+        before pressing ^b to dismiss it.
+        """
+        if self.delivery is None or not self.queue_complete:
+            return False
+        rows = self.queue_jobs()
+        is_batch = len(rows) > 1 or (self.batch_total or 0) > 1
+        return is_batch and any(job.state == FAILED for job in rows)
+
+    @property
     def hold_flow(self) -> bool:
         """Screen 3 is showing a result that must not be popped out from under it.
 
@@ -1675,9 +1822,16 @@ class SessionController:
     async def host_for(self, scope: str) -> AskHost | None:
         """The screen that hosts asks of this scope, pushing or popping to suit."""
         if scope == SCOPE_ROOT:
-            # A command card you must not have taken off your screen is left up and
-            # the menu is mounted underneath it. Download results follow the flow
-            # back to its picker first, so they are closed before a root ask.
+            # A command card or failed-batch delivery screen that must stay on
+            # top is left in place while the menu mounts underneath it.
+            if self.hold_delivery:
+                if (
+                    self.flow_screen is not None
+                    and not self.hold_flow
+                    and not self.flow_screen.waiting
+                ):
+                    self._close_flow_on_delivery_dismiss = True
+                return self.root
             await self._close(self.delivery)
             if not self.hold_flow:
                 await self._close(self.flow_screen)
@@ -1689,24 +1843,40 @@ class SessionController:
             if self.delivery is not None:
                 return self.delivery
 
-        # A flow ask means the previous job, if any, is behind us. Both successful
-        # and failed jobs signal Back at their emit point; the service can then
-        # yield the exact picker that produced the title before this ask is shown.
-        await self._close(self.delivery)
+        # A flow ask means the previous job, if any, is behind us. Single titles
+        # and clean/cancelled batches close screen 4 automatically; a completed
+        # batch with failed rows stays in front while the parent picker mounts
+        # underneath (or waits until screen 4 is dismissed if no flow screen
+        # exists underneath yet).
+        if self.hold_delivery:
+            if self.flow_screen is not None:
+                return self.flow_screen
+            dismissed = getattr(self, "_delivery_dismissed", None)
+            if dismissed is not None:
+                dismissed.clear()
+                await dismissed.wait()
+            if self.aborted:
+                return None
+        else:
+            await self._close(self.delivery)
         if self.flow_screen is None:
             from .flow_screen import FlowScreen
 
             await self._wait_for_front()
+            if self.aborted:
+                return None
             screen = FlowScreen(self)
             self.flow_screen = screen
             await self.app.push_screen(screen)
         return self.flow_screen
 
-    async def delivery_screen(self) -> DownloadScreen:
+    async def delivery_screen(self) -> DownloadScreen | None:
         if self.delivery is None:
             from .download_screen import DownloadScreen
 
             await self._wait_for_front()
+            if self.aborted:
+                return None
             screen = DownloadScreen(self)
             self.delivery = screen
             await self.app.push_screen(screen)
@@ -1727,6 +1897,8 @@ class SessionController:
         ours = [screen for screen in (self.root, self.flow_screen, self.delivery) if screen is not None]
         waited = 0.0
         while waited < _OVERLAY_WAIT:
+            if self.aborted:
+                return
             current = self.app.screen
             if len(self.app.screen_stack) <= 1 or any(current is screen for screen in ours):
                 return
@@ -1759,6 +1931,8 @@ class SessionController:
             if self.app.screen is screen:
                 await self.app.pop_screen()
                 return
+            if self.aborted:
+                return
             if waited >= _OVERLAY_WAIT:
                 self.post_log("still waiting for the screen in front", "warning")
                 return
@@ -1788,24 +1962,31 @@ class SessionController:
         problem = ""
         while True:
             lines: list[str | tuple[str, str]] = [
-                f"{reason}. Automatic vault and service licence lookup could not continue.",
-                ("Stream", stream_label[:220]),
-                ("KID", expected or "not exposed by the fragment"),
+                tr("session.live.key_reason", reason=reason),
+                (tr("session.live.key_stream"), stream_label[:220]),
+                ("KID", expected or tr("session.live.key_not_exposed")),
             ]
             if automatic_error:
-                lines.append(f"Automatic lookup: {automatic_error}")
+                lines.append(tr("session.live.key_auto_lookup", error=automatic_error))
             if problem:
-                lines.append(f"That value was not accepted: {problem}")
+                lines.append(tr("session.live.key_rejected", problem=problem))
             ask = TextAsk(
-                title="Live recording needs a new content key",
-                placeholder=("32 hexadecimal KEY, or KID:KEY" if expected else "32 hexadecimal KID:KEY"),
+                title=tr("session.live.key_title"),
+                placeholder=(
+                    tr("session.live.key_placeholder_expected")
+                    if expected
+                    else tr("session.live.key_placeholder_pair")
+                ),
                 password=True,
                 lines=lines,
                 scope=SCOPE_DELIVERY,
             )
             event = threading.Event()
             box: dict[str, Any] = {}
-            self.app.call_from_thread(self.mount_ask, ask, box, event)
+            try:
+                self.app.call_from_thread(self.mount_ask, ask, box, event)
+            except RuntimeError as exc:
+                raise KeyboardInterrupt("live key entry cancelled") from exc
             while not event.wait(_ANSWER_POLL):
                 if self.aborted or self.cancel_requested:
                     raise KeyboardInterrupt("live key entry cancelled")
@@ -1823,10 +2004,14 @@ class SessionController:
                 key = normalize_hex(raw)
                 pair = (expected, key) if key else None
             if pair is None:
-                problem = "enter KID:KEY" if not expected else "enter KEY or KID:KEY"
+                problem = (
+                    tr("session.live.key_enter_pair")
+                    if not expected
+                    else tr("session.live.key_enter_key_or_pair")
+                )
                 continue
             if expected and pair[0] != expected:
-                problem = f"the KID must be {expected}"
+                problem = tr("session.live.key_must_match", expected=expected)
                 continue
             self.post_log(
                 f"manual live key accepted for {pair[0]}",
@@ -1855,7 +2040,10 @@ class SessionController:
 
         event = threading.Event()
         box: dict[str, Any] = {}
-        self.app.call_from_thread(self.mount_ask, ask, box, event)
+        try:
+            self.app.call_from_thread(self.mount_ask, ask, box, event)
+        except RuntimeError as exc:
+            raise Quit() from exc
         # the panel is where this is read; the log keeps a copy because scrollback
         # is where you go looking for a code the panel has already cleared
         for line in ask.as_text():
@@ -1889,15 +2077,16 @@ class SessionController:
         finally:
             self.awaiting_answer = False
             self.post_status("")
-            self._on_ui(self._clear_await)
+            self._on_ui(self._clear_await, event)
 
-    def _clear_await(self) -> None:
+    def _clear_await(self, event: threading.Event | None = None) -> None:
         for host in list(self.hosts):
-            if host is self.app.screen:
-                try:
-                    host.clear_ask()
-                except Exception:
-                    pass
+            if event is not None and getattr(host, "_ask_event", None) is not event:
+                continue
+            try:
+                host.clear_ask()
+            except Exception:
+                pass
 
     # ----------------------------------------------------------------- suspend
     async def run_suspended(self, ask: Suspend) -> Any:
@@ -2113,6 +2302,8 @@ class SessionController:
                 "the file supplies the manifest, headers and content keys"
             )
         for entry in document.entries:
+            if self.aborted or self.leaving or self.batch_cancelled:
+                return
             if entry.summary:
                 ctx.log(f"exported as: {entry.summary}")
             playback = entry.playback()
@@ -2277,8 +2468,7 @@ class SessionController:
         if delay is None:
             return
         self._title_delay_active = True
-        if self.delivery is not None:
-            self._on_ui(self.delivery.refresh_keys)
+        self._on_ui(self._refresh_delivery_keys)
         self.post_log(f"waiting {delay}s before next title: {playback.save_name}")
         try:
             remaining = delay
@@ -2299,8 +2489,7 @@ class SessionController:
         finally:
             self._title_delay_active = False
             self.post_status("")
-            if self.delivery is not None:
-                self._on_ui(self.delivery.refresh_keys)
+            self._on_ui(self._refresh_delivery_keys)
 
     def _run_job(self, job: Job, playback: Playback, presenter: TextualPresenter, ctx: FlowContext) -> str:
         """One title, start to finish, with the queue kept honest either way.
@@ -2379,7 +2568,7 @@ class SessionController:
         workers through one engine, and the second would inherit the first's
         cancellation event and its screens.
         """
-        if self.job_running or self._retry_pending or self.aborted:
+        if self.batch_busy or self.aborted:
             return 0
         jobs = [job for job in (wanted if wanted is not None else self.jobs) if job.retryable]
         if not jobs:
@@ -2408,6 +2597,15 @@ class SessionController:
         presenter = TextualPresenter(self)
         ctx = FlowContext(settings=self.settings, sink=_Sink(self), interactive=True)
         try:
+            # Open screen 4 before starting retry jobs when triggered from
+            # FlowScreen/ServiceScreen so any SCOPE_DELIVERY prompt (such as an
+            # interactive track picker) mounts on DownloadScreen instead of
+            # colliding with FlowScreen's active ask.
+            if self.delivery is None and not self.aborted and not self.leaving:
+                try:
+                    self.app.call_from_thread(self.delivery_screen)
+                except RuntimeError:
+                    return
             for job in jobs:
                 if self.aborted or self.leaving or self.batch_cancelled:
                     return
@@ -2582,17 +2780,17 @@ class SessionController:
                     ctx.pick(
                         playback.save_name,
                         [
-                            Choice("Download it now", "download"),
-                            Choice("Just save the command, do not download", "command"),
+                            Choice(tr("session.pick_action.download"), "download"),
+                            Choice(tr("session.pick_action.command"), "command"),
                             Choice(
-                                "Just list the tracks",
+                                tr("session.pick_action.list"),
                                 "list",
-                                detail="no licence request, nothing saved",
+                                detail=tr("session.pick_action.list_detail"),
                             ),
                             Choice(
-                                "Save an export file",
+                                tr("session.pick_action.export"),
                                 "export",
-                                detail="the manifest, the tracks and the keys, importable without an account or a CDM",
+                                detail=tr("session.pick_action.export_detail"),
                             ),
                         ],
                         scope=SCOPE_DELIVERY,
@@ -2929,6 +3127,9 @@ class SessionController:
                 else:
                     self.service.prepare_download(playback, self.post_log)
             except Exception as exc:
+                self.post_status("")
+                if sidecar_delivery_opened:
+                    self.post_frame([])
                 if self.cancel_requested:
                     return CANCELLED, "cancelled"
                 self.post_error(
@@ -2937,6 +3138,8 @@ class SessionController:
                     "No media was downloaded. Check the service session or subtitle settings.",
                 )
                 return FAILED, "sidecar preparation failed"
+            finally:
+                self.post_status("")
 
         # Every run leaves the same two artefacts behind, regardless of mode:
         # the command text file, and the KID:key pairs in the vault.
@@ -3097,7 +3300,7 @@ class SessionController:
         if result.cancelled:
             # not a failure: the user asked for this, so it is not coloured or
             # counted as something that went wrong
-            self._notify(f"Stopped {playback.save_name}")
+            self._notify(tr("session.notify.stopped", name=playback.save_name))
             return CANCELLED, "cancelled"
         if result.ok:
             completed = tuple(dict.fromkeys(result.artifacts)) or (result.output_dir,)
@@ -3120,7 +3323,7 @@ class SessionController:
                         dict.fromkeys((*[str(path) for path in result.artifacts],
                                        *[str(path) for path in attachment_paths]))
                     ))
-            self._notify(f"Downloaded {playback.save_name}")
+            self._notify(tr("session.notify.downloaded", name=playback.save_name))
             return DONE, ""
 
         self.post_error(
@@ -3128,7 +3331,7 @@ class SessionController:
             result.failure or f"native downloader exited with code {result.exit_code}.",
             "The log above has the native downloader details. ^l expands it.",
         )
-        self._notify(f"{playback.save_name} failed", severity="error")
+        self._notify(tr("session.notify.failed", name=playback.save_name), severity="error")
         return FAILED, f"native downloader exit {result.exit_code}"
 
     # live ------------------------------------------------------------------
@@ -3169,8 +3372,8 @@ class SessionController:
             try:
                 typed_limit = presenter.present(
                     ctx.text(
-                        "How long should this live recording run?",
-                        placeholder="00:00:00 for no limit, 3600, or 1h",
+                        tr("session.live.duration_title"),
+                        placeholder=tr("session.live.duration_placeholder"),
                         default=limit or "00:00:00",
                         scope=SCOPE_DELIVERY,
                     )
@@ -3188,17 +3391,17 @@ class SessionController:
                 try:
                     answer = presenter.present(
                         ctx.pick(
-                            f"{playback.save_name}: record this live stream?",
+                            tr("session.live.record_prompt", name=playback.save_name),
                             [
                                 Choice(
-                                    "Record it now",
+                                    tr("session.live.record_now"),
                                     "record",
-                                    detail="choose the live edge or a replay / DVR window next",
+                                    detail=tr("session.live.record_now_detail"),
                                 ),
                                 Choice(
-                                    "Save the command only",
+                                    tr("session.live.command_only"),
                                     "command",
-                                    detail="resolve the stream without starting a recorder",
+                                    detail=tr("session.live.command_only_detail"),
                                 ),
                             ],
                             cursor=0 if recording else 1,
@@ -3218,17 +3421,17 @@ class SessionController:
                     try:
                         source = presenter.present(
                             ctx.pick(
-                                "How should this live recording begin?",
+                                tr("session.live.begin_title"),
                                 [
                                     Choice(
-                                        "Record from the live edge",
+                                        tr("session.live.from_edge"),
                                         "edge",
-                                        detail="ask for a duration, then start with the next available segment",
+                                        detail=tr("session.live.from_edge_detail"),
                                     ),
                                     Choice(
-                                        "Detect the live replay / DVR window",
+                                        tr("session.live.detect_replay"),
                                         "replay",
-                                        detail="measure the selected tracks before offering replay choices",
+                                        detail=tr("session.live.detect_replay_detail"),
                                     ),
                                 ],
                                 cursor=1 if wants_replay else 0,
@@ -3271,28 +3474,33 @@ class SessionController:
                         continue
 
                     while True:  # exactly three replay/DVR choices
+                        window_text = _hms(window)
                         choices = [
                             Choice(
-                                f"Record the { _hms(window) } replay window as it stands",
+                                tr("session.live.replay_vod", window=window_text),
                                 "vod",
-                                detail=f"start { _hms(window) } before the live edge and stop near the current edge",
+                                detail=tr("session.live.replay_vod_detail", window=window_text),
                             ),
                             Choice(
-                                "Start at the replay window beginning and continue live",
+                                tr("session.live.replay_start"),
                                 "start",
-                                detail=f"start { _hms(window) } before the live edge, then keep recording past it",
+                                detail=tr("session.live.replay_start_detail", window=window_text),
                             ),
                             Choice(
-                                "Choose a range inside the replay window",
+                                tr("session.live.replay_offset"),
                                 "offset",
-                                detail="for example, 45 minutes before to 20 minutes before the live edge",
+                                detail=tr("session.live.replay_offset_detail"),
                             ),
                         ]
                         try:
                             chosen = str(
                                 presenter.present(
                                     ctx.pick(
-                                        f"{playback.save_name}: {_hms(window)} replay / DVR window detected",
+                                        tr(
+                                            "session.live.replay_detected",
+                                            name=playback.save_name,
+                                            window=window_text,
+                                        ),
                                         choices,
                                         scope=SCOPE_DELIVERY,
                                     )
@@ -3308,8 +3516,8 @@ class SessionController:
                             try:
                                 typed = presenter.present(
                                     ctx.text(
-                                        "Choose the replay range (positions from window start)",
-                                        placeholder="00:15:00-00:40:00 = 45 to 20 minutes before a 1-hour live edge",
+                                        tr("session.live.replay_range_title"),
+                                        placeholder=tr("session.live.replay_range_placeholder"),
                                         default="00:00:00",
                                         scope=SCOPE_DELIVERY,
                                     )
@@ -3433,12 +3641,16 @@ class SessionController:
     async def _open_delivery(self, playback: Playback, tracks: TrackSet) -> None:
         """Bring UniDL's screen up, just before it has something to show."""
         screen = await self.delivery_screen()
+        if screen is None:
+            return
         self._snapshot_job(playback, tracks)
         screen.describe(playback, tracks)
 
     async def _refresh_delivery(self, playback: Playback, tracks: TrackSet) -> None:
         """Refresh the delivery card after the selected-track probes finish."""
         screen = await self.delivery_screen()
+        if screen is None:
+            return
         self._snapshot_job(playback, tracks)
         screen.describe(playback, tracks, reset_clock=False)
 
@@ -3567,10 +3779,19 @@ class SessionController:
                 host.clear_panel()
             except Exception:
                 pass
-        # Do not pop the flow page here or in the Back handler. The next ask
+        # Do not pop the flow page while the flow is still running: the next ask
         # restores its input/picker on that page, or host_for closes it before
-        # mounting the service root. One owner avoids racing widget unmount.
+        # mounting the service root. Once the flow has already finished, no next
+        # ask is coming, so pop the finished flow page cleanly.
         self._leave_when_read = False
+        if (
+            self.finished
+            and not self.aborted
+            and self.flow_screen is not None
+            and self.app.screen is self.flow_screen
+            and len(self.app.screen_stack) > 1
+        ):
+            self.app.pop_screen()
         return True
 
     def _notify(self, message: str, severity: str = "information") -> None:
@@ -3625,7 +3846,7 @@ class SessionController:
         ]
         preselected = [index for index in _selected_track_indexes(visible, tracks.selected) if not blocked[index]]
         ask = ctx.pick(
-            f"Tracks · {playback.save_name}",
+            tr("session.tracks.title", name=playback.save_name),
             choices,
             multi=True,
             preselected=preselected,

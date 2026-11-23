@@ -27,6 +27,7 @@ class JustWatchSettingsScreen(Screen[None]):
     """Edit catalogue search and availability regions without conflating them."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Change", show=True),
@@ -103,9 +104,18 @@ class JustWatchSettingsScreen(Screen[None]):
             )
         options.highlighted = min(highlighted or 0, len(rows) - 1)
 
+    def action_activate(self) -> None:
+        options = self.query_one("#justwatch-settings-list", OptionList)
+        index = options.highlighted
+        if index is not None:
+            self._open_row(index)
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        if event.option_index == 0:
+        self._open_row(event.option_index)
+
+    def _open_row(self, index: int) -> None:
+        if index == 0:
             current = search_region_from(self.globals)
 
             def selected(code: str | None) -> None:

@@ -28,6 +28,27 @@ _MOUSE_OFF = (
 _MODE_RECOVERY_TIMEOUT = 1.0
 
 
+def _decode_console_keys(keys: list[str], pending_surrogate: str = "") -> tuple[str, str]:
+    """Combine UTF-16 code units from ReadConsoleInputW across read boundaries.
+
+    Windows delivers astral Unicode characters (emoji, CJK Extension B) as two
+    consecutive UTF-16 KEY_EVENT records that may straddle two reads. Buffer a
+    trailing lone high surrogate for the next read and replace truly unpaired
+    surrogates so decoding can never crash the console event thread.
+    """
+    raw = pending_surrogate + "".join(keys)
+    if not raw:
+        return "", ""
+    next_pending = ""
+    if 0xD800 <= ord(raw[-1]) <= 0xDBFF:
+        next_pending = raw[-1]
+        raw = raw[:-1]
+    if not raw:
+        return "", next_pending
+    text = raw.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    return text, next_pending
+
+
 class UniDLEventMonitor(win32.EventMonitor):
     """Console reader that preserves printable Unicode from AltGr layouts.
 
@@ -51,8 +72,13 @@ class UniDLEventMonitor(win32.EventMonitor):
             input_records = (win32.INPUT_RECORD * max_events)()
             read_console_input_w = win32.KERNEL32.ReadConsoleInputW
             keys: list[str] = []
+            pending_surrogate = ""
+        except Exception as error:
+            self.app.log.error("EVENT MONITOR INIT ERROR", error)
+            return
 
-            while not exit_requested():
+        while not exit_requested():
+            try:
                 for event in parser.tick():
                     self.process_event(event)
 
@@ -89,13 +115,15 @@ class UniDLEventMonitor(win32.EventMonitor):
                         new_size = (size.X, size.Y)
 
                 if keys:
-                    text = "".join(keys).encode("utf-16", "surrogatepass").decode("utf-16")
-                    for event in parser.feed(text):
-                        self.process_event(event)
+                    text, pending_surrogate = _decode_console_keys(keys, pending_surrogate)
+                    if text:
+                        for event in parser.feed(text):
+                            self.process_event(event)
                 if new_size is not None:
                     self.on_size_change(*new_size)
-        except Exception as error:
-            self.app.log.error("EVENT MONITOR ERROR", error)
+            except Exception as error:
+                self.app.log.error("EVENT MONITOR ERROR", error)
+                pending_surrogate = ""
 
 
 def restore_terminal_state_windows(

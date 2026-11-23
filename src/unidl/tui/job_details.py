@@ -105,6 +105,7 @@ class JobDetailsScreen(ModalScreen[None]):
         super().__init__()
         self.controller = controller
         self.job = job
+        self._last_title: str | None = None
         self._last_body: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -125,6 +126,15 @@ class JobDetailsScreen(ModalScreen[None]):
         self.query_one("#job-modal-scroll", VerticalScroll).focus()
         self.set_interval(0.5, self.refresh_details)
 
+    def relocalize(self) -> None:
+        self._last_title = None
+        self._last_body = None
+        self.query_one("#job-previous", Button).label = f"‹ {tr('modal.previous')}"
+        self.query_one("#job-next", Button).label = f"{tr('modal.next')} ›"
+        self.query_one("#job-retry", Button).label = tr("job.retry")
+        self.query_one("#job-modal-hint", Static).update(tr("job.close_hint"))
+        self.refresh_details()
+
     def _jobs(self) -> list:
         queue = getattr(self.controller, "queue_jobs", None)
         return queue() if callable(queue) else list(self.controller.jobs)
@@ -137,7 +147,10 @@ class JobDetailsScreen(ModalScreen[None]):
         title = Text(tr("job.title"), style=f"bold {self.app.palette.fg}")
         if index >= 0:
             title.append(f"  {index + 1}/{len(jobs)}", style=self.app.palette.dim)
-        self.query_one("#job-modal-title", Static).update(title)
+        title_key = f"{title.plain}:{self.app.palette.fg}"
+        if title_key != self._last_title:
+            self._last_title = title_key
+            self.query_one("#job-modal-title", Static).update(title)
         lines = [details.title or job.name, ""]
         def field(key: str, value: object) -> None:
             if value not in ("", None):
@@ -175,7 +188,8 @@ class JobDetailsScreen(ModalScreen[None]):
         if details.chapters or details.attachments:
             lines.extend(("", tr("job.metadata", chapters=details.chapters, attachments=details.attachments)))
         body = "\n".join(lines)
-        if body != self._last_body:
+        selecting = getattr(self, "text_selection", None) is not None
+        if body != self._last_body and (not selecting or self._last_body is None):
             self._last_body = body
             self.query_one("#job-modal-body", Static).update(Text(visual_text(body)))
         self.query_one("#job-previous", Button).disabled = index <= 0
@@ -183,7 +197,8 @@ class JobDetailsScreen(ModalScreen[None]):
         retry = self.query_one("#job-retry", Button)
         retry.display = bool(getattr(job, "retryable", False))
         retry.disabled = bool(
-            getattr(self.controller, "job_running", False)
+            getattr(self.controller, "batch_busy", False)
+            or getattr(self.controller, "job_running", False)
             or getattr(self.controller, "_retry_pending", False)
             or getattr(self.controller, "aborted", False)
         )
@@ -216,7 +231,11 @@ class JobDetailsScreen(ModalScreen[None]):
             if not self.query_one("#job-retry", Button).disabled:
                 job = self.job
                 self.dismiss(None)
-                self.controller.retry([job])
+                started = self.controller.retry([job])
+                if started:
+                    self.app.notify(tr("queue.retrying_name", name=job.name), timeout=3)
+                else:
+                    self.app.notify(tr("queue.retry_busy"), timeout=3)
 
     def action_close(self) -> None:
         self.dismiss(None)

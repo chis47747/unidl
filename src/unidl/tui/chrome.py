@@ -57,7 +57,7 @@ class ChromeButton(Static):
     def _markup(key: str, label: str, enabled: bool) -> str:
         text = phrase(label)
         if not enabled:
-            return f"[dim]{key}[/dim] [dim]{text}[/dim]"
+            return f"[$gutter]{key} {text}[/]"
         return f"[$accent]{key}[/] [bold]{text}[/bold]"
 
     def relocalize(self) -> None:

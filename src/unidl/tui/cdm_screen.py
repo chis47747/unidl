@@ -237,6 +237,8 @@ class CdmScreen(Screen[str | None]):
                 missing = tr("cdm.no_devices")
             self.query_one("#crumbs-pill", Static).update(f"[$warn]{missing} - {detail}[/]")
             option_list.add_option(Option(f"  [$dim]{tr('cdm.nothing')}[/]", disabled=True))
+            if self.allow_default:
+                option_list.highlighted = 0
             return
 
         shown = [
@@ -382,14 +384,27 @@ class CdmScreen(Screen[str | None]):
         self.dismiss(device.name)
 
     def action_cursor(self, delta: int) -> None:
-        """Move the list while the filter field has the focus."""
+        """Move the list while the filter field has the focus, skipping disabled rows."""
         option_list = self.query_one("#cdm-list", OptionList)
         count = option_list.option_count
         if not count:
             return
+        enabled = [i for i in range(count) if not option_list.get_option_at_index(i).disabled]
+        if not enabled:
+            return
         current = option_list.highlighted
-        start = current if current is not None else (-1 if delta > 0 else count)
-        option_list.highlighted = max(0, min(count - 1, start + delta))
+        if current is None:
+            option_list.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            return
+        if delta in (-1, 1):
+            pos = next((i for i, idx in enumerate(enabled) if idx == current), None)
+            if pos is None:
+                option_list.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            else:
+                option_list.highlighted = enabled[max(0, min(len(enabled) - 1, pos + delta))]
+            return
+        target = max(0, min(count - 1, current + delta))
+        option_list.highlighted = min(enabled, key=lambda idx: (abs(idx - target), idx))
 
     def action_reveal(self) -> None:
         self.app.open_path(self.app.config.paths.cdm)

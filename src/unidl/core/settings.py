@@ -1409,6 +1409,9 @@ TRACK_SETTINGS: list[Setting] = [
         "Audio profile",
         [
             ("any", "Any"),
+            ("original", "Original / unprocessed"),
+            ("drc", "Stable Volume (DRC)"),
+            ("voice_boost", "Voice Boost"),
             ("atmos", "Atmos"),
             ("main", "Main / primary"),
             ("description", "Audio description"),
@@ -1712,6 +1715,41 @@ class SettingsStore:
             self.save()
         return changed
 
+    def rename_vault_target_references(self, old_name: str, new_name: str) -> int:
+        """Update saved per-service vault target lists after a vault rename or delete."""
+        from . import vaults
+
+        old = str(old_name or "").strip().casefold()
+        if not old:
+            return 0
+        replacement = str(new_name or "").strip()
+        target_keys = ("vault_read_targets", "vault_write_targets", "vault_search_targets")
+        changed = 0
+        for service_id, values in tuple(self._data.items()):
+            if service_id == GLOBAL_SCOPE:
+                continue
+            for key in target_keys:
+                if key not in values:
+                    continue
+                selected = vaults.parse_targets(values.get(key, ""))
+                if selected is None:
+                    continue
+                rewritten: list[str] = []
+                hit = False
+                for name in selected:
+                    if name.casefold() == old:
+                        hit = True
+                        if replacement:
+                            rewritten.append(replacement)
+                    else:
+                        rewritten.append(name)
+                if hit:
+                    self.put(service_id, key, vaults.serialize_targets(tuple(rewritten)))
+                    changed += 1
+        if changed:
+            self.save()
+        return changed
+
 
 class Settings:
     """Live view of one service's settings. Reads and writes go to the store."""
@@ -1830,6 +1868,15 @@ class Settings:
         if key == "license_action":
             self.clear(key, persist=False)
         coerced = spec.coerce(value) if spec else value
+        if (
+            spec is not None
+            and spec.key == "subtitle_output"
+            and spec.inherit_global
+            and self.parent is not None
+            and coerced == ""
+        ):
+            self.clear(key, persist=persist)
+            return bool(spec.resets_session)
         self._overrides.pop(key, None)
         self._store.put(self.service_id, key, coerced)
         if persist:

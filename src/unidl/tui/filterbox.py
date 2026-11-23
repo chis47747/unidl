@@ -62,7 +62,10 @@ def as_number(needle: str) -> int | None:
     pasting "²" into a filter took the app down.
     """
     text = wanted(needle)
-    return int(text) if text.isascii() and text.isdigit() and text != "0" else None
+    if text.isascii() and text.isdigit():
+        number = int(text)
+        return number if number > 0 else None
+    return None
 
 
 __all__ = ["DEFAULT_HINT", "FILTER_MIN", "FilterBox", "as_number", "matches", "wanted"]

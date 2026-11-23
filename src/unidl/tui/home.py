@@ -24,6 +24,8 @@ options. The input sits below the list, where what you type lands.
 
 from __future__ import annotations
 
+import os
+import shlex
 from pathlib import Path
 
 from textual import work
@@ -39,7 +41,7 @@ from ..core import drm as drm_registry
 from ..core import service_catalog
 from ..core.cdm import WIDEVINE
 from ..core.devreload import ReloadError
-from ..core.i18n import phrase, tr
+from ..core.i18n import cell_width, get_translator, phrase, tr
 from ..core.output_paths import finished_download_root
 from ..core.service import Service
 from . import banner
@@ -81,9 +83,10 @@ def _is_number(value: str) -> bool:
     """Whether ``int`` will accept this. ``isdigit`` alone will not do.
 
     Superscripts and other numeric forms answer True to ``isdigit`` and then raise
-    out of ``int``, and this is tested on every keystroke.
+    out of ``int``, and this is tested on every keystroke. Platform numbers start
+    at 1, so ``0`` stays a filter term rather than a bogus address.
     """
-    return value.isascii() and value.isdigit()
+    return value.isascii() and value.isdigit() and int(value) > 0
 
 
 class HomeScreen(Screen):
@@ -94,7 +97,7 @@ class HomeScreen(Screen):
         Binding("ctrl+f", "app.global_search", "Search", show=False),
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
-        Binding("ctrl+v", "cycle_service_view", "Service view", show=False),
+        Binding("ctrl+g", "cycle_service_view", "Service view", show=False),
         Binding("v", "cycle_service_view", "Service view", show=False),
         Binding("slash", "app.global_search", "Search", show=False),
         Binding("s", "app.global_settings", "Settings", show=False),
@@ -114,6 +117,7 @@ class HomeScreen(Screen):
         self._heads: list[Static | None] = []
         self._grids: list[Grid] = []
         self._numbered: dict[int, type[Service]] = {}
+        self._built_service_ids: tuple[str, ...] = ()
         self._no_match: Static | None = None
         self._chip_widths: dict[str, int] = {}
         self._ready_result: tuple[str, int, int] | None = None
@@ -123,6 +127,8 @@ class HomeScreen(Screen):
         self._import_generation = 0
         self._columns = 1
         self._update_info = None
+        self._rendered_locale = ""
+        self._skip_resume_refresh = False
 
     # -------------------------------------------------------------- composition
     def compose_header(self) -> ComposeResult:
@@ -175,7 +181,7 @@ class HomeScreen(Screen):
             ("d", "after picking"),
             ("^f", "search"),
             ("^s", "settings"),
-            ("^v", "service view"),
+            ("^g", "service view"),
             ("^r", "dev reload"),
             ("^p", "commands"),
         )
@@ -183,6 +189,7 @@ class HomeScreen(Screen):
     def on_mount(self) -> None:
         if not self.USES_SERVICE_GRID:
             return
+        self._rendered_locale = get_translator().locale
         self._render_caption()
         self.query_one("#prompt-hint", Static).update(
             f"[$dim]{tr('home.prompt_hint')}[/]"
@@ -197,11 +204,16 @@ class HomeScreen(Screen):
         self.refresh_env()
 
     def on_screen_resume(self) -> None:
-        if self.USES_SERVICE_GRID:
-            self.relocalize()
+        if self._skip_resume_refresh:
+            self._skip_resume_refresh = False
+        elif self.USES_SERVICE_GRID:
+            if self._rendered_locale != get_translator().locale:
+                self.relocalize()
+            self.rebuild()
         self.call_later(self.app.refresh_home_interface)
 
     def relocalize(self) -> None:
+        self._rendered_locale = get_translator().locale
         for chrome in self.query(Chrome):
             chrome.refresh_locale()
         for bar in self.query(KeyBar):
@@ -218,7 +230,11 @@ class HomeScreen(Screen):
         self._render_setup_note()
 
     def refresh_banner(self) -> None:
-        self.query_one("#banner", Static).update(banner.art(self.size.width, "$accent"))
+        width = self.size.width or self.app.size.width
+        height = self.size.height or self.app.size.height or None
+        self.query_one("#banner", Static).update(
+            banner.art(width, "$accent", height=height)
+        )
 
     def _render_caption(self) -> None:
         version, copyright_text = banner.caption_parts("$muted", "$gutter")
@@ -277,29 +293,31 @@ class HomeScreen(Screen):
         name_colour = "$foreground" if device != "none" else "$warn"
         self._set_chip(
             "chip-cdm",
-            f"[$muted]{cdm_word}[/] {source}[{name_colour}]{device_shown}[/]",
+            f"[$muted]{cdm_word}[/] {source}[{name_colour}]{visual_markup(device_shown)}[/]",
             f"{cdm_word} {device_source} {device_shown}".replace("  ", " "),
         )
         self._set_chip(
             "chip-drm",
-            f"[$muted]{drm_word}[/] [{system_colour}]{system_label}[/]",
+            f"[$muted]{drm_word}[/] [{system_colour}]{visual_markup(system_label)}[/]",
             f"{drm_word} {system_label}",
         )
         action = phrase(_MODE_LABEL.get(mode, mode))
         self._set_chip(
             "chip-mode",
-            f"[$muted]{after_word}[/] [$foreground]{action}[/]"
+            f"[$muted]{after_word}[/] [$foreground]{visual_markup(action)}[/]"
             + (f"  [$warn]{tr('home.chip.debug')}[/]" if debug else ""),
             f"{after_word} {action}{debug}",
         )
-        config_chip = self.query_one("#chip-config", StatusChip)
+        found_chip = self.query("#chip-config")
+        config_chip = found_chip.first(StatusChip) if found_chip else None
         if config.loaded_config is not None:
             self._set_chip(
                 "chip-config",
                 f"[$muted]{config_word}[/] [$manifest]{visual_markup(config.loaded_config.name)}[/]",
                 f"{config_word} {config.loaded_config.name}",
             )
-            config_chip.tooltip = str(config.loaded_config)
+            if config_chip is not None:
+                config_chip.tooltip = str(config.loaded_config)
         else:
             self._set_chip(
                 "chip-config",
@@ -312,13 +330,14 @@ class HomeScreen(Screen):
                 f"[$warn]{config_word}[/] [$muted]{tr('home.chip.config_create')}[/]",
                 f"{config_word} {tr('home.chip.config_create')}",
             )
-            config_chip.tooltip = tr("home.chip.config_create_tip")
-            if config.missing_config is not None:
-                config_chip.tooltip = "\n".join((
-                    tr("ready.config_missing", path=config.missing_config),
-                    f"{tr('ready.runtime_home')}: {config.paths.home}",
-                    tr("home.chip.config_create_tip"),
-                ))
+            if config_chip is not None:
+                config_chip.tooltip = tr("home.chip.config_create_tip")
+                if config.missing_config is not None:
+                    config_chip.tooltip = "\n".join((
+                        tr("ready.config_missing", path=config.missing_config),
+                        f"{tr('ready.runtime_home')}: {config.paths.home}",
+                        tr("home.chip.config_create_tip"),
+                    ))
         self._refresh_ready_chip()
         self._refresh_import_chip()
         self._fit_statusline()
@@ -454,7 +473,7 @@ class HomeScreen(Screen):
             folder = service_catalog.user_service_root(self.app.config.paths.home)
             service_note.update(
                 f"[$warn]{tr('home.setup_services')}[/]\n"
-                f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"
+                f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
             )
             service_note.display = True
         else:
@@ -465,7 +484,7 @@ class HomeScreen(Screen):
             folder = self.app.config.paths.cdm
             note.update(
                 f"[$warn]{tr('home.setup_cdm')}[/] [$muted]· {tr('home.setup_cdm_detail')}[/]\n"
-                f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{folder}[/][$dim]')}[/]"
+                f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
             )
             note.display = True
 
@@ -483,7 +502,7 @@ class HomeScreen(Screen):
         changed = chip.content != markup
         if changed:
             chip.update(markup)
-        self._chip_widths[chip_id] = len(plain)
+        self._chip_widths[chip_id] = cell_width(plain)
         return changed
 
     @staticmethod
@@ -547,6 +566,7 @@ class HomeScreen(Screen):
 
     def action_open_config(self) -> None:
         self.app.open_config()
+        self.refresh_env()
 
     def action_open_readiness(self) -> None:
         """The whole report, from the chip that summarises it."""
@@ -580,7 +600,10 @@ class HomeScreen(Screen):
         nxt = order[(order.index(current) + 1) % len(order)] if current in order else order[0]
         self.app.globals.set("after_resolve", nxt)
         self.refresh_env()
-        self.notify(f"After picking a title: {_MODE_LABEL[nxt]}", timeout=3)
+        self.notify(
+            tr("home.notify.after_picking", action=phrase(_MODE_LABEL[nxt])),
+            timeout=3,
+        )
 
     def _service_view(self) -> str:
         value = str(self.app.globals.get("service_list_view", SERVICE_VIEWS[0]) or "")
@@ -613,7 +636,10 @@ class HomeScreen(Screen):
         await self._rebuild_services(needle)
         self.query_one("#filter", Input).focus()
         self._render_service_view()
-        self.notify(f"Service list: {tr(f'home.view.{view}')}", timeout=3)
+        self.notify(
+            tr("home.notify.service_view", view=tr(f"home.view.{view}")),
+            timeout=3,
+        )
 
     def action_show_about(self) -> None:
         from .about_screen import AboutScreen
@@ -628,12 +654,16 @@ class HomeScreen(Screen):
     @work(thread=True, exclusive=True, group="update-check")
     def check_updates(self) -> None:
         """Check public release metadata without delaying the first Home paint."""
-        from ..core.update import check_for_updates
+        from ..core.update import UpdateInfo, check_for_updates
 
         try:
             result = check_for_updates()
-        except Exception:  # noqa: BLE001 - update discovery must never affect startup
-            result = None
+        except Exception as exc:  # noqa: BLE001 - update discovery must never affect startup
+            result = UpdateInfo(
+                current_version=__version__,
+                checked=False,
+                error=str(exc) or "update check failed",
+            )
         try:
             self.app.call_from_thread(self._set_update_info, result)
         except (RuntimeError, AttributeError):
@@ -677,17 +707,24 @@ class HomeScreen(Screen):
             match = next((d for d in self.app.devices() if d.system == system.id), None)
             if match is not None:
                 self.app.set_device(match.name)
-                self.notify(f"{system.label}, using {match.name}", timeout=4)
+                self.notify(
+                    tr("home.notify.drm_using", system=system.label, device=match.name),
+                    timeout=4,
+                )
             else:
                 folder = self.app.config.paths.cdm / system.id
                 self.notify(
-                    f"{system.label} selected, but no {system.suffix} device found. "
-                    f"Put one in {folder}",
+                    tr(
+                        "home.notify.drm_missing",
+                        system=system.label,
+                        suffix=system.suffix,
+                        folder=folder,
+                    ),
                     severity="warning",
                     timeout=8,
                 )
         else:
-            self.notify(f"DRM system: {system.label}", timeout=3)
+            self.notify(tr("home.notify.drm_system", system=system.label), timeout=3)
 
         if not system.available:
             self.notify(system.install_hint, severity="warning", timeout=8)
@@ -708,9 +745,12 @@ class HomeScreen(Screen):
             found = next((d for d in self.app.devices() if d.name == name), None)
             if found is not None and found.system != str(self.app.globals.get("drm_system")):
                 self.app.globals.set("drm_system", found.system)
-                self.notify(f"{name} is a {found.system} device; switched to it", timeout=5)
+                self.notify(
+                    tr("home.notify.cdm_switched", name=name, system=found.system),
+                    timeout=5,
+                )
             else:
-                self.notify(f"CDM: {name}", timeout=3)
+                self.notify(tr("home.notify.cdm_selected", name=name), timeout=3)
             self.refresh_env()
 
         self.app.push_screen(CdmScreen(current=current, system=system), _chosen)
@@ -755,6 +795,7 @@ class HomeScreen(Screen):
         self._columns = self._column_count()
 
         services = list(self.app.home_services)
+        self._built_service_ids = tuple(service.ID for service in services)
         self._render_services_heading(len(services))
         groups = self._groups_for_view(services)
         show_group_heading = self._service_view() != "alphabetical"
@@ -797,7 +838,13 @@ class HomeScreen(Screen):
             return sorted(group, key=lambda service: service.NAME.lower())
 
         if view == "alphabetical":
-            return [(tr("home.section.services"), f"{len(services)} available", alphabetical(services))]
+            return [
+                (
+                    tr("home.section.services"),
+                    tr("home.count_available", count=len(services)),
+                    alphabetical(services),
+                )
+            ]
 
         buckets: dict[str, list[type[Service]]] = {}
         for service in services:
@@ -817,7 +864,7 @@ class HomeScreen(Screen):
             return [
                 (
                     self._country_label(code),
-                    f"{len(buckets[code])} available",
+                    tr("home.count_available", count=len(buckets[code])),
                     alphabetical(buckets[code]),
                 )
                 for code in order
@@ -830,7 +877,11 @@ class HomeScreen(Screen):
             "audio_video": tr("home.media.audio_video"),
         }
         return [
-            (labels[code], f"{len(buckets[code])} available", alphabetical(buckets[code]))
+            (
+                labels[code],
+                tr("home.count_available", count=len(buckets[code])),
+                alphabetical(buckets[code]),
+            )
             for code in order
             if code in buckets
         ]
@@ -852,7 +903,7 @@ class HomeScreen(Screen):
         summary = self.query_one("#service-list-summary", Static)
         summary.update(
             f"[$muted]{tr('home.section.services').upper()}[/]  "
-            f"[$dim]{count} available[/]"
+            f"[$dim]{tr('home.count_available', count=count)}[/]"
         )
         self._render_service_view()
 
@@ -893,10 +944,19 @@ class HomeScreen(Screen):
         return number
 
     def rebuild(self, needle: str | None = None) -> None:
-        """Re-apply the filter. Cells exist already; this only hides and shows."""
+        """Re-apply the filter, or rebuild the grid when home services changed."""
         if needle is None:
             found = self.query("#filter")
             needle = found.first(Input).value if found else ""
+        if self.USES_SERVICE_GRID:
+            current_ids = tuple(service.ID for service in self.app.home_services)
+            if current_ids != self._built_service_ids:
+                self.run_worker(
+                    self._rebuild_services(needle),
+                    exclusive=True,
+                    group="home-grid-rebuild",
+                )
+                return
         self.apply_filter(needle)
 
     def apply_filter(self, needle: str) -> None:
@@ -930,9 +990,8 @@ class HomeScreen(Screen):
                 # escaped: the needle is whatever was typed, and "[" made the
                 # message erase the very thing it was reporting - "[/]" crashed it
                 self._no_match.update(
-                    f"[$foreground]Nothing matches '{visual_markup(needle)}'[/]\n"
-                    f"[$dim]Try fewer letters, or paste a video URL and unidl will "
-                    f"work out which platform it belongs to.[/]"
+                    f"[$foreground]{tr('home.no_match_title', needle=visual_markup(needle))}[/]\n"
+                    f"[$dim]{tr('home.no_match_hint')}[/]"
                 )
                 self._no_match.display = True
             else:
@@ -965,7 +1024,7 @@ class HomeScreen(Screen):
         someone using unshackle will call this platform, and typing it here has
         to find the same thing.
         """
-        return f"[$gutter]{number:>3}[/]  {service.NAME}  [$gutter]{service.tag()}[/]"
+        return f"[$gutter]{number:>3}[/]  {visual_markup(service.NAME)}  [$gutter]{visual_markup(service.tag())}[/]"
 
     # -------------------------------------------------------------- navigation
     def _shown(self) -> list[list[ServiceCell]]:
@@ -1003,7 +1062,11 @@ class HomeScreen(Screen):
                 cells[target].focus()
             return
 
-        target = index + rows * self._columns
+        columns = max(1, self._columns)
+        col = index % columns
+        current_row = index // columns
+        last_row = (len(cells) - 1) // columns
+        target = index + rows * columns
         if 0 <= target < len(cells):
             cells[target].focus()
             return
@@ -1013,10 +1076,15 @@ class HomeScreen(Screen):
                 self.query_one("#filter", Input).focus()
             else:
                 previous = shown[section - 1]
-                previous[min(index, len(previous) - 1)].focus()
+                prev_last_row_start = ((len(previous) - 1) // columns) * columns
+                previous[min(prev_last_row_start + col, len(previous) - 1)].focus()
+        elif current_row < last_row:
+            # The final row of this section is shorter than ``columns``:
+            # land on its last cell instead of skipping the row entirely.
+            cells[-1].focus()
         elif section + 1 < len(shown):
             following = shown[section + 1]
-            following[min(index % self._columns, len(following) - 1)].focus()
+            following[min(col, len(following) - 1)].focus()
         else:
             self.query_one("#filter", Input).focus()
 
@@ -1048,8 +1116,8 @@ class HomeScreen(Screen):
         """Explicitly reload one service package; never watch or patch sessions."""
         if not bool(self.app.globals.get("debug", False)):
             self.notify(
-                "Turn on Debug mode in global Settings before reloading service code.",
-                title="Developer reload is off",
+                tr("home.notify.reload_debug_off"),
+                title=tr("home.notify.reload_debug_off_title"),
                 severity="warning",
                 timeout=6,
             )
@@ -1057,8 +1125,8 @@ class HomeScreen(Screen):
         service = self._reload_target()
         if service is None:
             self.notify(
-                "Highlight one platform, enter its exact id, or filter to one result first.",
-                title="Choose a service to reload",
+                tr("home.notify.reload_pick"),
+                title=tr("home.notify.reload_pick_title"),
                 severity="warning",
                 timeout=6,
             )
@@ -1069,7 +1137,10 @@ class HomeScreen(Screen):
             result = self.app.reload_service_code(service)
         except ReloadError as exc:
             self.notify(
-                str(exc), title=f"Could not reload {service.NAME}", severity="error", timeout=9
+                str(exc),
+                title=tr("home.notify.reload_fail_title", name=service.NAME),
+                severity="error",
+                timeout=9,
             )
             return
 
@@ -1078,10 +1149,14 @@ class HomeScreen(Screen):
         self.refresh_env()
         count = len(result.modules)
         self.notify(
-            f"Reloaded {service.NAME}: {count} module{'s' if count != 1 else ''}, "
-            f"generation {result.generation}, {result.seconds:.2f}s. "
-            "The next session uses the new code.",
-            title="Service code reloaded",
+            tr(
+                "home.notify.reload_done",
+                name=service.NAME,
+                modules=tr("home.notify.modules", count=count),
+                generation=result.generation,
+                seconds=f"{result.seconds:.2f}",
+            ),
+            title=tr("home.notify.reload_done_title"),
             timeout=7,
         )
 
@@ -1117,11 +1192,40 @@ class HomeScreen(Screen):
             if service is not None:
                 self._open(service)
             else:
-                self.notify(f"No platform numbered {value}", severity="warning", timeout=3)
+                self.notify(
+                    tr("home.notify.no_platform_number", value=value),
+                    severity="warning",
+                    timeout=3,
+                )
             return
         shown = self._shown()
         if shown:
             self._open(shown[0][0].service)
+
+    @staticmethod
+    def _resolve_export_path(value: str) -> Path | None:
+        raw = value.strip()
+        if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in "\"'":
+            raw = raw[1:-1]
+        candidates = [raw]
+        if os.name != "nt" and "\\" in raw:
+            try:
+                parts = shlex.split(value.strip())
+            except ValueError:
+                parts = []
+            if len(parts) == 1 and parts[0] != raw:
+                candidates.append(parts[0])
+        for candidate in candidates:
+            if not candidate.lower().endswith(".json"):
+                continue
+            try:
+                probe = Path(candidate).expanduser()
+                if probe.is_file():
+                    return probe
+            except (OSError, RuntimeError, ValueError):
+                # Search text may contain a malformed path or an unknown ~user.
+                continue
+        return None
 
     def _import_path(self, value: str, *, clear_input: bool = True) -> bool:
         """An export file pasted into the box. Returns whether it was one.
@@ -1138,19 +1242,18 @@ class HomeScreen(Screen):
         """
         from ..core import exports
 
-        if not value.lower().endswith(".json"):
-            return False
-        try:
-            path = Path(value).expanduser()
-            if not path.is_file():
-                return False
-        except (OSError, RuntimeError, ValueError):
-            # Search text may contain a malformed path or an unknown ~user.
+        path = self._resolve_export_path(value)
+        if path is None:
             return False
         try:
             document = exports.read(path)
         except exports.ExportError as exc:
-            self.notify(f"{path.name}: {exc}", title="Not an export", severity="error", timeout=8)
+            self.notify(
+                f"{path.name}: {exc}",
+                title=tr("home.notify.not_export_title"),
+                severity="error",
+                timeout=8,
+            )
             return True
         if clear_input:
             self.query_one("#filter", Input).value = ""
@@ -1163,7 +1266,7 @@ class HomeScreen(Screen):
             self.app.push_screen(ExportEntryScreen(document, source_name=path.name))
             return True
         if self.app.open_import(document):
-            self.notify(f"Importing {document.label()}", timeout=4)
+            self.notify(tr("home.notify.importing", label=document.label()), timeout=4)
         return True
 
     def on_service_cell_chosen(self, event: ServiceCell.Chosen) -> None:

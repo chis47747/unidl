@@ -31,11 +31,14 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from textual.app import App
 from textual.binding import Binding
+from textual.screen import ModalScreen
 
 from ..core import i18n, playready, service_catalog, vaults
 from ..core.brands import service_tag
@@ -267,14 +270,14 @@ class UnidlApp(App):
         ("ctrl+q", "global_quit", "Quit"),
         # a chord, so it still works with a text field focused
         ("ctrl+t", "toggle_theme", "Theme"),
-        # Keep this at app priority: Windows console input can deliver Ctrl+S
-        # while an Input owns focus, and the settings action is global by design.
+        # Do not set priority=True at app level: modal editors own Ctrl+S for
+        # Save/Apply via screen-level priority bindings, while Input/TextArea do
+        # not consume Ctrl+S so global settings still fires from text fields.
         Binding(
             "ctrl+s",
             "global_settings",
             "Settings",
             show=False,
-            priority=True,
         ),
     ]
     def __init__(self, config: Config | None = None):
@@ -298,7 +301,7 @@ class UnidlApp(App):
         # process-wide registry, while both routes still reload the one in use.
         self._service_reloader: ServiceReloader | None = None
         self._resolver = HelperResolver(self.config)
-        self._quit_armed_at: float = 0.0
+        self._quit_armed_at: float | None = None
         # A worker can outlive its screens while the native downloader is still
         # active, so shutdown follows controller ownership rather than the UI
         # stack alone.
@@ -316,6 +319,15 @@ class UnidlApp(App):
 
     def register_session(self, controller) -> None:
         self._session_controllers[id(controller)] = controller
+
+    def unregister_session(self, controller) -> None:
+        self._session_controllers.pop(id(controller), None)
+
+    def has_active_session(self) -> bool:
+        return any(
+            getattr(screen, "controller", None) is not None
+            for screen in getattr(self, "screen_stack", ())
+        )
 
     def on_mount(self) -> None:
         # Keep initial composition on Textual's get_default_screen path, which
@@ -520,6 +532,14 @@ class UnidlApp(App):
     ) -> None:
         from .session import SessionController
 
+        if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
+            self.notify(
+                tr("notify.session_active", default="Leave the current session before opening another."),
+                severity="warning",
+                timeout=4,
+            )
+            return
+
         service = self.registry.build(
             service_cls, self.config, self.settings_store, globals_scope=self.globals
         )
@@ -553,6 +573,14 @@ class UnidlApp(App):
         account, cookies, tokens or licence transport.
         """
         from .session import SessionController
+
+        if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
+            self.notify(
+                tr("notify.session_active", default="Leave the current session before opening another."),
+                severity="warning",
+                timeout=4,
+            )
+            return False
 
         installed = (
             self.registry.for_id(document.service)
@@ -590,6 +618,14 @@ class UnidlApp(App):
         """Start one serial queue without merging independent export documents."""
         from ..core import exports
         from .import_queue import ImportQueueController
+
+        if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
+            self.notify(
+                tr("notify.session_active", default="Leave the current session before opening another."),
+                severity="warning",
+                timeout=4,
+            )
+            return False
 
         items = tuple(items)
         if not items:
@@ -671,12 +707,33 @@ class UnidlApp(App):
         opened has to be readable instead - over SSH the browser that answers is
         not on the screen you are looking at.
         """
-        opener = shutil.which("open") or shutil.which("xdg-open")
+        if sys.platform == "win32":
+            scheme = urlsplit(url).scheme.lower()
+            if scheme not in {"http", "https"}:
+                self.notify(url, title=tr("notify.open_this"), timeout=12)
+                return
+            try:
+                opened = webbrowser.open(url)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"{url}\n({exc})", title=tr("notify.open_this"), severity="warning", timeout=12)
+                return
+            if opened:
+                self.notify(tr("notify.opened_browser"), timeout=3)
+            else:
+                self.notify(url, title=tr("notify.open_this"), timeout=12)
+            return
+        opener_name = "open" if sys.platform == "darwin" else "xdg-open"
+        opener = shutil.which(opener_name)
         if opener is None:
             self.notify(url, title=tr("notify.open_this"), timeout=12)
             return
         try:
-            subprocess.Popen([opener, url])  # noqa: S603
+            subprocess.Popen(  # noqa: S603
+                [opener, url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             self.notify(tr("notify.opened_browser"), timeout=3)
         except OSError as exc:
             self.notify(f"{url}\n({exc})", title=tr("notify.open_this"), severity="warning", timeout=12)
@@ -684,13 +741,32 @@ class UnidlApp(App):
     # ------------------------------------------------------------------ config
     def open_path(self, path: Path) -> None:
         """Hand a file or folder to whatever the OS opens it with."""
-        opener_name = {"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open")
+        if sys.platform == "win32":
+            startfile = getattr(os, "startfile", None)
+            if callable(startfile):
+                try:
+                    startfile(str(path))
+                    self.notify(tr("notify.opened_name", name=path.name), timeout=3)
+                    return
+                except OSError as exc:
+                    self.notify(tr("notify.open_fail", path=path, error=exc), severity="error", timeout=6)
+                    return
+            opener_name = "explorer"
+        elif sys.platform == "darwin":
+            opener_name = "open"
+        else:
+            opener_name = "xdg-open"
         opener = shutil.which(opener_name)
         if opener is None:
             self.notify(str(path), title=tr("notify.path"), timeout=8)
             return
         try:
-            subprocess.Popen([opener, str(path)])  # noqa: S603
+            subprocess.Popen(  # noqa: S603
+                [opener, str(path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             self.notify(tr("notify.opened_name", name=path.name), timeout=3)
         except OSError as exc:
             self.notify(tr("notify.open_fail", path=path, error=exc), severity="error", timeout=6)
@@ -731,14 +807,16 @@ class UnidlApp(App):
     def apply_theme(self) -> None:
         self.theme = THEME_NAMES.get(self.theme_mode, THEME_NAMES["dark"])
 
-    def apply_locale(self) -> None:
+    def apply_locale(self, *, only_if_changed: bool = False) -> bool:
         """Install the interface translator and redraw labels already on screen."""
         locale = i18n.resolve_locale(self.globals.get("interface_locale", "system"))
-        i18n.set_translator(
-            i18n.Translator(locale, debug=bool(self.globals.get("debug", False)))
-        )
+        debug = bool(self.globals.get("debug", False))
+        current = i18n.get_translator()
+        if only_if_changed and current.locale == locale and current.debug == debug:
+            return False
+        i18n.set_translator(i18n.Translator(locale, debug=debug))
         if not self.is_running:
-            return
+            return True
         for screen in list(self.screen_stack):
             relocalize = getattr(screen, "relocalize", None)
             if callable(relocalize):
@@ -762,6 +840,7 @@ class UnidlApp(App):
             refresh = getattr(screen, "refresh_after_settings", None)
             if callable(refresh):
                 refresh()
+        return True
 
     def action_toggle_theme(self) -> None:
         """Toggle between the dark and light palettes and remember it."""
@@ -770,7 +849,10 @@ class UnidlApp(App):
         wanted = order[(order.index(current) + 1) % len(order)]
         self.globals.set("theme", wanted)
         self.apply_theme()
-        self.notify(tr("notify.theme", name=wanted), timeout=3)
+        self.notify(
+            tr("notify.theme", name=tr(f"setting.theme.option.{wanted}", default=wanted)),
+            timeout=3,
+        )
         refresh = getattr(self.screen, "refresh_after_settings", None)
         if callable(refresh):
             refresh()
@@ -843,7 +925,7 @@ class UnidlApp(App):
         if callable(prepare):
             prepare()
         now = time.monotonic()
-        if now - self._quit_armed_at <= QUIT_CONFIRM_WINDOW:
+        if self._quit_armed_at is not None and now - self._quit_armed_at <= QUIT_CONFIRM_WINDOW:
             self.exit()
             return
         self._quit_armed_at = now
@@ -914,7 +996,21 @@ class UnidlApp(App):
             return
         self.push_screen(GlobalSearchScreen(service=getattr(self.screen, "service", None)))
 
-    def action_global_settings(self) -> None:
+    _SETTINGS_SCREEN_NAMES = frozenset(
+        {
+            "SettingsScreen",
+            "SettingsGroupScreen",
+            "StorageManagerScreen",
+            "ProxyManagerScreen",
+            "ResourceManagerScreen",
+            "ServicesManagerScreen",
+            "JustWatchSettingsScreen",
+            "CdmScreen",
+            "CdmRulesScreen",
+        }
+    )
+
+    def action_global_settings(self, *, on_dismiss=None) -> None:
         """Settings are scoped the same way.
 
         Main screen: application-wide behaviour. Inside a service: only that
@@ -923,26 +1019,39 @@ class UnidlApp(App):
         """
         from .settings_screen import SettingsScreen
 
-        service = getattr(self.screen, "service", None)
-        if isinstance(self.screen, SettingsScreen):
+        if (
+            isinstance(self.screen, (SettingsScreen, ModalScreen))
+            or type(self.screen).__name__ in self._SETTINGS_SCREEN_NAMES
+            or any(isinstance(screen, SettingsScreen) for screen in self.screen_stack)
+        ):
+            if callable(on_dismiss):
+                on_dismiss()
             return
+        service = getattr(self.screen, "service", None)
 
         def _after(_result) -> None:
-            self.invalidate_hints(getattr(service, "ID", None) if service else None)
-            self.apply_theme()  # cheap, and the theme may be what changed
-            self.apply_locale()
-            # a session spans several screens, so refresh all of them, not just
-            # the one on top
-            controller = getattr(self.screen, "controller", None)
-            if controller is not None:
-                controller.refresh_after_settings()
-            else:
-                refresh = getattr(self.screen, "refresh_after_settings", None)
-                if callable(refresh):
-                    refresh()
-            rebuild = getattr(self.screen, "rebuild", None)
-            if callable(rebuild) and isinstance(self.screen, HomeScreen):
-                rebuild()
+            try:
+                self.invalidate_hints(getattr(service, "ID", None) if service else None)
+                self.apply_theme()  # cheap, and the theme may be what changed
+                relocalized = self.apply_locale(only_if_changed=True)
+                # a session spans several screens, so refresh all of them, not just
+                # the one on top
+                controller = getattr(self.screen, "controller", None)
+                if controller is not None:
+                    controller.refresh_after_settings()
+                elif not relocalized:
+                    refresh = getattr(self.screen, "refresh_after_settings", None)
+                    if callable(refresh):
+                        refresh()
+                if isinstance(self.screen, HomeScreen):
+                    # Textual delivers ScreenResume right after this dismiss callback;
+                    # skip its duplicate readiness/export refresh pass.
+                    self.screen._skip_resume_refresh = True
+                    if not relocalized and getattr(self.screen, "USES_SERVICE_GRID", False):
+                        self.screen.rebuild()
+            finally:
+                if callable(on_dismiss):
+                    on_dismiss()
 
         self.push_screen(SettingsScreen(service, self.globals), _after)
 

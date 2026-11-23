@@ -301,7 +301,7 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
 
     def _fail(self, message: str, selector: str = "#resource-name") -> None:
         self.query_one("#resource-editor-error", Static).update(f"[$bad]{visual_markup(message)}[/]")
-        self.query_one(selector, Input).focus()
+        self.query_one(selector).focus()
 
     def action_save(self) -> None:
         name = self._field("#resource-name")
@@ -473,7 +473,7 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
 
     def _fail(self, message: str, selector: str = "#resource-name") -> None:
         self.query_one("#resource-editor-error", Static).update(f"[$bad]{visual_markup(message)}[/]")
-        self.query_one(selector, Input).focus()
+        self.query_one(selector).focus()
 
     def action_save(self) -> None:
         name = self._field("#resource-name")
@@ -518,9 +518,13 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
             return
         try:
             mapping = _pairs(self.query_one("#resource-service-map", TextArea).text)
-            timeout = _optional_float(self._field("#resource-timeout"), tr("resource.label.timeout"))
         except ValueError as exc:
             self._fail(str(exc), "#resource-service-map")
+            return
+        try:
+            timeout = _optional_float(self._field("#resource-timeout"), tr("resource.label.timeout"))
+        except ValueError as exc:
+            self._fail(str(exc), "#resource-timeout")
             return
         result = {key: value for key, value in self.existing.items() if key not in self._KNOWN}
         result.update(
@@ -621,64 +625,65 @@ class VaultPolicyScreen(ModalScreen[bool]):
                 yield Label(tr("resource.policy.title"), id="resource-policy-title")
                 yield CloseMark(id="resource-policy-close")
             yield Label(tr("resource.policy.help"), id="resource-policy-help")
-            yield Static(tr("resource.policy.gates"), classes="resource-policy-section")
-            with Horizontal(id="resource-policy-gates"):
-                with Vertical(classes="resource-policy-gate"):
+            with VerticalScroll(id="resource-policy-scroll"):
+                yield Static(tr("resource.policy.gates"), classes="resource-policy-section")
+                with Horizontal(id="resource-policy-gates"):
+                    with Vertical(classes="resource-policy-gate"):
+                        yield VaultCheckbox(
+                            tr("resource.policy.local"),
+                            value=self.values["local_vault"],
+                            id="resource-policy-local",
+                        )
+                        yield Static(tr("resource.policy.local_note"), classes="resource-policy-gate-note")
+                    with Vertical(classes="resource-policy-gate"):
+                        yield VaultCheckbox(
+                            tr("resource.policy.remote"),
+                            value=self.values["remote_vault"],
+                            id="resource-policy-remote",
+                        )
+                        yield Static(tr("resource.policy.remote_note"), classes="resource-policy-gate-note")
+                yield Static(tr("resource.policy.remote_operations"), classes="resource-policy-section")
+                yield Static(tr("resource.policy.remote_operations_help"), id="resource-policy-remote-operations-help")
+                # Keep one operation per row.  The labels are intentionally
+                # descriptive, and two half-width columns make them disappear on
+                # normal terminal widths when a checkbox's label cannot wrap.
+                with Vertical(id="resource-policy-remote-operations"):
                     yield VaultCheckbox(
-                        tr("resource.policy.local"),
-                        value=self.values["local_vault"],
-                        id="resource-policy-local",
+                        tr("resource.policy.home_search"),
+                        value=self.values["remote_vault_home_search"],
+                        id="resource-policy-home-search",
                     )
-                    yield Static(tr("resource.policy.local_note"), classes="resource-policy-gate-note")
-                with Vertical(classes="resource-policy-gate"):
                     yield VaultCheckbox(
-                        tr("resource.policy.remote"),
-                        value=self.values["remote_vault"],
-                        id="resource-policy-remote",
+                        tr("resource.policy.manual_add"),
+                        value=self.values["remote_vault_manual_add"],
+                        id="resource-policy-manual-add",
                     )
-                    yield Static(tr("resource.policy.remote_note"), classes="resource-policy-gate-note")
-            yield Static(tr("resource.policy.remote_operations"), classes="resource-policy-section")
-            yield Static(tr("resource.policy.remote_operations_help"), id="resource-policy-remote-operations-help")
-            # Keep one operation per row.  The labels are intentionally
-            # descriptive, and two half-width columns make them disappear on
-            # normal terminal widths when a checkbox's label cannot wrap.
-            with Vertical(id="resource-policy-remote-operations"):
-                yield VaultCheckbox(
-                    tr("resource.policy.home_search"),
-                    value=self.values["remote_vault_home_search"],
-                    id="resource-policy-home-search",
-                )
-                yield VaultCheckbox(
-                    tr("resource.policy.manual_add"),
-                    value=self.values["remote_vault_manual_add"],
-                    id="resource-policy-manual-add",
-                )
-                yield VaultCheckbox(
-                    tr("resource.policy.auto_store"),
-                    value=self.values["remote_vault_auto_store"],
-                    id="resource-policy-auto-store",
-                )
-                yield VaultCheckbox(
-                    tr("resource.policy.auto_lookup"),
-                    value=self.values["remote_vault_auto_lookup"],
-                    id="resource-policy-auto-lookup",
-                )
-            yield Static(tr("resource.policy.destinations"), classes="resource-policy-section")
-            with Horizontal(classes="resource-policy-row"):
-                with Vertical(classes="resource-policy-target-copy"):
-                    yield Label(tr("resource.policy.read"), classes="resource-policy-target-title")
-                    yield Static("", id="resource-policy-read")
-                yield Button(phrase("Select"), id="resource-policy-read-button")
-            with Horizontal(classes="resource-policy-row"):
-                with Vertical(classes="resource-policy-target-copy"):
-                    yield Label(tr("resource.policy.write"), classes="resource-policy-target-title")
-                    yield Static("", id="resource-policy-write")
-                yield Button(phrase("Select"), id="resource-policy-write-button")
-            with Horizontal(classes="resource-policy-row"):
-                with Vertical(classes="resource-policy-target-copy"):
-                    yield Label(tr("resource.policy.search"), classes="resource-policy-target-title")
-                    yield Static("", id="resource-policy-search")
-                yield Button(phrase("Select"), id="resource-policy-search-button")
+                    yield VaultCheckbox(
+                        tr("resource.policy.auto_store"),
+                        value=self.values["remote_vault_auto_store"],
+                        id="resource-policy-auto-store",
+                    )
+                    yield VaultCheckbox(
+                        tr("resource.policy.auto_lookup"),
+                        value=self.values["remote_vault_auto_lookup"],
+                        id="resource-policy-auto-lookup",
+                    )
+                yield Static(tr("resource.policy.destinations"), classes="resource-policy-section")
+                with Horizontal(classes="resource-policy-row"):
+                    with Vertical(classes="resource-policy-target-copy"):
+                        yield Label(tr("resource.policy.read"), classes="resource-policy-target-title")
+                        yield Static("", id="resource-policy-read")
+                    yield Button(phrase("Select"), id="resource-policy-read-button")
+                with Horizontal(classes="resource-policy-row"):
+                    with Vertical(classes="resource-policy-target-copy"):
+                        yield Label(tr("resource.policy.write"), classes="resource-policy-target-title")
+                        yield Static("", id="resource-policy-write")
+                    yield Button(phrase("Select"), id="resource-policy-write-button")
+                with Horizontal(classes="resource-policy-row"):
+                    with Vertical(classes="resource-policy-target-copy"):
+                        yield Label(tr("resource.policy.search"), classes="resource-policy-target-title")
+                        yield Static("", id="resource-policy-search")
+                    yield Button(phrase("Select"), id="resource-policy-search-button")
             with Horizontal(id="resource-policy-actions"):
                 yield Button(phrase("Apply"), variant="primary", id="resource-policy-apply")
                 yield Button(phrase("Cancel"), id="resource-policy-cancel")
@@ -712,9 +717,9 @@ class VaultPolicyScreen(ModalScreen[bool]):
         return " + ".join(names[:2]) + extra or tr("resource.policy.disabled")
 
     def _refresh_labels(self) -> None:
-        self.query_one("#resource-policy-read", Static).update(self._summary("vault_read_targets", "read"))
-        self.query_one("#resource-policy-write", Static).update(self._summary("vault_write_targets", "write"))
-        self.query_one("#resource-policy-search", Static).update(self._summary("vault_search_targets", "search"))
+        self.query_one("#resource-policy-read", Static).update(visual_markup(self._summary("vault_read_targets", "read")))
+        self.query_one("#resource-policy-write", Static).update(visual_markup(self._summary("vault_write_targets", "write")))
+        self.query_one("#resource-policy-search", Static).update(visual_markup(self._summary("vault_search_targets", "search")))
 
     def _pick(self, key: str, kind: str) -> None:
         def done(result: VaultTargetResult | None) -> None:
@@ -798,7 +803,7 @@ class ResourceManagerScreen(Screen[None]):
         Binding("ctrl+e", "edit", "Edit", show=True),
         Binding("ctrl+d", "toggle", "Enable / disable", show=True),
         Binding("ctrl+x", "delete", "Delete", show=True),
-        Binding("ctrl+p", "policy", "Vault policy", show=True),
+        Binding("p", "policy", "Vault policy", show=True),
     ]
 
     def __init__(self) -> None:
@@ -834,7 +839,7 @@ class ResourceManagerScreen(Screen[None]):
             ("^e", "edit"),
             ("^d", "enable / disable"),
             ("^x", "delete"),
-            ("^p", "vault policy"),
+            ("p", "vault policy"),
             ("^b", "back"),
             ("esc", "quit"),
         )
@@ -1003,7 +1008,7 @@ class ResourceManagerScreen(Screen[None]):
                 headers.append(tr("resource.section.remote_cdms"))
         else:
             headers = []
-            if any(row is not None and row.kind == "vault-local" for row in self._rows):
+            if any(row is not None and row.kind in {"vault-local", "vault-discovered"} for row in self._rows):
                 headers.append(tr("resource.section.local_vaults"))
             if any(row is not None and row.kind == "vault-remote" for row in self._rows):
                 headers.append(tr("resource.section.remote_vaults"))
@@ -1508,6 +1513,13 @@ class ResourceManagerScreen(Screen[None]):
                     rewritten.append(name)
             if changed:
                 self.app.globals.set(key, vaults.serialize_targets(tuple(rewritten)))
+        self.app.settings_store.rename_vault_target_references(old_name, new_name)
+        if self.app.settings_store.problem:
+            self.notify(
+                tr("resource.notify.choice_fail", error=self.app.settings_store.problem),
+                severity="warning",
+                timeout=9,
+            )
 
     def go_back(self) -> bool:
         self.dismiss(None)

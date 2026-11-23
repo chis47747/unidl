@@ -18,15 +18,16 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Label, OptionList, Static, Tab, Tabs
+from textual.widgets import Button, Label, OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
 
 from ..core import naming, service_catalog, template
-from ..core.i18n import tr
+from ..core.i18n import cell_width, phrase, tr
 from ..core.output_paths import finished_download_root, render_episode_folder, validate_episode_folder_template
 from ..core.settings import Settings
+from ..core.terminal_cells import fit_middle
 from .bidi import visual_markup
-from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
 
@@ -140,6 +141,7 @@ class _StorageEditor(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
     def __init__(
@@ -152,26 +154,27 @@ class _StorageEditor(ModalScreen[str | None]):
         self.row = row
         self.value = value
         self.preview = preview
-        self.add_class("editor")
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            with Vertical(id="modal-card"):
-                yield Label(tr(f"storage.row.{self.row.key}", default=self.row.label), classes="ask-title")
-                yield Label(tr(f"storage.row.{self.row.key}.help", default=self.row.help), classes="ask-hint")
-                yield Input(
-                    value=self.value,
-                    placeholder=(
-                        tr("storage.placeholder.path")
-                        if self.row.kind.endswith("path")
-                        else tr("storage.placeholder.template")
-                    ),
-                    id="storage-editor-input",
-                    classes="ask-input",
-                )
-                yield Static("", id="storage-editor-preview")
-        yield KeyBar(("enter", "save"), ("^b", "cancel"), ("esc", "cancel"))
+        with Vertical(id="modal-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr(f"storage.row.{self.row.key}", default=self.row.label), classes="modal-card-title")
+                yield CloseMark(id="modal-close")
+            yield Label(tr(f"storage.row.{self.row.key}.help", default=self.row.help), classes="modal-card-help")
+            yield Input(
+                value=self.value,
+                placeholder=(
+                    tr("storage.placeholder.path")
+                    if self.row.kind.endswith("path")
+                    else tr("storage.placeholder.template")
+                ),
+                id="storage-editor-input",
+                classes="ask-input",
+            )
+            yield Static("", id="storage-editor-preview")
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("Save"), variant="primary", id="storage-editor-save")
+                yield Button(phrase("Cancel"), id="storage-editor-cancel")
 
     def on_mount(self) -> None:
         field = self.query_one("#storage-editor-input", Input)
@@ -189,6 +192,16 @@ class _StorageEditor(ModalScreen[str | None]):
         event.stop()
         self.dismiss(event.value)
 
+    def action_save(self) -> None:
+        self.dismiss(self.query_one("#storage-editor-input", Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "storage-editor-save":
+            self.action_save()
+        else:
+            self.action_cancel()
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
@@ -202,6 +215,7 @@ class StorageManagerScreen(Screen[None]):
 
     BINDINGS = [
         Binding("ctrl+b", "app.global_back", "Back", show=False),
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Edit", show=True),
         Binding("r", "reset", "Use default", show=True),
@@ -233,6 +247,10 @@ class StorageManagerScreen(Screen[None]):
     def on_mount(self) -> None:
         self.rebuild()
         self.query_one("#storage-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        if self.is_attached:
+            self.rebuild()
 
     def focus_setting(self, key: str) -> None:
         """Reveal a searched setting using this manager's existing validation."""
@@ -304,9 +322,9 @@ class StorageManagerScreen(Screen[None]):
         label = tr(f"storage.row.{row.key}", default=row.label)
         available = max(
             18,
-            self.size.width
-            - len(label)
-            - (len(state_text) if show_state else 0)
+            (self.size.width or 80)
+            - cell_width(label)
+            - (cell_width(state_text) if show_state else 0)
             - 12,
         )
         shown_value = self._short(value, available) if row.editable else value
@@ -320,11 +338,11 @@ class StorageManagerScreen(Screen[None]):
     @staticmethod
     def _short(value: object, limit: int = 76) -> str:
         text = str(value or "")
-        if len(text) <= limit:
+        if cell_width(text) <= limit:
             return text
-        left = max(1, (limit - 1) // 2)
-        right = max(1, limit - left - 1)
-        return f"{text[:left]}…{text[-right:]}"
+        if limit <= 1:
+            return "…"
+        return fit_middle(text, limit, head_share=0.5)
 
     def _display_value(self, row: StorageRow) -> tuple[str, str]:
         if row.kind == "setting-path":

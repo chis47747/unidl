@@ -64,9 +64,11 @@ def _safe_line(line: str) -> str:
 def visual_text(value: Any) -> str:
     """Return a terminal visual-order copy while preserving line boundaries."""
     text = str(value or "")
+    if text.isascii():
+        return text
     has_controls = any(char in _CONTROL_CHARS for char in text)
     if not has_rtl(text) and not has_controls:
-        return text
+        return unicodedata.normalize("NFC", text)
     return "\n".join(_safe_line(line) for line in text.split("\n"))
 
 

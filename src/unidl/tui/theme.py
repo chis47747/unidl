@@ -188,7 +188,7 @@ LIGHT = Palette(
     # stay readable: a selected row is a row you are about to read, and a deeper
     # tint bought a stronger selection at the cost of the text on it.
     highlight="#e7e2f6",
-    hover="#ecebe6",
+    hover="#e2dfd7",
     visual="#ded8f3",
     scroll_bg="#edebe6",
     scroll_fg="#98948c",
@@ -333,8 +333,8 @@ Screen {
     text-style: bold;
 }
 .chrome-button:hover {
-    background: $accent;
-    color: $base;
+    background: $visual;
+    color: $foreground;
     text-style: bold;
 }
 .chrome-disabled {
@@ -403,11 +403,6 @@ Screen {
        makes its visible text start at the same column as #masthead's text. */
     padding: 0 1;
     align: left middle;
-}
-#crumbs {
-    height: 1;
-    padding: 0 3;
-    color: $muted;
 }
 
 /* ------------------------------------------------ service / flow / delivery
@@ -798,6 +793,14 @@ AttachmentsScreen {
 .queue-row:hover {
     background: $hover;
 }
+.queue-row.retryable {
+    color: $warn;
+}
+.queue-row.retryable:hover {
+    background: $highlight;
+    color: $foreground;
+    text-style: underline;
+}
 
 /* Batch inspection follows the same compact, scrollable card as chapters. */
 JobDetailsScreen {
@@ -969,34 +972,41 @@ Input > .input--cursor {
 }
 
 /* ---------------------------------------------------------- manual key entry */
-#vault-add-body {
-    height: 1fr;
-    padding: 1 2 0 2;
-    align-horizontal: center;
-}
 #vault-add-card {
-    width: 104;
-    max-width: 100%;
-    height: 1fr;
-    padding: 0;
-    border: none;
-    background: transparent;
+    width: 92;
+    max-width: 96%;
+    height: 90%;
+    max-height: 36;
+    padding: 1 2 0 2;
+    background: $recessed;
+    border: round $rule;
+}
+AddKeysScreen .modal-head {
+    margin: 0;
 }
 AddKeysScreen #masthead {
+    width: 1fr;
     height: 1;
-    padding: 0 1;
+    padding: 0;
+    color: $accent;
+    text-style: bold;
 }
 AddKeysScreen #subhead {
+    width: 100%;
     height: auto;
-    max-height: 3;
-    padding: 0 1;
-    margin-bottom: 1;
+    max-height: 2;
+    padding: 0 0 1 0;
+    color: $muted;
 }
 #vault-form-scroll {
+    width: 100%;
     height: 1fr;
-    min-height: 3;
+    min-height: 4;
     padding: 0 1;
+    background: $base;
+    border: round $rule;
     overflow-x: hidden;
+    scrollbar-size: 1 1;
 }
 #vault-add-metadata {
     height: auto;
@@ -1007,23 +1017,30 @@ AddKeysScreen #subhead {
     width: 1fr;
     min-width: 0;
 }
-#vault-service-field { padding-right: 2; }
-#vault-title-field { padding-left: 2; border-left: solid $rule; }
+#vault-service-field { margin-right: 2; }
 AddKeysScreen.narrow #vault-add-metadata { layout: vertical; }
-AddKeysScreen.narrow #vault-service-field { padding-right: 0; }
-AddKeysScreen.narrow #vault-title-field { padding-left: 0; border: none; }
+AddKeysScreen.narrow #vault-service-field { margin-right: 0; }
 .vault-field-label {
-    height: auto;
-    min-height: 2;
-    padding: 1 0 0 0;
-    color: $fg2;
+    width: 100%;
+    height: 1;
+    margin: 1 0 0 0;
+    color: $muted;
+}
+#vault-add-metadata .vault-field-label {
+    margin: 0;
 }
 #vault-service-query, #vault-title {
+    width: 100%;
     height: 1;
     padding: 0 1;
-    background: $recessed;
+    border: none;
+    border-left: solid $rule;
+    background: $highlight;
 }
-#vault-service-query:focus, #vault-title:focus { background: $highlight; }
+#vault-service-query:focus, #vault-title:focus {
+    border-left: solid $accent;
+    background: $visual;
+}
 #vault-service-state {
     width: 100%;
     height: auto;
@@ -1035,94 +1052,152 @@ AddKeysScreen.narrow #vault-title-field { padding-left: 0; border: none; }
     width: 100%;
     height: 4;
     border: none;
-    background: transparent;
+    border-left: solid $rule;
+    background: $recessed;
     overflow-x: hidden;
+    scrollbar-size: 1 1;
+}
+#vault-service-list:focus {
+    border-left: solid $accent;
 }
 #vault-service-list > .option-list--option-highlighted {
-    background: $highlight;
+    background: $visual;
     color: $foreground;
+    text-style: bold;
+}
+#vault-keys-head {
+    width: 100%;
+    height: 1;
+    margin: 1 0 0 0;
+}
+#vault-keys-head .vault-field-label {
+    width: 1fr;
+    margin: 0;
+}
+#vault-keys-count {
+    width: auto;
+    height: 1;
+    padding: 0 1 0 0;
+    color: $ok;
+    text-style: bold;
 }
 #vault-keys-help {
+    width: 100%;
     height: auto;
     max-height: 2;
-    margin-bottom: 1;
-    color: $muted;
+    margin-bottom: 0;
+    color: $dim;
 }
 #vault-pairs {
-    height: 10;
+    width: 100%;
+    height: 9;
     min-height: 5;
     border: none;
+    border-left: solid $rule;
     padding: 0 1;
     background: $recessed;
     color: $foreground;
 }
-#vault-pairs:focus { background: $highlight; }
+#vault-pairs:focus {
+    border-left: solid $accent;
+    background: $highlight;
+}
 #vault-validation {
     display: none;
     width: 100%;
     height: auto;
-    padding: 1 0 0 0;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    background: $recessed;
+    border-left: solid $rule;
     color: $dim;
 }
-#vault-validation.warning { color: $warn; }
-#vault-validation.error { color: $bad; }
-#vault-add-card > .vault-field-label { padding: 0 1; min-height: 1; }
+#vault-validation.warning {
+    border-left: solid $warn;
+    color: $warn;
+}
+#vault-validation.error {
+    border-left: solid $bad;
+    color: $bad;
+}
 #vault-destination-row {
     width: 100%;
     height: auto;
-    min-height: 1;
+    min-height: 2;
     max-height: 3;
-    margin: 0 0 1 0;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    background: $base;
+    border-left: solid $rule;
+    align-vertical: middle;
+}
+#vault-destination-copy {
+    width: 1fr;
+    height: auto;
+}
+#vault-destination-copy .vault-field-label {
+    margin: 0;
+    color: $dim;
 }
 #vault-destination-state {
     width: 1fr;
     height: auto;
-    max-height: 3;
-    padding: 0 1;
-    color: $muted;
+    max-height: 2;
+    padding: 0;
+    color: $foreground;
 }
-#vault-add-actions {
-    width: 100%;
-    height: 2;
-    border-top: solid $rule;
-    margin: 0 0 1 0;
-    padding: 0 1;
-}
-#vault-action-gap { width: 1fr; height: 1; }
-AddKeysScreen Button {
+#vault-destination-choose {
     width: auto;
-    min-width: 6;
+    min-width: 10;
     height: 1;
     min-height: 1;
+    margin: 0 0 0 1;
+    padding: 0 2;
     border: none;
-    background: transparent;
-    padding: 0 1;
-    color: $muted;
-    text-style: none;
+    background: $recessed;
+    color: $fg2;
 }
-AddKeysScreen Button:hover, AddKeysScreen Button:focus, AddKeysScreen Button.-active {
-    border: none;
-    background: $highlight;
+#vault-destination-choose:hover, #vault-destination-choose:focus {
+    background: $visual;
     color: $foreground;
     text-style: bold;
 }
-#vault-save {
-    max-width: 75%;
-    color: $accent;
-    text-style: bold;
+#vault-add-actions {
+    width: 100%;
+    height: 1;
+    margin: 1 0;
+    align: right middle;
 }
-AddKeysScreen Button:disabled {
+#vault-action-hint {
+    width: 1fr;
+    height: 1;
+    color: $dim;
+}
+#vault-add-actions Button {
+    width: auto;
+    min-width: 10;
+    height: 1;
+    min-height: 1;
+    margin: 0 0 0 1;
+    padding: 0 2;
     border: none;
-    background: transparent;
-    text-opacity: 0.6;
 }
-AddKeysScreen.compact #vault-add-body { padding-top: 0; }
-AddKeysScreen.compact #subhead { margin-bottom: 0; max-height: 2; }
+AddKeysScreen.compact #vault-add-card {
+    height: 94%;
+    max-height: 94%;
+    padding: 0 1;
+}
+AddKeysScreen.compact .modal-head { margin: 0; }
+AddKeysScreen.compact #subhead { padding: 0; max-height: 1; }
 AddKeysScreen.compact #vault-pairs { height: 6; }
-AddKeysScreen.compact .vault-field-label { min-height: 1; padding-top: 0; }
-AddKeysScreen.compact #vault-keys-help { margin-bottom: 0; }
-AddKeysScreen.compact #vault-destination-row { margin-bottom: 0; }
-AddKeysScreen.compact #vault-add-actions { margin-bottom: 0; }
+AddKeysScreen.compact .vault-field-label,
+AddKeysScreen.compact #vault-keys-head { margin: 0; }
+AddKeysScreen.compact #vault-destination-row { margin: 0; }
+AddKeysScreen.compact #vault-add-actions { height: 1; margin: 0; }
+AddKeysScreen.narrow #vault-add-card { padding-left: 1; padding-right: 1; }
+AddKeysScreen.narrow #vault-action-hint { display: none; }
+AddKeysScreen.narrow #vault-add-actions Button,
+AddKeysScreen.narrow #vault-destination-choose { min-width: 6; padding: 0 1; }
 
 /* -------------------------------------------------------- responsive grid */
 #grid-area {
@@ -1326,7 +1401,10 @@ BetaHomeScreen #beta-results, BetaHomeScreen #beta-results:focus {
 }
 BetaHomeScreen.compact #beta-heading, BetaHomeScreen.compact #beta-hint { display: none; }
 BetaHomeScreen.compact #beta-card { margin-bottom: 0; }
-BetaHomeScreen.compact #setup-notes { max-height: 2; }
+BetaHomeScreen.compact #setup-notes { max-height: 3; }
+BetaHomeScreen.compact #setup-note,
+BetaHomeScreen.compact #service-setup-note,
+BetaHomeScreen.compact #download-setup-note { margin: 0; }
 BetaHomeScreen.narrow #beta-mode { max-width: 18; }
 BetaHomeScreen.narrow #beta-card #filter,
 BetaHomeScreen.narrow #beta-card #filter:focus { padding-left: 1; padding-right: 1; }
@@ -1604,7 +1682,7 @@ TextWidget {
     text-style: bold;
 }
 /* not clickable, so it must not pretend to be */
-.chip-static:hover {
+.chip-static:hover, .pill.chip-static:hover {
     background: transparent;
     color: $muted;
     text-style: none;
@@ -1870,22 +1948,82 @@ ModalScreen.editor {
     align: center middle;
 }
 #modal-card {
-    width: 72;
-    max-width: 90%;
+    width: 78;
+    max-width: 94%;
     height: auto;
-    max-height: 70%;
-    margin: 1 2;
+    max-height: 86%;
     padding: 1 2;
     background: $recessed;
-    border-left: solid $accent;
+    border: round $rule;
 }
-#modal-card OptionList {
+.service-policy-card {
+    width: 84;
+    max-width: 94%;
     height: auto;
-    max-height: 20;
+    max-height: 90%;
+    padding: 1 2;
     background: $recessed;
+    border: round $rule;
+}
+.modal-card-title, .proxy-editor-title {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+    color: $accent;
+    text-style: bold;
+}
+.modal-card-help, .proxy-editor-help {
+    width: 100%;
+    height: auto;
+    padding: 0 0 1 0;
+    color: $muted;
+}
+#modal-card OptionList, .service-policy-card OptionList {
+    height: auto;
+    min-height: 3;
+    max-height: 20;
+    background: $base;
+    border: round $rule;
+}
+#modal-card Input {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    border-left: solid $rule;
+    background: $highlight;
+    color: $foreground;
+}
+#modal-card Input:focus {
+    border-left: solid $accent;
+    background: $visual;
+}
+#storage-editor-preview {
+    width: 100%;
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    background: $base;
+    color: $fg2;
+}
+.modal-card-actions {
+    width: 100%;
+    height: 2;
+    margin: 1 0 0 0;
+    align: right middle;
+}
+.modal-card-actions Button {
+    width: auto;
+    min-width: 11;
+    height: 1;
+    min-height: 1;
+    margin: 0 0 0 1;
+    padding: 0 2;
+    border: none;
 }
 /* Help text is a sentence. Label defaults to width:auto, which sizes to the
    text and then gets clipped by the card instead of wrapping inside it. */
+#modal-body .ask-title, #modal-body .ask-hint,
 #modal-card .ask-title, #modal-card .ask-hint {
     width: 1fr;
     height: auto;
@@ -1896,7 +2034,8 @@ ModalScreen.editor {
     height: auto;
     min-height: 2;
 }
-#modal-card .multi-setting-title-row .ask-title {
+#modal-card .multi-setting-title-row .ask-title,
+#modal-card .multi-setting-title-row .modal-card-title {
     width: 1fr;
     max-width: 1fr;
 }
@@ -2188,18 +2327,106 @@ ModalScreen.editor {
     color: $fg2;
 }
 .proxy-editor-card {
-    width: 72;
+    width: 82;
+    max-width: 94%;
+    height: auto;
     max-height: 90%;
+    padding: 1 2;
+    background: $recessed;
+    border: round $rule;
+}
+.proxy-editor-card Input {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    border-left: solid $rule;
+    background: $highlight;
+    color: $foreground;
+}
+.proxy-editor-card Input:focus {
+    border-left: solid $accent;
+    background: $visual;
+}
+.proxy-editor-fields {
+    width: 100%;
+    height: auto;
+    max-height: 20;
+    padding: 0 1 1 1;
+    background: $base;
+    border: round $rule;
+    scrollbar-size: 1 1;
+}
+.proxy-editor-fields VaultCheckbox {
+    width: 100%;
+    height: 1;
+    min-height: 1;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    border: none;
+    background: transparent;
+}
+.proxy-editor-fields VaultCheckbox > .toggle--button {
+    width: 4;
+    min-width: 4;
+    color: $muted;
+    background: transparent;
+}
+.proxy-editor-fields VaultCheckbox.-on > .toggle--button {
+    color: $ok;
+    background: transparent;
+    text-style: bold;
+}
+.proxy-editor-fields VaultCheckbox > .toggle--label {
+    color: $foreground;
+}
+.proxy-editor-fields VaultCheckbox.-on > .toggle--label {
+    color: $foreground;
+    text-style: bold;
+}
+.proxy-editor-fields VaultCheckbox:focus {
+    border-left: solid $accent;
+    background: $highlight;
+}
+.proxy-editor-fields VaultCheckbox:focus > .toggle--label {
+    color: $foreground;
+    background: transparent;
+    text-style: bold;
+}
+#proxy-editor-error {
+    width: 100%;
+    height: auto;
+    max-height: 2;
+    padding: 1 0 0 0;
+    color: $bad;
+}
+.proxy-editor-actions {
+    width: 100%;
+    height: 2;
+    margin: 1 0 0 0;
+    align: right middle;
+}
+.proxy-editor-actions Button {
+    width: auto;
+    min-width: 11;
+    height: 1;
+    min-height: 1;
+    margin: 0 0 0 1;
+    padding: 0 2;
+    border: none;
 }
 .proxy-field-label {
-    margin-top: 1;
+    width: 100%;
+    height: 1;
+    margin: 1 0 0 0;
     color: $muted;
 }
 #proxy-provider-types {
     height: auto;
-    max-height: 8;
-    border: none;
+    min-height: 3;
+    max-height: 10;
     background: $base;
+    border: round $rule;
 }
 #express-login-status {
     height: auto;
@@ -2211,7 +2438,8 @@ ModalScreen.editor {
     min-height: 2;
     margin-bottom: 1;
     padding: 1 2;
-    background: $recessed;
+    background: $base;
+    border: round $rule;
     color: $foreground;
 }
 #proxy-provider-types:focus > .option-list--option-highlighted,
@@ -2434,7 +2662,15 @@ ModalScreen.editor {
 #resource-policy-card {
     width: 84;
     max-width: 96%;
+    height: 94%;
+    max-height: 36;
     padding: 1 2;
+}
+#resource-policy-scroll {
+    width: 100%;
+    height: 1fr;
+    background: transparent;
+    scrollbar-size: 1 1;
 }
 .resource-policy-section {
     width: 100%;
@@ -2589,10 +2825,24 @@ ModalScreen.editor {
     height: 2;
     margin-top: 0;
 }
-.short #resource-editor-card, .short #resource-policy-card, .short #resource-confirm-card {
+.short #resource-editor-card, .short #resource-policy-card, .short #resource-confirm-card,
+.short .proxy-editor-card, .short #modal-card, .short .service-policy-card {
     max-height: 94%;
-    padding-left: 1;
-    padding-right: 1;
+    padding: 0 1;
+}
+.short .proxy-editor-card .modal-head, .short #modal-card .modal-head, .short .service-policy-card .modal-head {
+    margin: 0;
+}
+.short .proxy-editor-help, .short .modal-card-help {
+    padding: 0;
+}
+.short .proxy-editor-fields {
+    height: 1fr;
+    max-height: 1fr;
+}
+.short .proxy-editor-actions, .short .modal-card-actions {
+    height: 1;
+    margin: 0;
 }
 .short #resource-editor-card {
     height: 94%;
@@ -2601,6 +2851,8 @@ ModalScreen.editor {
     height: 1fr;
 }
 .short #resource-policy-card {
+    height: 94%;
+    max-height: 94%;
     padding-top: 0;
     padding-bottom: 0;
 }
@@ -2718,13 +2970,6 @@ ModalScreen.editor {
     padding: 0 0 0 1;
 }
 
-.dim { color: $dim; }
-.muted { color: $muted; }
-.ok { color: $ok; }
-.warn { color: $warn; }
-.err { color: $bad; }
-.accent { color: $accent; }
-
 /* --------------------------------------------------------------- short screen
    Everything above is written for a window with room in it: a blank row between
    rows of platforms, a field three rows tall, a footer that does not touch what
@@ -2757,6 +3002,24 @@ ModalScreen.editor {
 .short #chapter-modal, .short #lyrics-modal {
     padding: 0 1;
 }
+.short #banner {
+    padding: 0 2;
+}
+.short #caption {
+    height: 1;
+    padding: 0 2;
+}
+.short #body {
+    padding: 0 2;
+}
+.short #setup-notes {
+    max-height: 3;
+}
+.short #setup-note,
+.short #service-setup-note,
+.short #download-setup-note {
+    margin: 0;
+}
 .short #prompt-hint {
     height: 1;
     padding: 0 1;
@@ -2779,5 +3042,13 @@ ModalScreen.editor {
 }
 .short .service-grid {
     grid-gutter: 0 1;
+}
+JumpToBottom {
+    color: $muted;
+    background: $recessed;
+}
+JumpToBottom:hover {
+    color: $foreground;
+    background: $highlight;
 }
 """

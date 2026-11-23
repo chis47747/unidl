@@ -27,6 +27,7 @@ from textual.widgets import Static
 
 from ..core.i18n import tr
 from ..core.playback import Playback
+from .bidi import visual_text
 from .qr import halfcell_image_class, protocol_cell_size, protocol_image_class
 
 if TYPE_CHECKING:
@@ -315,27 +316,50 @@ def _contain_dimensions(image: Image.Image, max_width: int, max_height: int) -> 
     return min(width, int(max_width)), min(height, int(max_height))
 
 
-def _contain_image(image: Image.Image, max_width: int, max_height: int) -> Image.Image:
+def _hex_rgb(color: str | None, fallback: tuple[int, int, int] = (20, 20, 20)) -> tuple[int, int, int]:
+    """Convert a palette hex colour (e.g. '#f7f6f3') into an RGB tuple."""
+    text = str(color or "").strip().lstrip("#")
+    if len(text) == 6:
+        try:
+            return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+        except ValueError:
+            pass
+    return fallback
+
+
+def _contain_image(
+    image: Image.Image,
+    max_width: int,
+    max_height: int,
+    *,
+    background: tuple[int, int, int] = (20, 20, 20),
+) -> Image.Image:
     """Create a letterboxed raster for native terminal image widgets."""
     from PIL import Image, ImageOps
 
     width, height = _contain_dimensions(image, max_width, max_height)
     cell_width, cell_height = protocol_cell_size() or (1, 2)
     scale = 8
-    canvas = Image.new("RGB", (max(1, width * cell_width * scale), max(1, height * cell_height * scale)), (20, 20, 20))
+    canvas = Image.new("RGB", (max(1, width * cell_width * scale), max(1, height * cell_height * scale)), background)
     fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
     canvas.paste(fitted, ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2))
     return canvas
 
 
-def _letterbox_image(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+def _letterbox_image(
+    image: Image.Image,
+    target_width: int,
+    target_height: int,
+    *,
+    background: tuple[int, int, int] = (20, 20, 20),
+) -> Image.Image:
     """Build a canvas matching a widget's exact terminal area."""
     from PIL import Image, ImageOps
 
     cell_width, cell_height = protocol_cell_size() or (1, 2)
     scale = 8
     canvas_size = (max(1, int(target_width) * cell_width * scale), max(1, int(target_height) * cell_height * scale))
-    canvas = Image.new("RGB", canvas_size, (20, 20, 20))
+    canvas = Image.new("RGB", canvas_size, background)
     fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
     canvas.paste(fitted, ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2))
     return canvas
@@ -350,7 +374,7 @@ def _metadata_text(preview: AudioPreview, palette) -> Text:
         if result:
             result.append("\n")
         result.append(f"{tr(label)}: ", style=palette.muted)
-        result.append(value, style=palette.fg2)
+        result.append(visual_text(value), style=palette.fg2)
     if not result:
         result.append(tr("audio.no_metadata"), style=palette.dim)
     return result
@@ -367,23 +391,40 @@ class AudioPreviewWidget(Vertical):
         super().__init__(**kwargs)
         self.preview = AudioPreview.from_value(preview)
         self._load_token = 0
+        self._raw_image: Image.Image | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(tr("audio.cover"), classes="audio-cover-label")
         protocol_image = protocol_image_class()
         if protocol_image is not None:
-            # Known Kitty/Sixel terminals can display the original pixels.  A
-            # blank native widget is preferable to first painting a low-detail
-            # fallback and then replacing it once the image arrives.
-            yield protocol_image(id="audio-cover", classes="audio-cover")
+            # Known Kitty/Sixel terminals display the original pixels, while a
+            # status line remains visible during loading or fetch failure so the
+            # card never turns into an unexplained blank box.
+            yield Static(tr("audio.cover_loading"), id="audio-cover-status", classes="audio-cover")
+            cover = protocol_image(id="audio-cover", classes="audio-cover")
+            cover.display = False
+            yield cover
         else:
             yield Static(tr("audio.cover_loading"), id="audio-cover", classes="audio-cover")
         yield Static("", id="audio-metadata", classes="audio-metadata")
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self._apply_layout()
         if self.preview is not None:
             self._refresh_preview()
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if not self.is_attached:
+            return
+        if self.preview is not None:
+            self.query_one("#audio-metadata", Static).update(
+                _metadata_text(self.preview, self.app.palette)
+            )
+        if self._raw_image is not None:
+            self._paint_cover(self._raw_image)
 
     def on_resize(self) -> None:
         self._apply_layout()
@@ -446,12 +487,21 @@ class AudioPreviewWidget(Vertical):
         # that case; the cover is restored automatically on the next resize.
         compact = available_height < MIN_COVER_HEIGHT + 2
         label.display = available_height >= 2
-        cover.display = not compact
+        status = self.query("#audio-cover-status")
+        if status:
+            has_img = self._raw_image is not None
+            cover.display = not compact and has_img
+            status.first().display = not compact and not has_img
+        else:
+            cover.display = not compact
         cover_width, cover_height, metadata_rows = self._cover_layout()
         if compact:
             metadata_rows = max(1, available_height - (1 if label.display else 0))
         cover.styles.width = cover_width
         cover.styles.height = cover_height
+        if status:
+            status.first().styles.width = cover_width
+            status.first().styles.height = cover_height
         metadata.styles.height = metadata_rows
         metadata.styles.max_height = metadata_rows
         metadata.styles.min_height = 1
@@ -462,27 +512,34 @@ class AudioPreviewWidget(Vertical):
         preview: AudioPreview | Mapping[str, Any] | None,
     ) -> None:
         self.preview = AudioPreview.from_value(preview)
+        self._raw_image = None
         self._load_token += 1
         if not self.is_mounted:
             return
         self._apply_layout()
         self._refresh_preview()
 
+    def _set_cover_status(self, message: str) -> None:
+        cover = self.query_one("#audio-cover")
+        status = self.query("#audio-cover-status")
+        if status:
+            cover.image = None
+            cover.display = False
+            status.first(Static).update(message)
+            status.first().display = True
+        elif isinstance(cover, Static):
+            cover.update(message)
+        else:
+            cover.image = None
+
     def _refresh_preview(self) -> None:
         preview = self.preview
-        cover = self.query_one("#audio-cover")
         if preview is None:
-            if isinstance(cover, Static):
-                cover.update(tr("audio.no_preview"))
-            else:
-                cover.image = None
+            self._set_cover_status(tr("audio.no_preview"))
             self.query_one("#audio-metadata", Static).update("")
             return
         self._apply_layout()
-        if isinstance(cover, Static):
-            cover.update(tr("audio.cover_loading"))
-        else:
-            cover.image = None
+        self._set_cover_status(tr("audio.cover_loading"))
         self.query_one("#audio-metadata", Static).update(
             _metadata_text(preview, self.app.palette)
         )
@@ -495,25 +552,38 @@ class AudioPreviewWidget(Vertical):
                 _cover_bytes(preview.cover_source, preview.cover_headers, preview.proxy)
             )
         except Exception:
-            self.app.call_from_thread(self._show_cover, token, None)
+            try:
+                self.app.call_from_thread(self._show_cover, token, None)
+            except RuntimeError:
+                pass
             return
-        self.app.call_from_thread(self._show_cover, token, image)
+        try:
+            self.app.call_from_thread(self._show_cover, token, image)
+        except RuntimeError:
+            pass
+
+    def _paint_cover(self, image: Image.Image) -> None:
+        target = self.query_one("#audio-cover")
+        status = self.query("#audio-cover-status")
+        if status:
+            status.first().display = False
+            target.display = True
+        if protocol_image_class() is not None and not isinstance(target, Static):
+            bg = _hex_rgb(getattr(getattr(self.app, "palette", None), "bg", None))
+            width, height = getattr(self, "_cover_size", (COVER_WIDTH, COVER_HEIGHT))
+            target.image = _letterbox_image(image, width, height, background=bg)
+        else:
+            width, height = getattr(self, "_cover_size", (COVER_WIDTH, COVER_HEIGHT))
+            target.update(_cover_renderable(image, width=width, height=height), layout=False)
 
     def _show_cover(self, token: int, image: Image.Image | None) -> None:
         if token != self._load_token or not self.is_mounted:
             return
-        target = self.query_one("#audio-cover")
+        self._raw_image = image
         if image is None:
-            if isinstance(target, Static):
-                target.update(tr("audio.cover_unavailable"), layout=False)
-            else:
-                target.image = None
+            self._set_cover_status(tr("audio.cover_unavailable"))
             return
-        if protocol_image_class() is not None and not isinstance(target, Static):
-            target.image = image
-        else:
-            width, height = getattr(self, "_cover_size", (COVER_WIDTH, COVER_HEIGHT))
-            target.update(_cover_renderable(image, width=width, height=height), layout=False)
+        self._paint_cover(image)
 
     def on_unmount(self) -> None:
         """Release a native terminal image before the preview leaves the DOM."""

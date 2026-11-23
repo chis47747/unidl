@@ -30,7 +30,8 @@ from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 
 from ..core import justwatch as jw
-from ..core.i18n import tr
+from ..core.i18n import cell_width, tr
+from ..core.terminal_cells import crop as crop_cells
 from .chrome import Chrome, KeyBar, StatusChip
 from .filterbox import FILTER_MIN, FilterBox, as_number, matches
 
@@ -159,7 +160,7 @@ class SearchRegionScreen(Screen[str]):
         self._codes = []
         entries = _region_entries(needle)
         if not entries:
-            option_list.add_option(Option(f"  [$dim]nothing matches '{needle}'[/]", disabled=True))
+            option_list.add_option(Option(f"  [$dim]nothing matches '{_safe(needle)}'[/]", disabled=True))
             return
         for code, name in entries:
             self._codes.append(code)
@@ -339,6 +340,10 @@ class JustWatchScreen(Screen):
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "regions", "Regions", show=False),
+        Binding("up", "cursor(-1)", "Up", show=False),
+        Binding("down", "cursor(1)", "Down", show=False),
+        Binding("pageup", "cursor(-10)", "Page up", show=False),
+        Binding("pagedown", "cursor(10)", "Page down", show=False),
     ]
 
     def __init__(self, query: str):
@@ -346,10 +351,11 @@ class JustWatchScreen(Screen):
         self._query = query
         self._titles: list[jw.Title] = []
         self._error = ""
+        self._generation = 0
 
     def compose(self) -> ComposeResult:
         yield Chrome()
-        yield Static(f"{tr('justwatch.availability_head')}  [$dim]{self._query}[/]", id="masthead")
+        yield Static(f"{tr('justwatch.availability_head')}  [$dim]{_safe(self._query)}[/]", id="masthead")
         with Horizontal(id="statusline"):
             yield StatusChip("regions", id="region-chip")
             yield Static("·", classes="chip-sep")
@@ -389,24 +395,70 @@ class JustWatchScreen(Screen):
             f"[$dim]{tr('justwatch.searching_catalogue', region=jw.REGIONS.get(region, region), count=len(self.regions))}[/]"
         )
 
+    def on_unmount(self) -> None:
+        self._generation += 1
+        self.workers.cancel_group(self, "justwatch-search")
+
+    def relocalize(self) -> None:
+        from .chrome import refresh_locale_widgets
+
+        refresh_locale_widgets(self)
+        self.query_one("#masthead", Static).update(
+            f"{tr('justwatch.availability_head')}  [$dim]{_safe(self._query)}[/]"
+        )
+        filter_box = self.query(FilterBox)
+        if filter_box:
+            filter_box.first(FilterBox).placeholder = tr("filter.hint.results")
+        self._render_chips()
+        if self._titles or self._error:
+            needle = filter_box.first(FilterBox).value if filter_box else ""
+            self._render_rows(needle)
+
+    def action_cursor(self, delta: int) -> None:
+        option_list = self.query_one("#result-list", OptionList)
+        count = option_list.option_count
+        if not count:
+            return
+        enabled = [i for i in range(count) if not option_list.get_option_at_index(i).disabled]
+        if not enabled:
+            return
+        current = option_list.highlighted
+        if current is None:
+            option_list.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            return
+        target = max(0, min(count - 1, current + delta))
+        option_list.highlighted = min(enabled, key=lambda i: (abs(i - target), i))
+
     # ------------------------------------------------------------------ search
     @work(thread=True, exclusive=True, group="justwatch-search")
     def search(self) -> None:
+        self._generation += 1
+        generation = self._generation
         client = jw.JustWatch()
         region = self.search_region
         try:
             found = client.search(self._query, region=region, count=RESULT_COUNT)
         except jw.JustWatchError as exc:
-            self.app.call_from_thread(self._failed, str(exc))
+            try:
+                self.app.call_from_thread(self._failed, str(exc), generation)
+            except RuntimeError:
+                pass
             return
-        self.app.call_from_thread(self._show, found)
+        try:
+            self.app.call_from_thread(self._show, found, generation)
+        except RuntimeError:
+            pass
 
-    def _failed(self, message: str) -> None:
+    def _failed(self, message: str, generation: int | None = None) -> None:
+        if not self.is_attached or (generation is not None and generation != self._generation):
+            return
         self._error = message
         self._titles = []
         self._render_rows()
 
-    def _show(self, titles: list[jw.Title]) -> None:
+    def _show(self, titles: list[jw.Title], generation: int | None = None) -> None:
+        if not self.is_attached or (generation is not None and generation != self._generation):
+            return
         self._error = ""
         self._titles = titles
         self._render_rows()
@@ -416,11 +468,11 @@ class JustWatchScreen(Screen):
         option_list.clear_options()
 
         if self._error:
-            option_list.add_option(Option(f"  [$bad]{self._error}[/]", disabled=True))
+            option_list.add_option(Option(f"  [$bad]{_safe(self._error)}[/]", disabled=True))
             return
         if not self._titles:
             option_list.add_option(
-                Option(f"  [$dim]{tr('justwatch.nothing', query=self._query)}[/]", disabled=True)
+                Option(f"  [$dim]{tr('justwatch.nothing', query=_safe(self._query))}[/]", disabled=True)
             )
             return
 
@@ -461,7 +513,12 @@ class JustWatchScreen(Screen):
         if title.genres:
             bits.append(", ".join(_safe(g) for g in title.genres[:3]))
         if title.synopsis:
-            bits.append(_safe(title.synopsis[:96] + ("..." if len(title.synopsis) > 96 else "")))
+            summary = (
+                f"{crop_cells(title.synopsis, 96)}..."
+                if cell_width(title.synopsis) > 96
+                else title.synopsis
+            )
+            bits.append(_safe(summary))
         detail = f"\n       [$dim]{'  ·  '.join(bits)}[/]" if bits else ""
         return head + detail
 
@@ -534,6 +591,7 @@ class AvailabilityScreen(Screen):
         #: one entry per rendered row: an offer and the service that can get it
         self._rows: list[tuple[jw.Offer, str | None] | None] = []
         self._error = ""
+        self._generation = 0
 
     def compose(self) -> ComposeResult:
         yield Chrome()
@@ -574,32 +632,69 @@ class AvailabilityScreen(Screen):
             tr("justwatch.chip_availability", count=len(regions), shown=shown)
         )
 
-    def _status(self, text: str) -> None:
+    def on_unmount(self) -> None:
+        self._generation += 1
+        self.workers.cancel_group(self, "justwatch-offers")
+
+    def relocalize(self) -> None:
+        from .chrome import refresh_locale_widgets
+
+        refresh_locale_widgets(self)
+        self._render_chips()
+        if self._found or self._error:
+            self._render_rows()
+
+    def _status(self, text: str, generation: int | None = None) -> None:
+        if not self.is_attached or (generation is not None and generation != self._generation):
+            return
         self.query_one("#subhead", Static).update(f"[$dim]{text}[/]")
 
     # ------------------------------------------------------------------- fetch
     @work(thread=True, exclusive=True, group="justwatch-offers")
     def fetch(self) -> None:
+        self._generation += 1
+        generation = self._generation
         client = jw.JustWatch()
         regions = self.regions
+
+        def report_region(code: str) -> None:
+            if generation != self._generation:
+                return
+            try:
+                self.app.call_from_thread(
+                    self._status,
+                    tr("justwatch.looking_up", region=jw.region_label(code)),
+                    generation,
+                )
+            except RuntimeError:
+                pass
+
         try:
             found = client.availability(
                 self.title_ref,
                 regions,
-                on_region=lambda code: self.app.call_from_thread(
-                    self._status, tr("justwatch.looking_up", region=jw.region_label(code))
-                ),
+                on_region=report_region,
             )
         except jw.JustWatchError as exc:
-            self.app.call_from_thread(self._failed, str(exc))
+            try:
+                self.app.call_from_thread(self._failed, str(exc), generation)
+            except RuntimeError:
+                pass
             return
-        self.app.call_from_thread(self._show, found)
+        try:
+            self.app.call_from_thread(self._show, found, generation)
+        except RuntimeError:
+            pass
 
-    def _failed(self, message: str) -> None:
+    def _failed(self, message: str, generation: int | None = None) -> None:
+        if not self.is_attached or (generation is not None and generation != self._generation):
+            return
         self._error = message
         self._render_rows()
 
-    def _show(self, found: list[jw.Availability]) -> None:
+    def _show(self, found: list[jw.Availability], generation: int | None = None) -> None:
+        if not self.is_attached or (generation is not None and generation != self._generation):
+            return
         self._error = ""
         self._found = found
         self._render_rows()
@@ -611,7 +706,7 @@ class AvailabilityScreen(Screen):
         self._rows = []
 
         if self._error:
-            option_list.add_option(Option(f"  [$bad]{self._error}[/]", disabled=True))
+            option_list.add_option(Option(f"  [$bad]{_safe(self._error)}[/]", disabled=True))
             self._status(tr("justwatch.fetch_failed"))
             return
 

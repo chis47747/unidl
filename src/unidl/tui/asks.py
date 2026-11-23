@@ -270,13 +270,36 @@ class _Filterable(AskWidget):
             self._list().highlighted = self._visible.index(original)
 
     def action_cursor(self, delta: int) -> None:
-        """Move the list while the filter field has the focus."""
+        """Move the list while the filter field has the focus, skipping disabled rows."""
         widget = self._list()
         count = widget.option_count
         if not count:
             return
-        current = widget.highlighted if widget.highlighted is not None else -1 if delta > 0 else count
-        widget.highlighted = max(0, min(count - 1, current + delta))
+        enabled = [i for i in range(count) if not widget.get_option_at_index(i).disabled]
+        if not enabled:
+            return
+        current = widget.highlighted
+        if current is None:
+            widget.highlighted = enabled[0] if delta > 0 else enabled[-1]
+            return
+        target = max(0, min(count - 1, current + delta))
+        if not widget.get_option_at_index(target).disabled:
+            widget.highlighted = target
+            return
+        step = 1 if delta > 0 else -1
+        scan = target
+        while 0 <= scan < count:
+            if not widget.get_option_at_index(scan).disabled:
+                widget.highlighted = scan
+                return
+            scan += step
+        # Fall back to the nearest enabled option in the opposite direction.
+        scan = target - step
+        while 0 <= scan < count:
+            if not widget.get_option_at_index(scan).disabled:
+                widget.highlighted = scan
+                return
+            scan -= step
 
     def _focus_default(self) -> None:
         """The filter when there is one, the list otherwise."""
@@ -365,6 +388,9 @@ class PickWidget(_Filterable, _NumberJump):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter in the filter takes whatever is highlighted."""
         event.stop()
+        number = as_number(event.value)
+        if number is not None and not (1 <= number <= len(self.ask.choices)):
+            return
         widget = self._list()
         index = widget.highlighted
         if index is None or index >= len(self._visible):
@@ -379,13 +405,21 @@ class PickWidget(_Filterable, _NumberJump):
         self.answer(self.ask.choices[index].value)
 
 
-class MultiPickWidget(_Filterable):
+class MultiPickWidget(_Filterable, _NumberJump):
     """Multi choice with checkboxes.
 
     What is ticked is remembered here, not read off the widget, because filtering
     rebuilds the list. Narrowing the view must not silently un-tick the episodes
     that scrolled out of it.
     """
+
+    BINDINGS = [Binding(str(digit), f"digit('{digit}')", show=False) for digit in range(10)]
+
+    def action_digit(self, digit: str) -> None:
+        """Jump to a numbered row when the selection list has focus."""
+        target = self._typed_number(digit)
+        if target is not None and 1 <= target <= len(self.ask.choices):
+            self.highlight_original(target - 1)
 
     def __init__(self, ask: Ask) -> None:
         super().__init__(ask)
@@ -494,7 +528,7 @@ class MultiPickWidget(_Filterable):
         if self.filterable:
             keys += tr("ask.multi.tab_filter")
         counted = f"[$accent]{tr('ask.multi.selected', picked=picked, total=total)}[/]"
-        if self._filtered:
+        if self._filtered and (self._chosen - set(self._visible)):
             counted += f"[$dim]{tr('ask.multi.hidden')}[/]"
         self.query_one("#multi-hint", Label).update(f"[$dim]{keys}[/]   {counted}")
 
@@ -569,9 +603,13 @@ class MultiPickWidget(_Filterable):
 
     def _take_pending(self) -> None:
         """Tick exactly what the expression asked for and hand over to the list."""
-        wanted = self._pending or set()
+        wanted_rows = self._pending or set()
+        if not wanted_rows:
+            # Never wipe existing selections when a mistyped range matches nothing.
+            self.notify(tr("ask.multi.nothing"), severity="warning", timeout=4)
+            return
         self._pending = None
-        self._chosen = {index for index in wanted if 0 <= index < len(self.ask.choices)}
+        self._chosen = {index for index in wanted_rows if 0 <= index < len(self.ask.choices)}
         found = self.query(FilterBox)
         if found:
             # clear without re-entering apply_filter through the changed event
@@ -582,7 +620,7 @@ class MultiPickWidget(_Filterable):
         widget = self._list()
         widget.clear_options()
         widget.add_options(self._selections(self._visible))
-        first = min(wanted, default=None)
+        first = min(wanted_rows, default=None)
         widget.highlighted = first if first is not None else 0
         self._render_hint()
         widget.focus()
@@ -753,7 +791,7 @@ class TextWidget(ManualStep, AskWidget):
             rows = [" · ".join(keys), tr("ask.paste_below")]
             for index, row in enumerate([row for row in rows if row]):
                 yield Label(
-                    f"[$dim]{row}[/]",
+                    f"[$dim]{visual_markup(row)}[/]",
                     classes="await-keys" if index == 0 else "await-keys thin",
                 )
         else:
@@ -782,7 +820,7 @@ class TextWidget(ManualStep, AskWidget):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.answer(event.value.strip())
+        self.answer(event.value if self.ask.password else event.value.strip())
 
 
 class ConfirmWidget(AskWidget):
@@ -794,7 +832,10 @@ class ConfirmWidget(AskWidget):
     def compose(self):
         yield from self._header()
         default = "Y/n" if self.ask.default else "y/N"
-        yield Label(f"[dim]{tr('ask.confirm_hint', default=default)}[/dim]", classes="ask-hint")
+        yield Label(
+            f"[$dim]{visual_markup(tr('ask.confirm_hint', choice=default))}[/]",
+            classes="ask-hint",
+        )
         with Horizontal():
             yield OptionList(
                 Option(tr("ask.yes"), id="yes"),
@@ -852,7 +893,7 @@ class AwaitWidget(ManualStep, AskWidget):
         # only the first of them gets the row of air above it
         for index, row in enumerate([row for row in rows if row]):
             yield Label(
-                f"[$dim]{row}[/]",
+                f"[$dim]{visual_markup(row)}[/]",
                 classes="await-keys" if index == 0 else "await-keys thin",
             )
 
@@ -907,7 +948,7 @@ class FormWidget(ManualStep, AskWidget):
         rows = [self.ask.hint.strip(), " · ".join(keys), tr("ask.back")]
         for index, row in enumerate([row for row in rows if row]):
             yield Label(
-                f"[$dim]{row}[/]",
+                f"[$dim]{visual_markup(row)}[/]",
                 classes="await-keys" if index == 0 else "await-keys thin",
             )
 
@@ -980,28 +1021,111 @@ class PanelWidget(ManualStep, Vertical):
         rows = [self.ask.hint.strip(), " · ".join(keys)]
         for index, row in enumerate([row for row in rows if row]):
             yield Label(
-                f"[$dim]{row}[/]",
+                f"[$dim]{visual_markup(row)}[/]",
                 classes="await-keys" if index == 0 else "await-keys thin",
             )
 
 
-class TableWidget(AskWidget):
+class TableWidget(AskWidget, _NumberJump):
     """Grid selection, used for channel lists and EPG."""
+
+    BINDINGS = [
+        Binding("up", "cursor(-1)", "Up", show=False),
+        Binding("down", "cursor(1)", "Down", show=False),
+        Binding("pageup", "cursor(-10)", "Page up", show=False),
+        Binding("pagedown", "cursor(10)", "Page down", show=False),
+        *[Binding(str(digit), f"digit('{digit}')", show=False) for digit in range(10)],
+    ]
+
+    def __init__(self, ask: Ask) -> None:
+        super().__init__(ask)
+        self._visible: list[int] = list(range(len(ask.rows)))
+
+    @property
+    def filterable(self) -> bool:
+        return len(self.ask.rows) >= FILTER_MIN
 
     def compose(self):
         yield from self._header()
-        table = DataTable(cursor_type="row", zebra_stripes=True)
-        yield table
+        yield ScrollTail(DataTable(cursor_type="row", zebra_stripes=True))
+        if self.filterable:
+            yield FilterBox(hint=tr("ask.filter.entries", count=len(self.ask.rows)))
+
+    def _populate_rows(self, indexes: list[int]) -> None:
+        table = self.query_one(DataTable)
+        table.clear(columns=False)
+        for index in indexes:
+            row = self.ask.rows[index]
+            style = self.ask.row_styles[index] if index < len(self.ask.row_styles) else ""
+            cells = [Text(visual_text(cell), style=style) for cell in row]
+            table.add_row(*cells, key=str(index))
+        if indexes:
+            table.move_cursor(row=0, animate=False)
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
         for column in self.ask.columns:
             table.add_column(Text(visual_text(column)))
-        for index, row in enumerate(self.ask.rows):
-            style = self.ask.row_styles[index] if index < len(self.ask.row_styles) else ""
-            cells = [Text(visual_text(cell), style=style) for cell in row]
-            table.add_row(*cells, key=str(index))
-        table.focus()
+        self._populate_rows(self._visible)
+        self.focus_first()
+
+    def focus_first(self) -> None:
+        found = self.query(FilterBox)
+        if found:
+            found.first().focus()
+            return
+        tables = self.query(DataTable)
+        if tables:
+            tables.first().focus()
+
+    def apply_filter(self, needle: str) -> None:
+        keep = [
+            index
+            for index, row in enumerate(self.ask.rows)
+            if matches(needle, *(str(cell) for cell in row))
+        ]
+        if keep == self._visible:
+            return
+        self._visible = keep
+        self._populate_rows(keep)
+
+    def highlight_original(self, original: int) -> None:
+        if original in self._visible:
+            self.query_one(DataTable).move_cursor(row=self._visible.index(original), animate=False)
+
+    def action_cursor(self, delta: int) -> None:
+        table = self.query_one(DataTable)
+        if not self._visible:
+            return
+        target = max(0, min(len(self._visible) - 1, table.cursor_row + delta))
+        table.move_cursor(row=target, animate=False)
+
+    def action_digit(self, digit: str) -> None:
+        target = self._typed_number(digit)
+        if target is not None and 1 <= target <= len(self.ask.rows):
+            self.highlight_original(target - 1)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        number = as_number(event.value)
+        if number is not None:
+            self.apply_filter("")
+            self.highlight_original(number - 1)
+            return
+        self.apply_filter(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        number = as_number(event.value)
+        if number is not None and not (1 <= number <= len(self.ask.rows)):
+            return
+        if not self._visible:
+            return
+        row_index = self.query_one(DataTable).cursor_row
+        if 0 <= row_index < len(self._visible):
+            original = self._visible[row_index]
+            if 0 <= original < len(self.ask.values):
+                self.answer(self.ask.values[original])
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()

@@ -6,17 +6,17 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Label, OptionList, Static
+from textual.widgets import Button, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import exports, service_catalog
-from ..core.i18n import setting_label, setting_value, tr
+from ..core.i18n import phrase, setting_label, setting_value, tr
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, service_license_settings
 from .bidi import visual_markup
-from .chrome import Chrome, KeyBar
+from .chrome import Chrome, CloseMark, KeyBar
 from .settings_layout import label_width, setting_row
 
 # Static declarations shared by the manager and Home's metadata-only search.
@@ -50,12 +50,18 @@ class _ChapterPolicyScreen(ModalScreen[None]):
         ]
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            yield Static(tr("service.chapters.title", default="Chapter metadata by service"), classes="ask-title")
-            yield Label(tr("service.chapters.help", default="Select a service to toggle optional chapter metadata."), classes="ask-hint")
+        with Vertical(classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("service.chapters.title", default="Chapter metadata by service"), classes="modal-card-title")
+                yield CloseMark(id="service-modal-close")
+            yield Label(tr("service.chapters.help", default="Select a service to toggle optional chapter metadata."), classes="modal-card-help")
             yield OptionList(id="service-chapters-list")
-        yield KeyBar(("enter", "toggle"), ("^b", "back"), ("esc", "back"))
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("Close"), id="service-modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -104,12 +110,18 @@ class _AttachmentPolicyScreen(ModalScreen[None]):
         self.scopes = [Settings(cls.ID, [spec], app.settings_store, parent=app.globals, legacy_ids=cls.LEGACY_IDS) for cls in self.services]
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            yield Static(tr("service.attachments.title", default="Title attachments by service"), classes="ask-title")
-            yield Label(tr("service.attachments.help", default="Select a service to toggle optional title attachments."), classes="ask-hint")
+        with Vertical(classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("service.attachments.title", default="Title attachments by service"), classes="modal-card-title")
+                yield CloseMark(id="service-modal-close")
+            yield Label(tr("service.attachments.help", default="Select a service to toggle optional title attachments."), classes="modal-card-help")
             yield OptionList(id="service-attachments-list")
-        yield KeyBar(("enter", "toggle"), ("^b", "back"), ("esc", "back"))
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("Close"), id="service-modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -164,12 +176,22 @@ class _BitratePolicyScreen(ModalScreen[None]):
         ]
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            yield Static(tr("service.bitrate.title"), classes="ask-title")
-            yield Label(tr("service.bitrate.help"), id="service-bitrate-help", classes="ask-hint")
+        with Vertical(classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("service.bitrate.title"), classes="modal-card-title")
+                yield CloseMark(id="service-modal-close")
+            yield Label(tr("service.bitrate.help"), id="service-bitrate-help", classes="modal-card-help")
             yield OptionList(id="service-bitrate-list")
-        yield KeyBar(("enter", "toggle"), ("r", "reset"), ("^b", "back"), ("esc", "back"))
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("reset"), id="service-bitrate-reset")
+                yield Button(phrase("Close"), id="service-modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "service-bitrate-reset":
+            self.action_reset()
+        else:
+            self.action_cancel()
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -183,10 +205,12 @@ class _BitratePolicyScreen(ModalScreen[None]):
         found = self.query("#service-bitrate-help")
         if found:
             hint = found.first(Label)
-            # Override the shared single-line ask hint with responsive prose.
             hint.styles.width = "1fr"
             hint.styles.height = "auto"
-            hint.styles.max_height = max(2, min(8, self.app.size.height - 7))
+            hint.styles.max_height = max(2, min(8, self.app.size.height - 8))
+        actions = self.query(".modal-card-actions")
+        if actions:
+            actions.first().display = self.app.size.height >= 20
 
     def rebuild(self) -> None:
         options = self.query_one("#service-bitrate-list", OptionList)
@@ -238,21 +262,29 @@ class _RegistrationEditor(ModalScreen[str | None]):
         self.registered = set(registered)
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            yield Static(tr("service.register.title"), classes="ask-title")
-            yield Label(tr("service.register.help"), classes="ask-hint")
+        with Vertical(classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("service.register.title"), classes="modal-card-title")
+                yield CloseMark(id="service-modal-close")
+            yield Label(tr("service.register.help"), classes="modal-card-help")
             yield OptionList(id="service-registration-list")
-        yield KeyBar(("enter", "register"), ("^b", "back"), ("esc", "cancel"))
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("Cancel"), id="service-modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
 
     def on_mount(self) -> None:
         options = self.query_one("#service-registration-list", OptionList)
         for index, source in enumerate(self.sources):
+            name = visual_markup(source.name)
+            sid = visual_markup(source.service_id)
             if source.service_id in self.registered:
-                text = f"  [$dim]✓  {source.name}  ({source.service_id})[/]"
+                text = f"  [$dim]✓  {name}  ({sid})[/]"
                 options.add_option(Option(text, id=f"registered-{index}", disabled=True))
             else:
-                text = f"  [$accent]＋  {source.name}  ({source.service_id})[/]"
+                text = f"  [$accent]＋  {name}  ({sid})[/]"
                 options.add_option(Option(text, id=f"available-{index}"))
         if not self.sources:
             options.add_option(Option(f"  [$dim]{tr('service.register.empty')}[/]", disabled=True))
@@ -293,12 +325,18 @@ class _ExportManifestEditor(ModalScreen[None]):
         self.store = store
 
     def compose(self) -> ComposeResult:
-        yield Chrome(show_search=False, show_settings=False)
-        with Vertical(id="modal-body"):
-            yield Static(tr("service.export.title"), classes="ask-title")
-            yield Label(tr("service.export.help"), classes="ask-hint")
+        with Vertical(classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("service.export.title"), classes="modal-card-title")
+                yield CloseMark(id="service-modal-close")
+            yield Label(tr("service.export.help"), classes="modal-card-help")
             yield OptionList(id="service-export-list")
-        yield KeyBar(("enter", "change"), ("^b", "back"), ("esc", "cancel"))
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(phrase("Close"), id="service-modal-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -399,7 +437,12 @@ class _ExportManifestEditor(ModalScreen[None]):
 
 
 class ServicesManagerScreen(Screen[None]):
-    BINDINGS = [Binding("ctrl+b", "back", "Back", show=False), Binding("escape", "back", "Quit", show=False), Binding("enter", "activate", "Change", show=True)]
+    BINDINGS = [
+        Binding("b", "back", "Back", show=False),
+        Binding("ctrl+b", "back", "Back", show=False),
+        Binding("escape", "back", "Back", show=False),
+        Binding("enter", "activate", "Change", show=True),
+    ]
 
     def __init__(self, globals_scope: Settings, *, focus_key: str = ""):
         super().__init__()
@@ -427,6 +470,13 @@ class ServicesManagerScreen(Screen[None]):
 
     def on_resize(self) -> None:
         self._fit_help()
+
+    def relocalize(self) -> None:
+        from .chrome import refresh_locale_widgets
+
+        refresh_locale_widgets(self)
+        self.query_one("#masthead", Static).update(tr("settings.services.title"))
+        self.rebuild()
 
     def _fit_help(self) -> None:
         """Give wrapped help all available rows while preserving all choices."""

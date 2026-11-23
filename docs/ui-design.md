@@ -424,21 +424,22 @@ white is barely legible, so `ok` is a deeper green there while staying green.
 
 | Role | Used for | Dark | Light |
 |------|----------|------|-------|
-| `accent` | selection, keys, titles | `#bb9af7` | `#6d3fc4` |
-| `fg` | primary text | `#e1e1e1` | `#1c1c1c` |
-| `fg2` | secondary | `#c8c8c8` | `#3a3a3a` |
-| `muted` | captions, labels | `#6c6c6c` | `#6a6a6a` |
-| `dim` | hints | `#585858` | `#8a8a8a` |
-| `gutter` | numbers, rules, structure | `#414141` | `#b4b4b4` |
-| `manifest` | URLs | `#7aa2f7` | `#2a54b8` |
-| `ok` | success, keys | `#9ece6a` | `#3c7a1e` |
-| `warn` | warnings, live | `#e0af68` | `#8a5a00` |
-| `error` | failures | `#f7768e` | `#b3243b` |
+| `accent` | selection, keys, titles | `#bb9af7` | `#5b3aa6` |
+| `fg` | primary text | `#e1e1e1` | `#1b1d21` |
+| `fg2` | secondary | `#c8c8c8` | `#34373c` |
+| `muted` | captions, labels | `#9c9c9c` | `#4f535a` |
+| `dim` | hints | `#868686` | `#5f636a` |
+| `gutter` | numbers, rules, structure | `#848484` | `#63676e` |
+| `manifest` | URLs | `#7aa2f7` | `#1f4fa0` |
+| `ok` | success, keys | `#9ece6a` | `#2f6b21` |
+| `warn` | warnings, live | `#e0af68` | `#7a4f08` |
+| `error` | failures | `#f7768e` | `#9c2233` |
 | `original` | original audio/subtitle badge | `#8eaaa4` | `#42665e` |
-| `bg` | base | `#141414` | `#fbfbfb` |
-| `panel` | recessed blocks | `#1c1c1c` | `#f1f1f1` |
-| `highlight` | selected row | `#242424` | `#e6e2f2` |
-| `hover` | mouse hover | `#2c2c2c` | `#ebebeb` |
+| `bg` | base | `#141414` | `#f7f6f3` |
+| `panel` | recessed blocks | `#1c1c1c` | `#edebe6` |
+| `highlight` | selected row | `#242424` | `#e7e2f6` |
+| `hover` | mouse hover | `#2c2c2c` | `#e2dfd7` |
+| `visual` | active/button hover | `#363636` | `#ded8f3` |
 
 ### How to reference a colour
 

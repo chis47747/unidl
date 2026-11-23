@@ -298,6 +298,7 @@ def _sabr_extra(
         {
             "source": "json_sabr_ump",
             "sabr_ump": True,
+            "sabr_vod_stateful": bool(server_abr.get("vod_stateful")),
             "sabr_media_type": media_type,
             "sabr_transport": "sabr_ump",
             "sabr_dvr_as_vod": title_meta.get("title_source") == "dvr",

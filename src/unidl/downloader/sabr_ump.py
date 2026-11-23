@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import http.client
 import io
 import math
@@ -9,6 +10,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, wait
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -149,6 +151,11 @@ def download_sabr_ump_stream(
     retries: int = 3,
     progress: Callable[[int, int, int], None] | None = None,
 ) -> SabrUmpDownloadStats:
+    if (stream.extra or {}).get("sabr_vod_stateful") and not stream.is_live:
+        return _download_sabr_ump_vod_stream(
+            stream, output_path, headers=headers, request_timeout=request_timeout,
+            retries=retries, progress=progress,
+        )
     request = _build_stream_request(stream)
     request_headers = _sabr_request_headers(_merged_sabr_headers(stream, headers))
     attempts = _sabr_retry_loop_attempts(retries)
@@ -208,6 +215,282 @@ def download_sabr_ump_stream(
             "refusing to keep a partial file."
         )
     return stats
+
+
+@dataclass
+class _SabrVodTrack:
+    format_id: FormatId
+    end_sequence: int | None = None
+    end_ms: int | None = None
+    init_saved: bool = False
+    segments: dict[int, tuple[int, int]] = dataclass_field(default_factory=dict)
+
+    @property
+    def buffered_end_ms(self) -> int:
+        end = 0
+        for start, duration in sorted(self.segments.values()):
+            if start > end + 1:
+                break
+            end = max(end, start + duration)
+        return end
+
+    @property
+    def complete(self) -> bool:
+        if not self.init_saved or not self.segments or not self.end_ms:
+            return False
+        if self.end_sequence is not None and max(self.segments) < self.end_sequence:
+            return False
+        return self.buffered_end_ms >= self.end_ms - 2
+
+
+@dataclass
+class _SabrVodState:
+    tracks: dict[FormatId, _SabrVodTrack] = dataclass_field(default_factory=dict)
+    cookie: bytes | None = None
+    backoff_ms: int = 0
+    contexts: dict[int, bytes] = dataclass_field(default_factory=dict)
+    active_contexts: set[int] = dataclass_field(default_factory=set)
+    redirect_url: str = ""
+
+
+def _vod_format_matches(actual: FormatId, requested: FormatId) -> bool:
+    return (
+        actual.itag == requested.itag
+        and (not requested.lmt or actual.lmt == requested.lmt)
+        and (not requested.xtags or actual.xtags == requested.xtags)
+    )
+
+
+def _vod_target(state: _SabrVodState, requested: FormatId) -> _SabrVodTrack | None:
+    matches = [track for fmt, track in state.tracks.items() if _vod_format_matches(fmt, requested)]
+    if len(matches) > 1:
+        raise SabrUmpError("SABR returned ambiguous variants for the selected format")
+    return matches[0] if matches else None
+
+
+def _vod_request_body(base: bytes, state: _SabrVodState) -> bytes:
+    buffered = [track.buffered_end_ms for track in state.tracks.values()]
+    position = min(buffered, default=0)
+    out = bytearray()
+    for item in iter_proto_fields(base):
+        if item.number in {2, 3, 4}:
+            continue
+        if item.number == 1 and isinstance(item.value, bytes):
+            out += field_bytes(1, _retarget_client_state_playback(item.value, position))
+        elif item.number == 19 and isinstance(item.value, bytes):
+            context = bytearray()
+            for nested in iter_proto_fields(item.value):
+                if nested.number == 3 and state.cookie is not None:
+                    continue
+                if nested.number in {5, 6} and state.contexts:
+                    continue
+                context += _encode_proto_field(nested)
+            if state.cookie is not None:
+                context += field_bytes(3, state.cookie)
+            for kind, value in state.contexts.items():
+                if kind in state.active_contexts:
+                    context += field_bytes(5, field_varint(1, kind) + field_bytes(2, value))
+                else:
+                    context += field_varint(6, kind)
+            out += field_bytes(19, bytes(context))
+        else:
+            out += _encode_proto_field(item)
+    out += field_varint(4, position)
+    for track in state.tracks.values():
+        if track.init_saved:
+            out += field_bytes(2, build_format_id(track.format_id, include_defaults=True))
+        # BufferedRange reports committed media, not the next segment to request.
+        group: list[tuple[int, int, int]] = []
+        groups: list[list[tuple[int, int, int]]] = []
+        for sequence, (start, duration) in sorted(track.segments.items()):
+            if group and (sequence != group[-1][0] + 1 or start > group[-1][1] + group[-1][2] + 1):
+                groups.append(group)
+                group = []
+            group.append((sequence, start, duration))
+        if group:
+            groups.append(group)
+        for group in groups:
+            first, last = group[0], group[-1]
+            record = field_bytes(1, build_format_id(track.format_id, include_defaults=True))
+            record += field_varint(2, first[1])
+            record += field_varint(3, last[1] + last[2] - first[1])
+            record += field_varint(4, first[0]) + field_varint(5, last[0])
+            out += field_bytes(3, record)
+    return bytes(out)
+
+
+def _vod_segment_timing(header: MediaHeader) -> tuple[int, int]:
+    time_range = header.time_range
+    if time_range and time_range.timescale and time_range.duration_ticks is not None:
+        start = round((time_range.start_ticks or 0) * 1000 / time_range.timescale)
+        end = round(((time_range.start_ticks or 0) + time_range.duration_ticks) * 1000 / time_range.timescale)
+        return start, end - start
+    if header.start_ms is None or header.duration_ms is None:
+        raise SabrUmpError("SABR VOD media header has no usable segment timing")
+    return header.start_ms, header.duration_ms
+
+
+def _read_sabr_vod_response(response, output, state: _SabrVodState, target: FormatId, progress=None, *, base_url="") -> tuple[int, int]:
+    active: dict[int, tuple[MediaHeader, _SabrVodTrack, bool]] = {}
+    received: dict[int, int] = {}
+    chunks = headers = 0
+    for part in iter_ump_parts_from_reader(response):
+        if part.part_type == 42:
+            fields = {f.number: f for f in iter_proto_fields(part.payload)}
+            raw_format = _field_bytes(fields, 2)
+            if raw_format is None:
+                raise SabrUmpError("SABR VOD initialization metadata has no format identity")
+            fmt = parse_format_id(raw_format)
+            track = state.tracks.setdefault(fmt, _SabrVodTrack(fmt))
+            track.end_sequence = _field_varint(fields, 4)
+            track.end_ms = _field_varint(fields, 3)
+            ticks, scale = _field_varint(fields, 9), _field_varint(fields, 10)
+            if ticks is not None and scale:
+                track.end_ms = round(ticks * 1000 / scale)
+        elif part.part_type == 35:
+            fields = {f.number: f for f in iter_proto_fields(part.payload)}
+            state.cookie = _field_bytes(fields, 7) or state.cookie
+            state.backoff_ms = _field_varint(fields, 4) or 0
+        elif part.part_type == 58:
+            fields = {f.number: f for f in iter_proto_fields(part.payload)}
+            if _field_varint(fields, 1) in {2, 3}:
+                raise SabrUmpError("SABR VOD stream protection requires a valid session/PO token")
+        elif part.part_type == 57:
+            fields = {f.number: f for f in iter_proto_fields(part.payload)}
+            kind, value = _field_varint(fields, 1), _field_bytes(fields, 3)
+            if kind is not None and value is not None:
+                if _field_varint(fields, 5) != 2 or kind not in state.contexts:
+                    state.contexts[kind] = value
+                if _field_varint(fields, 4):
+                    state.active_contexts.add(kind)
+        elif part.part_type == 59:
+            for item in iter_proto_fields(part.payload):
+                values = []
+                if isinstance(item.value, int):
+                    values = [item.value]
+                elif item.wire_type == WIRE_BYTES:
+                    offset = 0
+                    while offset < len(item.value):
+                        value, offset = read_varint(item.value, offset)
+                        values.append(value)
+                for value in values:
+                    if item.number == 1:
+                        state.active_contexts.add(value)
+                    elif item.number == 2:
+                        state.active_contexts.discard(value)
+                    elif item.number == 3:
+                        state.active_contexts.discard(value)
+                        state.contexts.pop(value, None)
+        elif part.part_type in {44, 46}:
+            raise SabrUmpError("SABR VOD server rejected the session or requested a new player response")
+        elif part.part_type == SABR_REDIRECT_PART_TYPE:
+            state.redirect_url = _sabr_redirect_url_from_payload(part.payload, base_url=base_url)
+            if not state.redirect_url:
+                raise SabrUmpError("SABR VOD server returned an invalid streaming redirect")
+        elif part.part_type == 20:
+            header = parse_media_header(part.payload)
+            headers += 1
+            if header.header_id is None:
+                raise SabrUmpError("SABR VOD media header has no ID")
+            track = state.tracks.setdefault(header.format_id, _SabrVodTrack(header.format_id))
+            selected = _vod_format_matches(header.format_id, target)
+            new = not track.init_saved if header.is_init else header.sequence_number not in track.segments
+            if selected and new and not header.is_init:
+                if not track.init_saved:
+                    raise SabrUmpError("SABR VOD media arrived before its initialization segment")
+                if track.segments and header.sequence_number != max(track.segments) + 1:
+                    raise SabrUmpError("SABR VOD returned an out-of-order media segment")
+                start, _ = _vod_segment_timing(header)
+                if start > track.buffered_end_ms + 1:
+                    raise SabrUmpError("SABR VOD returned a gap in the selected track")
+            if header.header_id in active:
+                raise SabrUmpError("SABR VOD reused an unfinished media header")
+            active[header.header_id] = (header, track, selected and new)
+            received[header.header_id] = 0
+        elif part.part_type == 21 and part.payload:
+            current = active.get(part.payload[0])
+            if current is None:
+                raise SabrUmpError("SABR VOD media arrived without its header")
+            received[part.payload[0]] += len(part.payload) - 1
+            if current[2]:
+                output.write(part.payload[1:])
+                chunks += 1
+        elif part.part_type == 22 and part.payload:
+            current = active.pop(part.payload[0], None)
+            if current is None:
+                continue
+            if not received.pop(part.payload[0], 0):
+                raise SabrUmpError("SABR VOD ended an empty media segment")
+            header, track, _ = current
+            if header.is_init:
+                track.init_saved = True
+            else:
+                if header.sequence_number is None:
+                    raise SabrUmpError("SABR VOD media segment has no sequence number")
+                track.segments[header.sequence_number] = _vod_segment_timing(header)
+            selected = _vod_target(state, target)
+            if progress and selected:
+                progress(len(selected.segments), selected.end_sequence or 0, output.tell())
+    if active:
+        raise HttpClientError("Incomplete read: SABR VOD response ended in the middle of a media segment")
+    return chunks, headers
+
+
+def _download_sabr_ump_vod_stream(stream: StreamInfo, output_path: Path, *, headers=None, request_timeout=30, retries=3, progress=None) -> SabrUmpDownloadStats:
+    request = _build_stream_request(stream, client_state_playback_ms=0)
+    request_headers = _sabr_request_headers(_merged_sabr_headers(stream, headers))
+    state = _SabrVodState()
+    chunks = header_count = stalls = redirects = 0
+    current_url = request.url
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with output_path.open("w+b") as output:
+            while True:
+                selected = _vod_target(state, request.target_format)
+                if selected and selected.complete:
+                    return SabrUmpDownloadStats(
+                        media_bytes=output.tell(), chunks=chunks, headers=header_count, ended=True,
+                        seen_itags=tuple(sorted({fmt.itag for fmt in state.tracks})),
+                        completed_segments=len(selected.segments), total_segments=len(selected.segments),
+                    )
+                before = selected.buffered_end_ms if selected else 0
+                offset, snapshot = output.tell(), copy.deepcopy(state)
+                body = _vod_request_body(request.body, state)
+                if state.backoff_ms:
+                    _runtime_sleep(min(state.backoff_ms, 30_000) / 1000)
+                for attempt in range(max(1, retries + 1)):
+                    try:
+                        with get_global_http_client().request(
+                            "POST", current_url, headers=request_headers, timeout=request_timeout, body=body,
+                        ) as response:
+                            got_chunks, got_headers = _read_sabr_vod_response(
+                                response, output, state, request.target_format, progress, base_url=current_url,
+                            )
+                        chunks += got_chunks
+                        header_count += got_headers
+                        break
+                    except (HttpClientError, OSError, http.client.HTTPException) as exc:
+                        output.seek(offset)
+                        output.truncate()
+                        state = copy.deepcopy(snapshot)
+                        if attempt >= retries or not _should_retry_sabr_error(exc, attempt=attempt, retries=retries):
+                            raise
+                        _runtime_sleep(_sabr_retry_delay(attempt))
+                selected = _vod_target(state, request.target_format)
+                after = selected.buffered_end_ms if selected else 0
+                if state.redirect_url:
+                    redirects += 1
+                    if redirects > 4:
+                        raise SabrUmpError("SABR VOD streaming redirect loop")
+                    current_url, state.redirect_url = state.redirect_url, ""
+                    continue
+                redirects = 0
+                stalls = stalls + 1 if after <= before else 0
+                if stalls >= 3:
+                    raise SabrUmpError("SABR VOD stopped advancing before the selected track was complete")
+    except BaseException:
+        _unlink_quietly(output_path)
+        raise
 
 
 def download_sabr_ump_dvr_stream(
