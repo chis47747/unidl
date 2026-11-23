@@ -233,7 +233,9 @@ class Playback:
     title: Title
     save_name: str
 
-    # Exactly one of these is the input UniDL consumes.
+    # Delivery input. ``json_manifest`` wins when both a URL and a JSON
+    # document are set, so a service can show the remote media URL in the TUI
+    # while handing Core a typed track document.
     manifest_url: str | None = None
     #: Authorized remote URL used to resolve relative media URLs when
     #: ``manifest_url`` points at a local manifest snapshot.

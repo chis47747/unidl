@@ -486,17 +486,11 @@ def parse_iso8601_duration(value: str | None) -> float | None:
     return (weeks * 7 + days) * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-_H266_URL_MARKERS = (
-    ".f323",
-    "h266",
-    "h.266",
-    "vvc1",
-    "vvi1",
-    "/vvc",
-    ".vvc",
-    "cmaf6",
-    "cmfv6",
-    ".mp6",
+_H266_CODEC = re.compile(r"^(?:vvc1?|vvi1|h[.\s/_-]?266)(?=$|[^a-z0-9])", re.IGNORECASE)
+_H266_PATH_MARKER = re.compile(
+    r"(?<![a-z0-9])(?:vvc1?|vvi1|h[.\s_-]?266|cmaf6|cmfv6|mp6)(?![a-z0-9])"
+    r"|\.f323[0-9]*(?![a-z0-9])",
+    re.IGNORECASE,
 )
 
 _VIDEO_CODEC_PREFIXES = (
@@ -536,19 +530,20 @@ def looks_like_h266(*values: str | None) -> bool:
     for value in values:
         if not value:
             continue
-        if pretty_codec(value, "video") == "H.266":
-            return True
-        if video_codec_family(value) == "vvc":
-            return True
-        lowered = value.lower()
-        if any(marker in lowered for marker in _H266_URL_MARKERS):
+        parsed = urlparse(value)
+        if parsed.scheme.lower() in {"http", "https", "file"} or parsed.netloc:
+            # Hostnames, signed queries and fragments are not codec declarations.
+            value = parsed.path
+        # A random resource ID can contain "vvc". Only delimited path/codec
+        # markers count; do not run codec-family substring matching on a URL.
+        if _H266_PATH_MARKER.search(value):
             return True
     return False
 
 
 def video_codec_family(value: str | None) -> str:
     text = _compact_codec(value or "")
-    if any(token in text for token in ("vvc1", "vvi1", "h266", "vvc")):
+    if any(_H266_CODEC.match(token.strip()) for token in (value or "").split(",")):
         return "vvc"
     if any(token in text for token in ("hvc1", "hev1", "hevc", "h265", "dvh1", "dvhe")):
         return "hevc"
@@ -601,7 +596,7 @@ def pretty_codec(codecs: str | None, media_type: str = "unknown") -> str | None:
         return "VP9"
     if compact.startswith(("vp08", "vp8")):
         return "VP8"
-    if compact.startswith(("vvc1", "vvi1", "h266", "vvc")):
+    if _H266_CODEC.match(lowered):
         return "H.266"
     if lowered.startswith(("mp4v", "mpeg4", "mpeg-4")):
         return "MPEG-4"

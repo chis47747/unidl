@@ -952,7 +952,8 @@ def mux_files(
     try:
         if any(item.is_3d for item in prepared_inputs) and not any(stereo_configurations(item.path) for item in prepared_inputs):
             raise RuntimeError("Selected 3D video has no stereo configuration; discard the old 2D track checkpoint and retry.")
-        _ensure_mux_free_space([item.path for item in prepared_inputs], output)
+        if muxer != "mp4box":
+            _ensure_mux_free_space([item.path for item in prepared_inputs], output)
         selected = _select_muxer(muxer, output)
         vvc_video = _mux_inputs_include_vvc(prepared_inputs)
         vvc_mp4 = vvc_video and force_vvc_mp4
@@ -1121,6 +1122,10 @@ def mux_files(
 
 def _mux_mp4box(inputs, output, chapters, default_audio, default_subtitle) -> Path:
     executable = require_mp4box()
+    input_paths = [item.path for item in inputs]
+    stereo = any(item.is_3d for item in inputs) or any(stereo_configurations(path) for path in input_paths)
+    # GPAC's default interleaving needs a full-sized temporary import file.
+    _ensure_mux_free_space(input_paths, output, working_copies=1 if stereo else 2)
     catalog = [_probe_mux_tracks(item, "mp4box", executable) for item in inputs]
     catalog = [
         [
@@ -1146,9 +1151,10 @@ def _mux_mp4box(inputs, output, chapters, default_audio, default_subtitle) -> Pa
     with tempfile.TemporaryDirectory(prefix="unidl_mp4box_", dir=root) as work:
         work = Path(work)
         target = work / "output.mp4"
-        # -newfs's streaming importer drops unknown MV-HEVC boxes in GPAC 2.x.
-        # -flat uses the preserving ISO importer without a full-sized temp copy.
-        args = [executable, "-p", "0", "-noprog", "-new", "-flat", "-tmp", "."]
+        # Ordinary output uses GPAC's default interleaving, with moov first
+        # and compatible brands derived from the imported track timing.
+        # Keep the existing flat ISO import for MV-HEVC; -newfs can drop boxes.
+        args = [executable, "-p", "0", "-noprog", "-new", *(["-flat"] if stereo else []), "-tmp", "."]
         metadata = []
         output_id = 0
         for index, item in enumerate(inputs):
@@ -1225,7 +1231,7 @@ def _mux_mp4box(inputs, output, chapters, default_audio, default_subtitle) -> Pa
         _run_external(args, "MP4Box muxing", cwd=work)
         if not target.is_file() or not target.stat().st_size:
             raise RuntimeError("MP4Box produced an empty output.")
-        validate_stereo([item.path for item in inputs], target)
+        validate_stereo(input_paths, target)
         target.replace(output)
     return output
 
@@ -2491,7 +2497,7 @@ def _ensure_output_free_space(input_size: int, output: Path, label: str) -> None
     )
 
 
-def _ensure_mux_free_space(input_paths: Iterable[Path], output: Path) -> None:
+def _ensure_mux_free_space(input_paths: Iterable[Path], output: Path, *, working_copies: int = 1) -> None:
     total = 0
     for path in input_paths:
         try:
@@ -2501,12 +2507,14 @@ def _ensure_mux_free_space(input_paths: Iterable[Path], output: Path) -> None:
     if total <= 0:
         return
     output.parent.mkdir(parents=True, exist_ok=True)
+    total *= working_copies
     required = total + _disk_space_reserve(total)
     free = _free_bytes(output.parent)
     if free is None or free >= required:
         return
+    label = "mux output and temporary file" if working_copies > 1 else "mux output"
     raise RuntimeError(
-        "not enough disk space for mux output: "
+        f"not enough disk space for {label}: "
         f"need about {_format_disk_bytes(required)}, free {_format_disk_bytes(free)} at {output.parent}"
     )
 

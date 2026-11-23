@@ -30,7 +30,6 @@ PLAYBACK_URL = "https://playback.pr.sbsod.com/stream"
 EPG_URL = "https://tv-epg.pr.sbsod.com"
 IMAGE_URL = "https://image.pr.sbsod.com"
 AUDIO_API = "https://fos.sbs.com.au/web/audio"
-
 TV_API_KEY = "ce3f270a-31fb-486e-855e-4f608a62640e"
 TV_USER_AGENT = "SBSOnDemand AndroidTV/6.4.0"
 DEVICE_NAME = "Android TV - SBS On Demand"
@@ -102,7 +101,7 @@ class ParsedInput:
     kind: str  # series | program | episode | watch | collection | audio
     value: str = ""
     path: str = ""
-    entity: str = ""  # original ondemand segment (movie, tv-program, …)
+    entity: str = ""
 
 
 def parse_input(text: str) -> ParsedInput | None:
@@ -150,7 +149,6 @@ def parse_input(text: str) -> ParsedInput | None:
 
 @dataclass
 class Session:
-    """Cached auth tokens from login/refresh."""
 
     email: str = ""
     device_name: str = DEVICE_NAME
@@ -374,7 +372,6 @@ class AudioPage:
 
 
 class _AudioPageParser(HTMLParser):
-    """Read the site's server-rendered JSON, including byte-sized Flight text rows."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -680,8 +677,8 @@ def _ondemand_url_from_search(result: dict[str, Any]) -> str | None:
     return None
 
 
+
 class SbsAudioApi:
-    """Public SBS Audio catalogue and the exact sources supplied by its website."""
 
     def __init__(self, session: requests.Session):
         self.session = session
@@ -826,7 +823,7 @@ class SbsApi:
     ):
         self.session = session or requests.Session()
         self.state = state or Session()
-        self.on_save = on_save  # optional callable(Session) after token updates
+        self.on_save = on_save
         if not self.state.device_id:
             self.state.device_id = str(uuid.uuid4())
 
@@ -960,7 +957,6 @@ class SbsApi:
             raise SbsError("SBS TV-code login returned incomplete tokens")
         if _token_exp(data["accessToken"]) <= int(time.time()):
             raise SbsError("SBS TV-code login returned an expired access token")
-        # The service commits tokens after the activation wait completes.
         self._update_from_auth(data, persist=False)
         return self.state
 

@@ -35,6 +35,7 @@ MASK = "***"
 SECRET_PARAMS = (
     "password",
     "passwd",
+    "pin",
     "pwd",
     "pass",
     "token",
@@ -58,7 +59,7 @@ SECRET_PARAMS = (
 )
 
 #: Headers whose value is a credential, as they appear in a command line.
-SECRET_HEADERS = ("authorization", "cookie", "x-api-key", "x-auth-token", "set-cookie")
+SECRET_HEADERS = ("authorization", "cookie", "x-api-key", "x-auth-token", "set-cookie", "x-age-verification-pin")
 
 _USERINFO = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*://)(?P<user>[^/\s:@]+):[^/\s@]+@")
 _PARAM = re.compile(

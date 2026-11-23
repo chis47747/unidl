@@ -823,6 +823,20 @@ class Engine:
             if not path.exists() or path.read_text("utf-8") != payload:
                 path.write_text(payload, "utf-8")
             return str(path)
+        if playback.json_manifest is not None:
+            payload = manifest_json(playback.json_manifest)
+            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+            stem = re.sub(r"[^A-Za-z0-9._-]+", ".", playback.save_name).strip(".") or "playback"
+            directory = private_directory(self.config.paths.temp / "json-manifests")
+            path = directory / f"{stem}.{digest}.json"
+            with locked_path(path):
+                if path.is_symlink() or (path.exists() and not path.is_file()):
+                    raise ValueError("JSON manifest cache path must be a regular file, not a symlink.")
+                if not path.exists() or path.read_text("utf-8") != payload:
+                    atomic_write_text(path, payload)
+                else:
+                    private_file(path)
+            return str(path)
         if playback.manifest_url:
             manifest = str(playback.manifest_url)
             if manifest.lstrip("\ufeff\r\n\t ").upper().startswith("#EXTM3U"):
@@ -836,21 +850,7 @@ class Engine:
                     path.write_text(payload, "utf-8")
                 return str(path)
             return manifest
-        if playback.json_manifest is None:
-            return ""
-        payload = manifest_json(playback.json_manifest)
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
-        stem = re.sub(r"[^A-Za-z0-9._-]+", ".", playback.save_name).strip(".") or "playback"
-        directory = private_directory(self.config.paths.temp / "json-manifests")
-        path = directory / f"{stem}.{digest}.json"
-        with locked_path(path):
-            if path.is_symlink() or (path.exists() and not path.is_file()):
-                raise ValueError("JSON manifest cache path must be a regular file, not a symlink.")
-            if not path.exists() or path.read_text("utf-8") != payload:
-                atomic_write_text(path, payload)
-            else:
-                private_file(path)
-        return str(path)
+        return ""
 
     def fetch_init_segments(
         self,
@@ -2816,6 +2816,13 @@ class Engine:
         settings: Settings,
     ) -> ParsedManifest:
         """Parse the first usable authorized candidate for one playback."""
+        if playback.json_manifest is not None:
+            manifest = self._parse_manifest(self.parse_request(playback, settings))
+            streams = self.downloader.streams(manifest)
+            self._apply_playback_drm_hint(playback, streams)
+            self._apply_video_range_hint(playback, streams)
+            return self.downloader.adopt(manifest.request, streams)
+
         candidates = [str(playback.manifest_url or "")]
         candidates.extend(str(url) for url in playback.alternate_manifest_urls if url)
         candidates = list(dict.fromkeys(url for url in candidates if url))
@@ -3624,13 +3631,13 @@ class Engine:
             if text.lstrip().startswith("#EXTM3U"):
                 return DeliverySource.from_hls(text.rstrip() + "\n")
             return DeliverySource.from_dash(text)
+        if playback.json_manifest is not None:
+            return DeliverySource.from_json(playback.json_manifest)
         if playback.manifest_url:
             manifest = str(playback.manifest_url)
             if manifest.lstrip("\ufeff\r\n\t ").upper().startswith("#EXTM3U"):
                 return DeliverySource.from_hls(manifest.rstrip() + "\n")
             return DeliverySource.from_reference(manifest)
-        if playback.json_manifest is not None:
-            return DeliverySource.from_json(playback.json_manifest)
         raise ValueError("Playback did not provide a delivery source")
 
     def delivery_plan(

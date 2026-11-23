@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,11 +11,28 @@ from urllib.parse import urlparse
 from ...core.attachments import Attachment
 from ...core.credentials import mask_account
 from ...core.flow import Ask, Back, Choice, FlowContext
-from ...core.playback import DrmInfo, ExternalTrack, Playback
+from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.qr import QrPresentation
+from ...core.secureio import atomic_write_bytes, private_directory, private_file
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.titles import Title, TitleKind
+from ...downloader.models import StreamInfo
+from ...downloader.subtitles import SubtitleConversionError, convert_subtitle_file
 from . import api
+
+
+def _subtitle_format(format_hint: str, url: str) -> tuple[str, str]:
+    formats = {
+        "vtt": ("webvtt", "vtt"), "webvtt": ("webvtt", "vtt"),
+        "text/vtt": ("webvtt", "vtt"),
+        "srt": ("subrip", "srt"), "subrip": ("subrip", "srt"),
+        "application/x-subrip": ("subrip", "srt"),
+        "ttml": ("ttml", "ttml"), "application/ttml+xml": ("ttml", "ttml"),
+        "dfxp": ("ttml", "dfxp"), "xml": ("ttml", "xml"),
+    }
+    hint = format_hint.lower().split(";", 1)[0].strip().lstrip(".")
+    suffix = Path(urlparse(url).path).suffix.lower().lstrip(".")
+    return formats.get(hint) or formats.get(suffix) or ("webvtt", "vtt")
 
 
 @registry.register
@@ -72,7 +88,6 @@ class Sbs(Service):
                 try:
                     return client.poll_tv_link(challenge)
                 except api.SbsError as exc:
-                    # Await retries raised exceptions; terminal auth errors end it.
                     return exc
 
             state = yield ctx.wait_for(
@@ -607,42 +622,82 @@ class Sbs(Service):
             note=source.line(),
             chapters=list(source.chapters) if not is_live else [],
             attachments=list(source.attachments),
+            subtitle_references=self._subtitle_references(source),
         )
-        playback.mux_imports = self._stage_subtitles(ctx, client, source, playback.save_name)
         yield ctx.emit(playback)
 
-    def _stage_subtitles(
-        self,
-        ctx: FlowContext,
-        client: api.SbsApi,
-        source: api.Source,
-        save_name: str,
-    ) -> list[ExternalTrack]:
-        tracks: list[ExternalTrack] = []
-        seen: dict[str, int] = {}
+    @staticmethod
+    def _subtitle_references(source: api.Source) -> list[SubtitleReference]:
+        references: list[SubtitleReference] = []
+        seen: set[str] = set()
         for subtitle in source.subtitles:
-            language = subtitle.lang.strip().replace("_", "-") or "und"
-            safe_language = re.sub(r"[^A-Za-z0-9._-]+", "-", language).strip(".-") or "und"
-            seen[safe_language] = seen.get(safe_language, 0) + 1
-            duplicate = seen[safe_language]
-            duplicate_suffix = f".{duplicate}" if duplicate > 1 else ""
-            source_suffix = Path(urlparse(subtitle.url).path).suffix.lower()
-            suffix = source_suffix if source_suffix in {".srt", ".ttml", ".vtt", ".xml"} else ".vtt"
-            digest = hashlib.sha256(subtitle.url.encode("utf-8")).hexdigest()[:12]
-            filename = f"{Path(save_name).name}.{safe_language}{duplicate_suffix}.{digest}{suffix}"
-            try:
-                path = self.ctx.subtitle_dir() / filename
-                data = client.subtitle(subtitle.url)
-                if not path.exists() or path.read_bytes() != data:
-                    path.write_bytes(data)
-                    os.chmod(path, 0o600)
-            except (api.SbsError, OSError) as exc:
-                ctx.warn(f"subtitle {language} skipped: {exc}")
+            url = subtitle.url.strip()
+            if not url or url in seen:
                 continue
-            tracks.append(ExternalTrack(path=str(path), language=language, name=language))
-        if tracks:
-            ctx.log(f"prepared {len(tracks)} external subtitle track(s)", "ok")
-        return tracks
+            seen.add(url)
+            language = subtitle.lang.strip().replace("_", "-") or "und"
+            _, extension = _subtitle_format(subtitle.format, url)
+            references.append(SubtitleReference(
+                url=url, language=language, name=language, format=extension,
+                headers={"User-Agent": api.TV_USER_AGENT, "Accept": "text/vtt, text/plain, */*"},
+            ))
+        return references
+
+    def augment_tracks(self, playback: Playback, tracks, log):
+        del tracks, log
+        return [
+            StreamInfo(
+                manifest_type="service", media_type="subtitle",
+                url=reference.url, original_url=reference.url,
+                id=f"sbs-subtitle-{index}", group_id=reference.kind,
+                name=reference.name or reference.language, language=reference.language,
+                codecs=_subtitle_format(reference.format, reference.url)[0],
+                extension=_subtitle_format(reference.format, reference.url)[1],
+                extra={
+                    "service_sidecar": "subtitle",
+                    "subtitle_reference_url": reference.url,
+                    "subtitle_kind": reference.kind,
+                },
+            )
+            for index, reference in enumerate(playback.subtitle_references, 1)
+        ]
+
+    def prepare_download(self, playback: Playback, log) -> None:
+        playback.mux_imports.clear()
+        selected = [reference for reference in playback.subtitle_references if reference.selected]
+        if not selected:
+            return
+        client = self._api or self.client()
+        directory = private_directory(self.ctx.subtitle_dir())
+        output_format = str(self.settings.get("sub_format", "srt") or "srt")
+        auto_fix = bool(self.settings.get("auto_subtitle_fix", True))
+        for index, reference in enumerate(selected, 1):
+            language = reference.language or "und"
+            safe_language = re.sub(r"[^A-Za-z0-9._-]+", ".", language).strip(".") or "und"
+            _, extension = _subtitle_format(reference.format, reference.url)
+            try:
+                data = client.subtitle(reference.url)
+                if not data:
+                    raise api.SbsError("empty subtitle response")
+                digest = hashlib.sha256(reference.url.encode("utf-8") + b"\0" + data).hexdigest()[:12]
+                stem = Path(playback.save_name).name[:120]
+                original = directory / f"{stem}.{safe_language}.{index}.{digest}.{extension}"
+                atomic_write_bytes(original, data)
+                converted = convert_subtitle_file(
+                    original, output_format=output_format,
+                    output_path=original.with_suffix(f".{output_format}") if output_format != "raw" else None,
+                    auto_fix=auto_fix,
+                )
+                if not converted.is_file() or converted.stat().st_size == 0:
+                    raise api.SbsError("no subtitle output was produced")
+                private_file(converted)
+            except (api.SbsError, OSError, SubtitleConversionError) as exc:
+                raise api.SbsError(f"SBS subtitle {language} failed: {exc}") from exc
+            playback.mux_imports.append(ExternalTrack(
+                path=str(converted), language=language, name=reference.name or language,
+                kind=reference.kind, original=reference.original,
+            ))
+            log(f"SBS subtitle prepared · {language}", "ok")
 
 
 __all__ = ["Sbs", "api"]

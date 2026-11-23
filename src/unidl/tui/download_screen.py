@@ -733,11 +733,12 @@ class DownloadScreen(AskHost):
                 request = getattr(manifest, "request", None)
                 parsed_source = getattr(request, "source", None)
                 if getattr(parsed_source, "json_document", None) is not None:
-                    source = (
-                        tr("delivery.json_merged")
-                        if playback.merge_manifests
-                        else tr("delivery.json_generated")
-                    )
+                    if not playback.manifest_url:
+                        source = (
+                            tr("delivery.json_merged")
+                            if playback.merge_manifests
+                            else tr("delivery.json_generated")
+                        )
                 elif getattr(parsed_source, "reference", None):
                     source = str(parsed_source.reference)
             field(tr("delivery.field.source"), visual_text(str(source)), palette.manifest)

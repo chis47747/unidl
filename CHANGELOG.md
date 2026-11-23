@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.7.1] - 2026-11-23
+
+### JSON manifests
+
+- Improved JSON manifest handling so typed track manifests are preserved through parsing, caching, and playback setup.
+
+### Download behavior
+
+- Moved Subtitle output into the Download behavior settings so subtitle embedding, sidecars, and skipping are configured together.
+
+### MP4Box packaging
+
+- Fixed MP4Box packaging and temporary-space handling for ordinary and 3D outputs while preserving selected track metadata.
+
+### Services
+
+- Updated the published GoPlay and SBS service integrations.
+
 ## [2.7.0] - 2026-11-21
 
 ### Audio/video sync

@@ -1421,6 +1421,15 @@ class SessionController:
         except Exception as exc:  # noqa: BLE001 - cleanup must not strand a job
             self.post_log(f"could not release playback transport: {exc}", "warning")
 
+    def _release_playback_after_license(self, playback: Playback) -> None:
+        release = getattr(self.service, "release_playback_after_license", None)
+        if not callable(release):
+            return
+        try:
+            release(playback, self.post_log)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not strand a job
+            self.post_log(f"could not release playback session after license: {exc}", "warning")
+
     def _start_job(self, playback: Playback) -> Job:
         identity = self._title_identity(getattr(playback, "title", None))
         pending = self.pending_jobs
@@ -2629,6 +2638,7 @@ class SessionController:
                 self.post_status(tr("delivery.status.resolving_keys"))
                 self.engine.resolve_keys(playback, self.service, tracks, self.settings)
                 self._require_content_keys(playback, tracks)
+                self._release_playback_after_license(playback)
             except Exception as exc:
                 if self.cancel_requested:
                     return CANCELLED, "cancelled"
@@ -2767,6 +2777,7 @@ class SessionController:
                     license_tracks=selected_inventory if action == "after" else None,
                 )
                 self._require_content_keys(playback, selected_inventory)
+                self._release_playback_after_license(playback)
             except Exception as exc:
                 if self.cancel_requested:
                     return CANCELLED, "cancelled"
@@ -2838,6 +2849,7 @@ class SessionController:
                                 license_tracks=selected_inventory if action == "after" else None,
                             )
                             self._require_content_keys(playback, selected_inventory)
+                            self._release_playback_after_license(playback)
                         except Exception as exc:
                             if self.cancel_requested:
                                 return CANCELLED, "cancelled"

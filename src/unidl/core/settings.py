@@ -752,6 +752,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         [("muxed", "Mux into final file"), ("external", "External sidecar files"), ("none", "Do not download subtitles")],
         "muxed",
         "Choose whether selected subtitles are embedded in the final container, kept as external files beside it, or skipped.",
+        visible=False,
     ),
     _choice(
         "after_resolve",

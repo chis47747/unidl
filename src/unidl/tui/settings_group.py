@@ -22,7 +22,7 @@ SETTINGS_GROUPS = {
         "settings.group.download", "settings.group.download_help",
         (
             "after_resolve", "live_record", "confirm_batch", "retries", "http_timeout",
-            "max_speed", "title_delay", "muxer", "segment_downloader", "resume_parts",
+            "max_speed", "title_delay", "muxer", "subtitle_output", "segment_downloader", "resume_parts",
             "check_segments_count", "verify_content_keys", "keep_temp",
             "keep_failed_intermediates", "delete_temp_after_done", "auto_subtitle_fix",
             "live_real_time_merge", "live_keep_segments", "live_pipe_mux",

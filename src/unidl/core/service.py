@@ -1380,6 +1380,18 @@ class Service:
         """
         del playback, log
 
+    def release_playback_after_license(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+    ) -> None:
+        """Release short-lived playback state immediately after key resolution.
+
+        Services with a concurrency lock can override this hook. The ordinary
+        ``release_playback`` hook still runs at the end as an idempotent fallback.
+        """
+        del playback, log
+
     def live_key_pssh(
         self,
         playback: Playback,

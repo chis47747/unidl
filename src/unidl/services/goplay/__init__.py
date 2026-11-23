@@ -1,21 +1,17 @@
-"""Play Belgium (GoPlay) TV-code login, catalogue, search, live and KeyOS Widevine.
-
-Authorization: Play Android TV code with refresh-token reuse.
-Geofence:      Belgium; catalogue visibility and playback depend on location.
-Catalogue:     Android TV pages, programs, search and live streams.
-Playback:      DASH preferred; protected video uses KeyOS Widevine.
-"""
+"""Play Belgium (GoPlay) TV-code login, catalogue, search, live and KeyOS Widevine."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 
 from ...core.attachments import Attachment
 from ...core.cdm import CdmError
-from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext
+from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
 from ...core.playback import DrmInfo, Playback
 from ...core.qr import QrPresentation
 from ...core.service import AuthStatus, Capabilities, Service, registry
@@ -46,7 +42,6 @@ class GoPlay(Service):
         super().__init__(ctx)
         self._api: api.GoPlayApi | None = None
 
-    # ------------------------------------------------------------------- auth
     def _save_state(self, state: api.Session) -> None:
         path = self.ctx.tokens.write(self.TOKEN_FILE, state.to_cache())
         path.chmod(0o600)
@@ -131,9 +126,7 @@ class GoPlay(Service):
             ctx.log("Play TV session ready", "ok")
         return client
 
-    # -------------------------------------------------------------------- home
     def home(self, ctx: FlowContext) -> Iterator[Ask]:
-        """Add the TV homepage browse entry to the framework's normal actions."""
         while True:
             status = self._auth_status_quietly()
             choices: list[Choice] = []
@@ -158,13 +151,11 @@ class GoPlay(Service):
                 if action == "browse":
                     yield from self._browse(ctx)
                 elif action == "url":
-                    target = yield ctx.text("Enter a Play URL")
-                    yield from self.open_url(ctx, str(target or "").strip())
+                    yield from self._input_flow(ctx, action)
                 elif action == "live":
                     yield from self.live(ctx)
                 elif action == "search":
-                    query = yield ctx.text("Search Play")
-                    yield from self.search(ctx, str(query or "").strip())
+                    yield from self._input_flow(ctx, action)
                 elif action == "library":
                     yield from self.library(ctx)
                 elif action == "login":
@@ -187,24 +178,66 @@ class GoPlay(Service):
                     "The service menu is still open - the rest of the session is fine.",
                 )
 
-    # --------------------------------------------------------------- catalogue
+    def _input_flow(self, ctx: FlowContext, action: str, initial: str = "") -> Iterator[Ask]:
+        page = ctx.text("Search Play" if action == "search" else "Enter a Play URL")
+        text = str(initial or "").strip()
+        while True:
+            if not text:
+                try:
+                    answer = yield page
+                except Back:
+                    return
+                text = str(answer or "").strip()
+            if not text:
+                if not ctx.interactive:
+                    return
+                continue
+            page.default = text
+            try:
+                if action == "search":
+                    yield from self._search_results(ctx, text)
+                else:
+                    yield from self._open_reference(ctx, text)
+            except Back:
+                pass
+            except (RuntimeError, requests.RequestException, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+            text = ""
+
     def _browse(self, ctx: FlowContext) -> Iterator[Ask]:
+        yield from self._catalogue_flow(ctx, "Play catalogues", api.BROWSE_PAGES)
+
+    def _catalogue_flow(self, ctx: FlowContext, title: str, entries: tuple[tuple[str, str], ...]) -> Iterator[Ask]:
         client = self.client(ctx)
+        picker = ctx.pick(title, [Choice(label, slug) for slug, label in entries])
+        pages: dict[str, api.CatalogPage] = {}
         while True:
             try:
-                slug = yield ctx.pick(
-                    "Play catalogues",
-                    [Choice(title, page_slug) for page_slug, title in api.BROWSE_PAGES],
-                )
+                slug = yield picker
             except Back:
                 return
             if not isinstance(slug, str) or not slug:
                 return
-            ctx.status(f"Loading the Play {slug} page")
-            page = client.page(slug)
-            yield from self._page_flow(ctx, client, page, title=page.title or slug)
+            picker.cursor = next(index for index, choice in enumerate(picker.choices) if choice.value == slug)
+            try:
+                if slug not in pages:
+                    ctx.status(f"Loading the Play {slug} page")
+                    pages[slug] = client.page(slug)
+                page = pages[slug]
+                yield from self._page_flow(ctx, client, page, title=page.title or slug)
+            except Back:
+                continue
+            except (RuntimeError, requests.RequestException, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
 
     def open_url(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
+        yield from self._input_flow(ctx, "url", target)
+
+    def _open_reference(self, ctx: FlowContext, target: str) -> Iterator[Ask]:
         text = str(target or "").strip()
         if not text:
             ctx.error("Expected a play.tv or goplay.be URL, or a content UUID")
@@ -257,6 +290,9 @@ class GoPlay(Service):
         raise api.GoPlayError("Play did not recognise that URL")
 
     def search(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
+        yield from self._input_flow(ctx, "search", query)
+
+    def _search_results(self, ctx: FlowContext, query: str) -> Iterator[Ask]:
         keyword = str(query or "").strip()
         if not keyword:
             ctx.warn("Search query is empty")
@@ -289,20 +325,7 @@ class GoPlay(Service):
         )
 
     def library(self, ctx: FlowContext) -> Iterator[Ask]:
-        client = self.client(ctx)
-        while True:
-            try:
-                slug = yield ctx.pick(
-                    "Play library",
-                    [Choice(title, page_slug) for page_slug, title in api.LIBRARY_PAGES],
-                )
-            except Back:
-                return
-            if not isinstance(slug, str) or not slug:
-                return
-            ctx.status(f"Loading {slug}")
-            page = client.page(slug)
-            yield from self._page_flow(ctx, client, page, title=page.title or slug)
+        yield from self._catalogue_flow(ctx, "Play library", api.LIBRARY_PAGES)
 
     def _page_flow(
         self,
@@ -316,30 +339,54 @@ class GoPlay(Service):
         if not shelves:
             ctx.warn(f"{title} contains no browsable TV lists")
             return
+        picker = ctx.pick(
+            title,
+            [
+                Choice(
+                    catalog.title or f"Recommendations {index}",
+                    catalog,
+                    detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
+                )
+                for index, catalog in enumerate(shelves, 1)
+            ],
+        )
+        catalogs: dict[str, api.CatalogList] = {}
+        item_pages: dict[str, Pick] = {}
         while True:
             try:
-                selected = yield ctx.pick(
-                    title,
-                    [
-                        Choice(
-                            catalog.title or f"Recommendations {index}",
-                            catalog,
-                            detail=(f"{len(catalog.items)} items" if catalog.items else "TV list"),
-                        )
-                        for index, catalog in enumerate(shelves, 1)
-                    ],
-                )
+                selected = yield picker
             except Back:
                 return
             if not isinstance(selected, api.CatalogList):
                 return
-            catalog = client.complete_list(selected) if selected.list_id else selected
-            yield from self._item_flow(
-                ctx,
-                client,
-                catalog.items,
-                title=catalog.title or title,
-            )
+            picker.cursor = shelves.index(selected)
+            try:
+                if selected.list_id not in catalogs:
+                    catalogs[selected.list_id] = client.complete_list(selected)
+                catalog = catalogs[selected.list_id]
+                if selected.list_id not in item_pages:
+                    item_pages[selected.list_id] = self._item_picker(ctx, catalog.items, title=catalog.title or title)
+                yield from self._item_flow(
+                    ctx, client, catalog.items, title=catalog.title or title, page=item_pages[selected.list_id]
+                )
+            except Back:
+                continue
+            except (RuntimeError, requests.RequestException, OSError) as exc:
+                ctx.error(str(exc))
+            if not ctx.interactive:
+                return
+
+    @staticmethod
+    def _item_picker(ctx: FlowContext, items: tuple[api.CatalogItem, ...], *, title: str, multi: bool = False) -> Pick:
+        return ctx.pick(
+            title,
+            [
+                Choice(item.title, item, detail=item.detail, tags=(item.type_label,) if item.type_label else ())
+                for item in items
+            ],
+            multi=multi,
+            hint="space to tick · enter to confirm" if multi else "",
+        )
 
     def _item_flow(
         self,
@@ -350,46 +397,36 @@ class GoPlay(Service):
         title: str,
         program: api.Program | None = None,
         multi: bool = False,
+        page: Pick | None = None,
     ) -> Iterator[Ask]:
         if not items:
             ctx.warn(f"{title} contains no items")
             return
+        page = page or self._item_picker(ctx, items, title=title, multi=multi)
         while True:
             try:
-                selected = yield ctx.pick(
-                    title,
-                    [
-                        Choice(
-                            item.title,
-                            item,
-                            detail=item.detail,
-                            tags=(item.type_label,) if item.type_label else (),
-                        )
-                        for item in items
-                    ],
-                    multi=multi,
-                    hint="space to tick · enter to confirm" if multi else "",
-                )
+                selected = yield page
             except Back:
                 return
             chosen = [selected] if isinstance(selected, api.CatalogItem) else list(selected or [])
-            chosen = [item for item in chosen if isinstance(item, api.CatalogItem)]
+            chosen = [item for item in chosen if isinstance(item, api.CatalogItem) and item in items]
             if not chosen:
                 continue
-            if len(chosen) > 1:
-                try:
+            indexes = [items.index(item) for item in chosen]
+            page.cursor = indexes[0]
+            page.preselected = indexes if multi else []
+            try:
+                if len(chosen) > 1:
                     ctx.batch(len(chosen))
-                except Back:
-                    continue
-            delivery_back = False
-            for item in chosen:
-                try:
-                    yield from self._dispatch(ctx, client, item, program=program)
-                except Back:
-                    delivery_back = True
-                    break
-            if delivery_back:
+                for item in chosen:
+                    try:
+                        yield from self._dispatch(ctx, client, item, program=program)
+                    except (RuntimeError, requests.RequestException, OSError) as exc:
+                        ctx.error(str(exc))
+            except Back:
                 continue
+            if not ctx.interactive:
+                return
 
     def _dispatch(
         self,
@@ -416,7 +453,7 @@ class GoPlay(Service):
             yield from self._page_flow(ctx, client, page, title=item.title or page.title)
             return
         if item.link:
-            yield from self.open_url(ctx, item.link)
+            yield from self._open_reference(ctx, item.link)
             return
         raise api.GoPlayError(f"Play item {item.title!r} has no supported TV action")
 
@@ -430,20 +467,18 @@ class GoPlay(Service):
         if program.description:
             ctx.log(program.description, "info")
         playlists = list(program.playlists)
-        if program.is_movie and program.next_video_uuid and not playlists:
-            item = api.CatalogItem(id=program.next_video_uuid, title=program.title, kind="VIDEO")
-            yield from self._emit_video(ctx, client, item, program=program)
-            return
         if not playlists:
-            extras: list[api.CatalogItem] = []
-            if program.next_video_uuid:
-                extras.append(api.CatalogItem(id=program.next_video_uuid, title=program.title, kind="VIDEO"))
-            if program.trailer_uuid:
-                extras.append(
-                    api.CatalogItem(id=program.trailer_uuid, title=f"{program.title} trailer", kind="TRAILER")
-                )
-            if program.teaser_uuid:
-                extras.append(api.CatalogItem(id=program.teaser_uuid, title=f"{program.title} teaser", kind="VIDEO"))
+            ctx.status("Loading Play program playback actions")
+            extras = list(client.program_actions(program))
+            for video_id, label, kind in (
+                (program.trailer_uuid, "trailer", "TRAILER"),
+                (program.teaser_uuid, "teaser", "SHORTFORM"),
+            ):
+                if video_id and not any(item.id == video_id for item in extras):
+                    extras.append(api.CatalogItem(id=video_id, title=f"{program.title} {label}", kind=kind))
+            if program.is_movie and len(extras) == 1 and extras[0].is_video:
+                yield from self._emit_video(ctx, client, extras[0], program=program)
+                return
             if extras:
                 yield from self._item_flow(
                     ctx,
@@ -453,35 +488,42 @@ class GoPlay(Service):
                     program=program,
                 )
                 return
-            raise api.GoPlayError(f"Play program {program.title!r} has no playable TV playlists")
+            raise api.AvailabilityError(f"Play program {program.title!r} has no playable TV actions or playlists")
 
+        season_picker = ctx.pick(program.title, [Choice(value.title, value) for value in playlists])
+        episode_lists: dict[str, tuple[api.CatalogItem, ...]] = {}
+        episode_pages: dict[str, Pick] = {}
         while True:
             if len(playlists) == 1:
                 playlist = playlists[0]
             else:
                 try:
-                    playlist = yield ctx.pick(
-                        program.title,
-                        [Choice(value.title, value) for value in playlists],
-                    )
+                    playlist = yield season_picker
                 except Back:
                     return
                 if not isinstance(playlist, api.Playlist):
                     return
-            ctx.status(f"Loading {program.title} · {playlist.title}")
-            items = client.complete_playlist(playlist)
-            yield from self._item_flow(
-                ctx,
-                client,
-                items,
-                title=f"{program.title} · {playlist.title} · {len(items)} items",
-                program=program,
-                multi=True,
-            )
+                season_picker.cursor = playlists.index(playlist)
+            try:
+                if playlist.id not in episode_lists:
+                    ctx.status(f"Loading {program.title} · {playlist.title}")
+                    episode_lists[playlist.id] = client.complete_playlist(playlist)
+                items = episode_lists[playlist.id]
+                title = f"{program.title} · {playlist.title} · {len(items)} items"
+                if playlist.id not in episode_pages:
+                    episode_pages[playlist.id] = self._item_picker(ctx, items, title=title, multi=True)
+                yield from self._item_flow(
+                    ctx, client, items, title=title, program=program, multi=True, page=episode_pages[playlist.id]
+                )
+            except Back:
+                continue
+            except (RuntimeError, requests.RequestException, OSError) as exc:
+                ctx.error(str(exc))
             if len(playlists) == 1:
                 return
+            if not ctx.interactive:
+                return
 
-    # --------------------------------------------------------------- playback
     def _emit_video(
         self,
         ctx: FlowContext,
@@ -493,11 +535,7 @@ class GoPlay(Service):
     ) -> Iterator[Ask]:
         try:
             ctx.status(f"Loading Play video metadata for {item.title}")
-            video = (
-                client.short_form(item.id)
-                if short_form or item.is_shortform
-                else client.long_form(item.id)
-            )
+            video = client.short_form(item.id) if short_form or item.is_shortform else client.long_form(item.id)
             if program is None and video.program_id:
                 try:
                     program = client.program(video.program_id)
@@ -505,16 +543,16 @@ class GoPlay(Service):
                     program = None
             ctx.status(f"Authorizing Play playback for {video.title or item.title}")
             source = client.play(video)
+            if self.fetch_chapters_enabled() and video.chapters and not source.chapters:
+                ctx.warn("Play chapter markers were omitted because the stream timeline could not be verified")
         except api.GoPlayError as exc:
             ctx.error(str(exc))
             return
-        title = self._title(item, video, source, program=program, live=False)
         try:
-            yield ctx.emit(
-                self._playback(title, source, live=False, item=item, program=program)
-            )
-        except Back:
-            return
+            title = self._title(item, video, source, program=program, live=False)
+            yield ctx.emit(self._playback(title, source, live=False, item=item, program=program))
+        except (RuntimeError, requests.RequestException, OSError) as exc:
+            ctx.error(str(exc))
 
     def _emit_live(
         self,
@@ -528,6 +566,9 @@ class GoPlay(Service):
         except api.GoPlayError as exc:
             ctx.error(str(exc))
             return
+        card = replace(
+            card, image_url=card.image_url or item.image_url, attachments=card.attachments or item.attachments
+        )
         video = api.Video(
             id=card.id,
             title=source.title or card.now_title or card.title,
@@ -535,11 +576,11 @@ class GoPlay(Service):
             episode=card.episode,
             brand=card.brand,
         )
-        title = self._title(card, video, source, program=None, live=True)
         try:
+            title = self._title(card, video, source, program=None, live=True)
             yield ctx.emit(self._playback(title, source, live=True, item=card))
-        except Back:
-            return
+        except (RuntimeError, requests.RequestException, OSError) as exc:
+            ctx.error(str(exc))
 
     def _playback(
         self,
@@ -566,22 +607,14 @@ class GoPlay(Service):
         attachments: list[Attachment] = []
         if self.fetch_attachments_enabled():
             seen: set[str] = set()
-            for url, name, kind in (
-                (item.image_url if item else "", "Artwork", "artwork"),
-                (program.image_url if program else "", "Program artwork", "artwork"),
-            ):
-                value = str(url or "").strip()
-                if not value or value in seen:
+            for record in (item, program):
+                if record is None:
                     continue
-                seen.add(value)
-                attachments.append(
-                    Attachment(
-                        url=value,
-                        name=name,
-                        kind=kind,
-                        mime_type="image/jpeg",
-                    )
-                )
+                artwork = record.attachments or api.extract_artwork({"image": record.image_url})
+                for attachment in artwork:
+                    if attachment.url not in seen:
+                        seen.add(attachment.url)
+                        attachments.append(attachment)
         return Playback(
             title=title,
             save_name=self.save_name(title),
@@ -631,6 +664,7 @@ class GoPlay(Service):
         season = video.season if video.season is not None else item.season
         episode = video.episode if video.episode is not None else item.episode
         series = program.title if program else (video.program_title or name)
+        cover_url = item.image_url or (program.image_url if program else "") or None
         if item.kind == "TRAILER":
             kind = TitleKind.EXTRA
         elif video.short_form or item.is_shortform:
@@ -649,6 +683,7 @@ class GoPlay(Service):
                 name=series,
                 year=program.year if program else None,
                 duration=source.duration or video.duration or item.duration,
+                cover_url=cover_url,
                 service=self.ID,
                 data={"video_id": video.id or item.id},
             )
@@ -660,13 +695,15 @@ class GoPlay(Service):
             episode=episode,
             episode_name=name,
             duration=source.duration or video.duration or item.duration,
+            cover_url=cover_url,
             service=self.ID,
             data={"video_id": video.id or item.id},
         )
 
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
         license_url = drm.license_url or api.DRM_LICENSE_URL
-        if not license_url.startswith("https://drm.play.tv"):
+        endpoint = urlparse(license_url)
+        if endpoint.scheme != "https" or endpoint.netloc != "drm.play.tv":
             raise CdmError("Play playback has no valid KeyOS Widevine licence endpoint")
         drm_xml = str(drm.context.get("drm_xml") or drm.headers.get("customdata") or "")
         headers = dict(drm.headers)

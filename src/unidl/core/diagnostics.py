@@ -36,12 +36,12 @@ _CURRENT: contextvars.ContextVar[DebugRecorder | None] = contextvars.ContextVar(
 _SECRET_NAME = re.compile(
     r"(?:^|[-_])(authorization|cookie|set-cookie|password|passwd|token|access[-_]?token|refresh[-_]?token|"
     r"id[-_]?token|client[-_]?secret|secret|api[-_]?key|signature|sig|hash|session[-_]?id|sessionid|"
-    r"jsessionid|code)(?:$|[-_])",
+    r"jsessionid|code|pin)(?:$|[-_])",
     re.I,
 )
 _SECRET_QUERY = re.compile(
     r"^(?:token|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|auth|signature|sig|hash|"
-    r"session(?:id)?|jsessionid|password|passwd|code|key)$",
+    r"session(?:id)?|jsessionid|password|passwd|code|key|pin)$",
     re.I,
 )
 _MANIFEST_PATH = re.compile(
@@ -118,7 +118,7 @@ def _redact_value(value: Any, *, key: str = "") -> Any:
         # Catch bearer/JWT-like values even when a service put them in a free-form
         # error string rather than a JSON field.
         value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", value)
-        value = re.sub(r"(?i)(\b(?:token|password|passwd|secret|sessionid|jsessionid)\s*[:=]\s*)[^,;\s]+", r"\1<redacted>", value)
+        value = re.sub(r"(?i)(\b(?:token|password|passwd|secret|sessionid|jsessionid|pin)\s*[:=]\s*)[^,;\s]+", r"\1<redacted>", value)
     return value
 
 

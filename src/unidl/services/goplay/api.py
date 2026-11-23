@@ -1,4 +1,4 @@
-
+"""Play Belgium (GoPlay) Android TV API client."""
 
 from __future__ import annotations
 
@@ -11,14 +11,15 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
+from ...core.attachments import Attachment
 from ...core.chapters import Chapter
 
-APP_VERSION = "3.1.23"
-VERSION_CODE = 292
+APP_VERSION = "3.1.30"
+VERSION_CODE = 306
 PACKAGE_NAME = "be.goplay.app"
 ANDROID_SDK = 34
 DEVICE_NAME = "Google TV Streamer"
@@ -28,11 +29,12 @@ USER_AGENT = f"GoPlay/{VERSION_CODE} AndroidTV/{ANDROID_SDK}"
 API_BASE_URL = "https://api.play.tv/tv/"
 SITE_URL = "https://www.play.tv"
 LOGIN_PAGE_URL = "https://login.play.tv/device/authorize"
+DAI_VOD_URL = "https://dai.google.com/ondemand/v1/dash/content/{content_source_id}/vid/{video_id}/stream"
 DRM_LICENSE_URL = "https://drm.play.tv?drm-type=widevine"
 DRM_ALB_KEY = "prd-fa10dd3e027a715d35f24d4e2be5d8a699e2b024e42a1bc7d0300abe8eda6c80"
 
 TOKEN_FILE = "goplay_token.json"
-TOKEN_EXPIRY_SKEW = 60
+TOKEN_EXPIRY_SKEW = 300
 PAGE_SIZE = 10
 MAX_PAGES = 100
 
@@ -81,7 +83,6 @@ SKIP_LANE_TYPES = frozenset(
 )
 
 GEO_ERROR_CODES = frozenset({"BELGIUM_ONLY", "EU_PORTABILITY_REQUIRED", "OUTSIDE_EU"})
-ELIGIBILITY_BLOCKED = frozenset({"CONCURRENT_STREAM_LIMIT_EXCEEDED", "DEVICE_LIMIT_EXCEEDED", "EXPIRED"})
 
 
 class GoPlayError(RuntimeError):
@@ -94,6 +95,10 @@ class AuthenticationRequired(GoPlayError):
 
 class AvailabilityError(GoPlayError):
     """Play refused a title for this account or location."""
+
+
+class NotFoundError(GoPlayError):
+    """The requested Play resource does not exist."""
 
 
 @dataclass
@@ -145,7 +150,7 @@ class Session:
     def recoverable(self) -> bool:
         return bool(self.refresh_token)
 
-    def is_fresh(self, skew: int = TOKEN_EXPIRY_SKEW) -> bool:
+    def is_fresh(self, skew: int = 0) -> bool:
         return bool(self.id_token and self.expires_at > time.time() + skew)
 
     def ensure_device(self) -> None:
@@ -197,6 +202,7 @@ class CatalogItem:
     next_title: str = ""
     starts_at: float | None = None
     ends_at: float | None = None
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def is_program(self) -> bool:
@@ -204,11 +210,11 @@ class CatalogItem:
 
     @property
     def is_video(self) -> bool:
-        return self.kind in {"VIDEO", "TRAILER"}
+        return self.kind == "VIDEO"
 
     @property
     def is_shortform(self) -> bool:
-        return self.kind == "SHORTFORM"
+        return self.kind in {"SHORTFORM", "TRAILER"}
 
     @property
     def is_live(self) -> bool:
@@ -216,7 +222,7 @@ class CatalogItem:
 
     @property
     def is_page(self) -> bool:
-        return self.kind in {"THEME_PAGE", "PAGE", "LINK"}
+        return self.kind in {"THEME_PAGE", "PAGE"}
 
     @property
     def is_playable(self) -> bool:
@@ -281,11 +287,17 @@ class Program:
     playlists: tuple[Playlist, ...] = ()
     trailer_uuid: str = ""
     teaser_uuid: str = ""
-    next_video_uuid: str = ""
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def is_movie(self) -> bool:
         return self.program_type.upper() == "MOVIE"
+
+
+@dataclass(frozen=True)
+class SsaiSource:
+    content_source_id: str
+    video_id: str
 
 
 @dataclass(frozen=True)
@@ -303,6 +315,7 @@ class Video:
     drm_xml: str = ""
     manifests: tuple[tuple[str, str, str], ...] = ()
     chapters: tuple[Chapter, ...] = ()
+    ssai: SsaiSource | None = None
 
 
 @dataclass(frozen=True)
@@ -412,23 +425,57 @@ def _video_id(value: Any) -> str:
     return _text(value)
 
 
-def _image_url(value: Any) -> str:
+def _image_url(value: Any, *, large: bool = False) -> str:
     if isinstance(value, str):
-        return _text(value)
+        url = _text(value)
+        try:
+            parsed = urlparse(url)
+            return url if parsed.scheme in {"http", "https"} and parsed.hostname else ""
+        except ValueError:
+            return ""
     if isinstance(value, dict):
-        direct = _text(value.get("url") or value.get("src"))
-        if direct:
-            return direct
-        for item in value.values():
-            url = _image_url(item)
+        if "url" in value:
+            return _image_url(value["url"])
+        for key in ("background", "portrait", "logo", "titleLogo"):
+            url = _image_url(value.get(key), large=large)
             if url:
                 return url
     if isinstance(value, list):
-        for item in value:
-            url = _image_url(item)
-            if url:
-                return url
+        styles = ("large", "medium", "small") if large else ("medium", "large", "small")
+        for style in styles:
+            for item in value:
+                if isinstance(item, dict) and _text(item.get("style")).lower() == style:
+                    url = _image_url(item)
+                    if url:
+                        return url
     return ""
+
+
+def extract_artwork(raw: Any, *, program: bool = False) -> tuple[Attachment, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    images = raw.get("images")
+    if program:
+        images = images if isinstance(images, dict) else {}
+        entries = (
+            (images.get("background"), "Program background", "artwork"),
+            (images.get("portrait"), "Program poster", "poster"),
+            (images.get("logo"), "Program logo", "image"),
+            (images.get("titleLogo"), "Program title logo", "image"),
+        )
+    else:
+        entries = (
+            (images or raw.get("image"), "Artwork", "artwork"),
+            (raw.get("logo"), "Logo", "image"),
+        )
+    attachments: list[Attachment] = []
+    seen: set[str] = set()
+    for value, name, kind in entries:
+        url = _image_url(value, large=True)
+        if url and url not in seen:
+            seen.add(url)
+            attachments.append(Attachment(url=url, name=name, kind=kind, headers={"User-Agent": USER_AGENT}))
+    return tuple(attachments)
 
 
 def _program_type(value: Any) -> str:
@@ -505,6 +552,21 @@ def parse_card(raw: Any) -> CatalogItem | None:
     if isinstance(link, dict):
         href = _text(link.get("url") or link.get("slug"))
         slug = slug or _text(link.get("slug"))
+        if kind == "LINK":
+            reference = link.get("reference")
+            if isinstance(reference, dict):
+                target_kind = {
+                    "LONG_FORM": "VIDEO",
+                    "SHORT_FORM": "SHORTFORM",
+                    "LIVE_CHANNEL": "LIVE",
+                    "PROGRAM": "PROGRAM",
+                    "THEME_PAGE": "THEME_PAGE",
+                }.get(_text(reference.get("type")).upper())
+                if target_kind:
+                    item_id = _text(reference.get("uuid"))
+                    kind = target_kind
+                    if not item_id or (kind == "THEME_PAGE" and not slug):
+                        return None
     elif link:
         href = _text(link)
     duration = _integer(raw.get("duration"), default=None)
@@ -520,6 +582,7 @@ def parse_card(raw: Any) -> CatalogItem | None:
         duration=float(duration) if duration else None,
         brand=_text(raw.get("brand")),
         dummy=bool(raw.get("isDummy")),
+        attachments=extract_artwork(raw),
     )
 
 
@@ -561,7 +624,6 @@ def parse_program(raw: Any) -> Program:
                 index=_integer(item.get("index"), default=index) or index,
             )
         )
-    images = raw.get("images") if isinstance(raw.get("images"), dict) else raw.get("images")
     return Program(
         id=program_id,
         title=title,
@@ -571,12 +633,12 @@ def parse_program(raw: Any) -> Program:
         category=_text(raw.get("category") or raw.get("genre")),
         program_type=_program_type(raw.get("type")),
         duration=float(_integer(raw.get("duration"), default=0) or 0) or None,
-        image_url=_image_url(images),
+        image_url=_image_url(raw.get("images")),
         playlists=tuple(playlists),
         trailer_uuid=_text(raw.get("trailerVideoUuid")),
         teaser_uuid=_text(raw.get("teaserVideoUuid")),
-        next_video_uuid=_video_id(raw.get("nextVideo")),
         year=None,
+        attachments=extract_artwork(raw, program=True),
     )
 
 
@@ -614,16 +676,26 @@ def parse_video(raw: Any, *, short_form: bool = False) -> Video:
         drm_xml=_text(raw.get("drmXml")),
         manifests=tuple(manifests),
         chapters=extract_chapters(raw.get("markers"), duration=duration),
+        ssai=_parse_ssai(raw) if short_form else None,
     )
 
 
-def _marker_seconds(value: Any, *, duration: float | None) -> float | None:
-    """Convert a Play marker to seconds.
+def _parse_ssai(raw: dict[str, Any]) -> SsaiSource | None:
+    if _text(raw.get("adType")).upper() != "SSAI" or raw.get("ssai") is None:
+        return None
+    ssai = raw["ssai"]
+    if not isinstance(ssai, dict):
+        raise GoPlayError("Play returned invalid SSAI source metadata")
+    content_source_id = _text(ssai.get("contentSourceID"))
+    video_id = _text(ssai.get("videoID"))
+    if not content_source_id or not video_id:
+        raise GoPlayError("Play SSAI source is missing its content source or video id")
+    return SsaiSource(content_source_id, video_id)
 
-    The TV player compares skip intro/outro with content time in seconds.
-    ``endCredits`` / ``out`` on the wire are milliseconds when they dwarf duration.
-    """
-    if value in (None, ""):
+
+def _marker_seconds(value: Any, *, milliseconds: bool = False) -> float | None:
+    """Skip markers are seconds; legacy editorial markers are milliseconds."""
+    if isinstance(value, bool) or value in (None, ""):
         return None
     try:
         number = float(value)
@@ -631,19 +703,17 @@ def _marker_seconds(value: Any, *, duration: float | None) -> float | None:
         return None
     if not math.isfinite(number):
         return None
-    if duration and duration > 0 and abs(number) > duration * 2:
-        number /= 1000.0
-    elif abs(number) >= 10_000:
-        number /= 1000.0
-    return number
+    return number / 1000.0 if milliseconds else number
 
 
 def _first_marker(
     raw: dict[str, Any], keys: tuple[str, ...], *, duration: float | None, allow_zero: bool
 ) -> float | None:
     for key in keys:
-        moment = _marker_seconds(raw.get(key), duration=duration)
+        moment = _marker_seconds(raw.get(key), milliseconds=not key.startswith("skip"))
         if moment is None:
+            continue
+        if duration and moment >= duration:
             continue
         if moment > 0 or (allow_zero and moment == 0):
             return moment
@@ -651,12 +721,12 @@ def _first_marker(
 
 
 def _credits_start(raw: dict[str, Any], *, duration: float | None) -> float | None:
-    skip = _marker_seconds(raw.get("skipOutro"), duration=duration)
+    skip = _marker_seconds(raw.get("skipOutro"))
     if skip is not None and duration:
         start = duration + skip if skip < 0 else skip
         if 0 < start < duration - 1:
             return start
-    credits = _marker_seconds(raw.get("endCredits"), duration=duration)
+    credits = _marker_seconds(raw.get("endCredits"), milliseconds=True)
     if credits is not None and duration and 0 < credits < duration - 1:
         return credits
     return None
@@ -674,32 +744,31 @@ def extract_chapters(raw: Any, *, duration: float | None = None) -> tuple[Chapte
 
     The Android TV player skips intro via ``skipIntroStart``/``skipIntroEnd`` and
     outro via ``skipOutro`` (seconds, negative = from the end). The TV API also
-    sends millisecond ``endCredits`` and unused recap/opening fields. Ad breaks
-    are not chapters.
+    sends millisecond ``endCredits`` and recap/opening fields. Ad breaks are not
+    chapters. Invalid or out-of-content markers do not create chapters.
     """
     if not isinstance(raw, dict):
         return ()
-    recap = _first_marker(raw, ("previouslyOn",), duration=duration, allow_zero=False)
+    duration = _marker_seconds(duration)
+    duration = duration if duration is not None and duration > 0 else None
+    recap = _first_marker(raw, ("previouslyOn",), duration=duration, allow_zero=True)
     intro_start = _first_marker(raw, ("skipIntroStart", "openingScene"), duration=duration, allow_zero=True)
     intro_end = _first_marker(raw, ("skipIntroEnd", "mainContent"), duration=duration, allow_zero=False)
     credits = _credits_start(raw, duration=duration)
+    valid_intro = intro_start is not None and intro_end is not None and intro_end > intro_start
+    main_start = intro_end if valid_intro else _first_marker(raw, ("mainContent",), duration=duration, allow_zero=False)
+    if credits is not None and main_start is not None and credits <= main_start:
+        credits = None
     chapters: list[Chapter] = []
-    if recap is not None:
-        recap_end = intro_start if intro_start is not None and intro_start > recap else intro_end
+    recap_end = intro_start if valid_intro else main_start
+    if recap is not None and recap_end is not None and recap_end > recap:
         chapter = _chapter(recap, "Recap", recap_end, kind="recap")
         if chapter:
             chapters.append(chapter)
-    if intro_end is not None and intro_end > (intro_start or 0):
-        chapter = _chapter(intro_start or 0.0, "Intro", intro_end, kind="intro")
+    if valid_intro:
+        chapter = _chapter(intro_start, "Intro", intro_end, kind="intro")
         if chapter:
             chapters.append(chapter)
-    elif intro_start is not None and intro_start > 0:
-        chapter = _chapter(intro_start, "Intro", kind="intro")
-        if chapter:
-            chapters.append(chapter)
-    main_start = intro_end if intro_end is not None else intro_start
-    if main_start is None:
-        main_start = recap
     if credits is not None:
         if main_start is not None and credits > main_start:
             chapter = _chapter(main_start, "Main", credits)
@@ -714,6 +783,61 @@ def extract_chapters(raw: Any, *, duration: float | None = None) -> tuple[Chapte
         if chapter:
             chapters.append(chapter)
     return tuple(chapters)
+
+
+def ssai_chapters(chapters: tuple[Chapter, ...], payload: dict[str, Any]) -> tuple[Chapter, ...]:
+    """Map content markers onto the unmodified stitched DAI stream timeline."""
+    if not chapters:
+        return ()
+    content_duration = _marker_seconds(payload.get("content_duration"))
+    total_duration = _marker_seconds(payload.get("total_duration"))
+    rows = payload.get("ad_breaks")
+    if content_duration is None or total_duration is None or not isinstance(rows, list):
+        return ()
+    if content_duration <= 0 or total_duration < content_duration:
+        return ()
+    content_ms, total_ms = round(content_duration * 1000), round(total_duration * 1000)
+    breaks: list[tuple[int, int]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return ()
+        start = _marker_seconds(row.get("start"))
+        duration = _marker_seconds(row.get("duration"))
+        if start is None or duration is None or start < 0 or duration < 0:
+            return ()
+        breaks.append((round(start * 1000), round(duration * 1000)))
+    inserted = previous_end = 0
+    offsets: list[tuple[int, int]] = []
+    for start, duration in sorted(breaks):
+        content_start = start - inserted
+        if start < previous_end or start + duration > total_ms or not 0 <= content_start <= content_ms:
+            return ()
+        offsets.append((content_start, duration))
+        inserted += duration
+        previous_end = start + duration
+    if abs(total_ms - content_ms - inserted) > 100:
+        return ()
+
+    def stream_time(position: int, *, end: bool = False) -> int:
+        # At a break boundary the next chapter starts after ads; the previous
+        # chapter ends before them. No ad media is removed or made a chapter.
+        return position + sum(
+            duration for start, duration in offsets if start < position or (start == position and not end)
+        )
+
+    mapped: list[Chapter] = []
+    for chapter in chapters:
+        if chapter.start_ms >= content_ms:
+            continue
+        end_ms = min(chapter.end_ms, content_ms) if chapter.end_ms is not None else None
+        mapped.append(
+            replace(
+                chapter,
+                start_ms=stream_time(chapter.start_ms),
+                end_ms=stream_time(end_ms, end=True) if end_ms is not None else None,
+            )
+        )
+    return tuple(mapped)
 
 
 def parse_video_teaser(raw: Any, *, playlist_title: str = "") -> CatalogItem | None:
@@ -734,6 +858,7 @@ def parse_video_teaser(raw: Any, *, playlist_title: str = "") -> CatalogItem | N
         duration=float(duration) if duration else None,
         season=season,
         episode=episode,
+        attachments=extract_artwork(raw),
     )
 
 
@@ -811,6 +936,7 @@ def parse_live_card(raw: Any) -> CatalogItem | None:
         ends_at=now.ends_at if now else None,
         season=now.season if now else None,
         episode=now.episode if now else None,
+        attachments=extract_artwork(raw),
     )
 
 
@@ -851,8 +977,9 @@ def _pick_manifest(
         dash = 0 if protocol == "dash" else 1
         return (landscape, dash)
 
-    for protocol, _ratio, url in sorted(combined, key=sort_key):
-        add(protocol, url)
+    for protocol, ratio, url in sorted(combined, key=sort_key):
+        if protocol in {"dash", "hls"} and ratio in {"16:9", "LANDSCAPE", ""}:
+            add(protocol, url)
     if not ranked:
         raise GoPlayError("Play returned no playable manifest")
     primary_protocol, primary_url = ranked[0]
@@ -872,8 +999,9 @@ class GoPlayApi:
         self.state = state or Session()
         self.state.ensure_device()
         self.on_save = on_save
-        self.http.headers.setdefault("User-Agent", USER_AGENT)
-        self.http.headers.setdefault("Accept", "application/json")
+        self.http.headers["User-Agent"] = USER_AGENT
+        self.http.headers["X-Platform"] = API_PLATFORM
+        self.http.headers["Accept"] = "application/json"
 
     def _persist(self) -> None:
         if self.on_save is not None:
@@ -886,7 +1014,8 @@ class GoPlayApi:
             if self.state.id_token:
                 headers["Authorization"] = f"Bearer {self.state.id_token}"
         elif not authorize:
-            headers.pop("Authorization", None)
+            # None also suppresses a bearer inherited from requests.Session.
+            headers["Authorization"] = None
         kwargs["headers"] = headers
         try:
             return self.http.request(method, url, **kwargs)
@@ -910,6 +1039,8 @@ class GoPlayApi:
             raise AvailabilityError(_error_text(payload, "Play is not available from this location"))
         if status in {401, 403} or code in {"EXPIRED_TOKEN", "INVALID_TOKEN", "INVALID_GRANT", "UNAUTHORIZED"}:
             raise AuthenticationRequired(_error_text(payload, "Play rejected the TV session"))
+        if status == 404:
+            raise NotFoundError(_error_text(payload, f"{label} was not found"))
         raise GoPlayError(_error_text(payload, f"{label} failed (HTTP {status})"))
 
     def _api(
@@ -925,10 +1056,10 @@ class GoPlayApi:
         if authorize:
             self.ensure_auth()
         response = self._request(method, url, authorize=authorize, **kwargs)
-        payload = self._json(response, path)
         if retry and authorize and response.status_code == 401 and self.state.recoverable:
             self.refresh()
             return self._api(method, path, authorize=authorize, retry=False, **kwargs)
+        payload = self._json(response, path)
         if response.status_code >= 400:
             self._raise_http(payload, response.status_code, path)
         return payload
@@ -976,7 +1107,7 @@ class GoPlayApi:
             _integer(payload.get("ExpiresIn") or payload.get("expiresIn") or payload.get("expires_in"), default=3600)
             or 3600
         )
-        self._apply_tokens(tokens, expires_in=expires_in)
+        self._apply_tokens(tokens, expires_in=expires_in, keep_refresh=False)
         return self.state
 
     def _apply_tokens(self, tokens: dict[str, Any], *, expires_in: int, keep_refresh: bool = True) -> None:
@@ -992,7 +1123,9 @@ class GoPlayApi:
         self.state.token_type = token_type or "Bearer"
         self.state.refresh_token = refresh_token
         self.state.id_token = id_token
-        self.state.expires_at = time.time() + max(1, expires_in)
+        # The TV client renews five minutes early, except for shorter lifetimes.
+        lifetime = expires_in - TOKEN_EXPIRY_SKEW if expires_in >= TOKEN_EXPIRY_SKEW else expires_in
+        self.state.expires_at = time.time() + max(0, lifetime)
         self.state.account_label = _account_label(id_token, self.state.account_label or "Play account")
         self.state.ensure_device()
         self._persist()
@@ -1045,83 +1178,95 @@ class GoPlayApi:
     def lane(
         self, page_slug: str, lane_uuid: str, *, offset: int = 0, limit: int = PAGE_SIZE
     ) -> tuple[int, tuple[CatalogItem, ...]]:
-        payload = self._api(
-            "GET",
-            f"v2/pages/{page_slug}/lanes/{lane_uuid}",
-            params={"offset": offset, "limit": limit},
-        )
-        if not isinstance(payload, dict):
-            raise GoPlayError("Play lane response was not an object")
-        items = tuple(item for item in (parse_card(raw) for raw in payload.get("cards") or []) if item)
-        total = _integer(payload.get("total"), default=len(items)) or len(items)
+        total, rows = self._list_page(f"v2/pages/{page_slug}/lanes/{lane_uuid}", "cards", offset=offset, limit=limit)
+        items = tuple(item for item in (parse_card(raw) for raw in rows) if item)
         return total, items
+
+    def _list_page(
+        self, path: str, field: str, *, offset: int, limit: int, query: str | None = None
+    ) -> tuple[int, list[Any]]:
+        params = {"offset": offset, "limit": limit}
+        if query is None:
+            payload = self._api("GET", path, params=params)
+        else:
+            payload = self._api("POST", path, json={**params, "query": query})
+        if not isinstance(payload, dict) or not isinstance(payload.get(field), list):
+            raise GoPlayError(f"Play {path} returned no {field} list")
+        rows = payload[field]
+        total = _integer(payload.get("total"), default=len(rows))
+        return max(0, total), rows
+
+    def _list_pages(
+        self, path: str, field: str, *, query: str | None = None, limit: int | None = None
+    ) -> tuple[int, list[Any]]:
+        collected: list[Any] = []
+        offset = total = 0
+        for _ in range(MAX_PAGES):
+            page_limit = PAGE_SIZE if limit is None else min(PAGE_SIZE, limit - offset)
+            if page_limit <= 0:
+                break
+            total, rows = self._list_page(path, field, offset=offset, limit=page_limit, query=query)
+            collected.extend(rows)
+            # Offsets count wire entries, including dummy and unsupported cards.
+            offset += len(rows)
+            if not rows or offset >= total:
+                break
+        return total, collected
 
     def complete_list(self, catalog: CatalogList) -> CatalogList:
         if not catalog.list_id or not catalog.page_slug:
             return catalog
-        collected: list[CatalogItem] = []
-        offset = 0
-        total = 0
-        for _ in range(MAX_PAGES):
-            total, items = self.lane(catalog.page_slug, catalog.list_id, offset=offset, limit=PAGE_SIZE)
-            collected.extend(items)
-            offset += len(items)
-            if not items or offset >= total:
-                break
-        return replace(catalog, items=tuple(collected), total=total or len(collected))
+        total, rows = self._list_pages(f"v2/pages/{catalog.page_slug}/lanes/{catalog.list_id}", "cards")
+        items = tuple(item for item in (parse_card(raw) for raw in rows) if item)
+        return replace(catalog, items=items, total=total)
 
     def program(self, program_uuid: str) -> Program:
         payload = self._api("GET", f"v2/programs/{program_uuid}")
         return parse_program(payload)
 
+    def program_actions(self, program: Program) -> tuple[CatalogItem, ...]:
+        payload = self._api("GET", f"v1/programs/{program.id}/buttons", params={"context": "program"})
+        if not isinstance(payload, dict) or not isinstance(payload.get("buttons"), list):
+            raise GoPlayError("Play program buttons response was not a list")
+        items: list[CatalogItem] = []
+        seen: set[tuple[str, str]] = set()
+        for index, button in enumerate(payload["buttons"]):
+            if not isinstance(button, dict):
+                continue
+            link = button.get("link")
+            if not isinstance(link, dict):
+                continue
+            item = parse_card(
+                {
+                    "uuid": f"button-{index}",
+                    "title": _text(button.get("text") or link.get("text")) or program.title,
+                    "type": "LINK",
+                    "url": link,
+                }
+            )
+            if item and item.is_playable:
+                if item.is_shortform and _text(button.get("type")).upper() == "TRAILER":
+                    item = replace(item, kind="TRAILER")
+                if (item.kind, item.id) in seen:
+                    continue
+                seen.add((item.kind, item.id))
+                items.append(item)
+        return tuple(items)
+
     def playlist(
         self, playlist_uuid: str, *, offset: int = 0, limit: int = PAGE_SIZE
     ) -> tuple[int, tuple[CatalogItem, ...]]:
-        payload = self._api(
-            "GET",
-            f"v1/playlists/{playlist_uuid}",
-            params={"offset": offset, "limit": limit},
-        )
-        if not isinstance(payload, dict):
-            raise GoPlayError("Play playlist response was not an object")
-        items = tuple(item for item in (parse_video_teaser(raw) for raw in payload.get("videos") or []) if item)
-        total = _integer(payload.get("total"), default=len(items)) or len(items)
+        total, rows = self._list_page(f"v1/playlists/{playlist_uuid}", "videos", offset=offset, limit=limit)
+        items = tuple(item for item in (parse_video_teaser(raw) for raw in rows) if item)
         return total, items
 
     def complete_playlist(self, playlist: Playlist) -> tuple[CatalogItem, ...]:
-        collected: list[CatalogItem] = []
-        offset = 0
-        for _ in range(MAX_PAGES):
-            total, items = self.playlist(playlist.id, offset=offset, limit=PAGE_SIZE)
-            for item in items:
-                season, episode = item.season, item.episode
-                if season is None and episode is None:
-                    season, episode = parse_season_episode(item.title, playlist.title)
-                collected.append(replace(item, season=season, episode=episode))
-            offset += len(items)
-            if not items or offset >= total:
-                break
-        return tuple(collected)
+        _total, rows = self._list_pages(f"v1/playlists/{playlist.id}", "videos")
+        return tuple(item for item in (parse_video_teaser(raw, playlist_title=playlist.title) for raw in rows) if item)
 
     def search(self, query: str, *, limit: int = 50) -> tuple[CatalogItem, ...]:
-        collected: list[CatalogItem] = []
-        offset = 0
-        while offset < limit:
-            page_limit = min(PAGE_SIZE, limit - offset)
-            payload = self._api(
-                "POST",
-                "v1/search",
-                json={"offset": offset, "limit": page_limit, "query": query},
-            )
-            if not isinstance(payload, dict):
-                raise GoPlayError("Play search response was not an object")
-            items = [item for item in (parse_card(raw) for raw in payload.get("cards") or []) if item]
-            collected.extend(items)
-            total = _integer(payload.get("total"), default=len(items)) or len(items)
-            offset += len(items)
-            if not items or offset >= total:
-                break
-        return tuple(collected)
+        _total, rows = self._list_pages("v1/search", "cards", query=query, limit=limit)
+        return tuple(item for item in (parse_card(raw) for raw in rows) if item)
 
     def live_streams(self) -> tuple[CatalogItem, ...]:
         payload = self._api("GET", "v1/liveStreams")
@@ -1164,25 +1309,28 @@ class GoPlayApi:
             return DeepLink(kind="program", uuid=item_id or program_uuid)
         if content_type == "themepage":
             return DeepLink(kind="page", slug=slug or item_id)
-        if item_id:
-            return DeepLink(kind="program", uuid=item_id)
         raise GoPlayError("Play did not recognise that URL")
 
     def _resolve_uuid(self, value: str) -> DeepLink:
         try:
             self.program(value)
             return DeepLink(kind="program", uuid=value)
-        except GoPlayError:
+        except NotFoundError:
             pass
         try:
             self.long_form(value)
             return DeepLink(kind="video", uuid=value)
-        except GoPlayError:
+        except NotFoundError:
+            pass
+        try:
+            self.short_form(value)
+            return DeepLink(kind="shortform", uuid=value)
+        except NotFoundError:
             pass
         try:
             self.live_stream(value)
             return DeepLink(kind="live", uuid=value)
-        except GoPlayError as exc:
+        except NotFoundError as exc:
             raise GoPlayError(f"Play could not resolve {value}") from exc
 
     def long_form(self, video_uuid: str) -> Video:
@@ -1193,7 +1341,53 @@ class GoPlayApi:
         payload = self._api("GET", f"v1/videos/short-form/{video_uuid}", params={"iabConsentString": ""})
         return parse_video(payload, short_form=True)
 
+    def _ssai_playback(
+        self, source: SsaiSource, video: Video, *, drm_xml: str, heartbeat_ms: int | None = None
+    ) -> PlaybackSource:
+        url = DAI_VOD_URL.format(
+            content_source_id=quote(source.content_source_id, safe=""),
+            video_id=quote(source.video_id, safe=""),
+        )
+        response = self._request(
+            "POST",
+            url,
+            authorize=False,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "X-Platform": None},
+            data={},
+        )
+        if response.status_code >= 400:
+            raise AvailabilityError(f"Play SSAI stream request was refused (HTTP {response.status_code})")
+        payload = self._json(response, "Play SSAI stream")
+        manifest_url = _text(payload.get("stream_manifest")) if isinstance(payload, dict) else ""
+        parsed = urlparse(manifest_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise GoPlayError("Play SSAI stream response is missing a valid stream_manifest")
+        duration = _marker_seconds(payload.get("total_duration"))
+        return PlaybackSource(
+            manifest_url=manifest_url,
+            manifest_type="dash",
+            alternate_manifest_urls=(),
+            drm_xml=drm_xml,
+            title=video.title,
+            duration=duration if duration is not None and duration > 0 else video.duration,
+            heartbeat_ms=heartbeat_ms,
+            chapters=ssai_chapters(video.chapters, payload),
+        )
+
     def play(self, video: Video) -> PlaybackSource:
+        if video.short_form:
+            if video.ssai:
+                return self._ssai_playback(video.ssai, video, drm_xml=video.drm_xml)
+            url, protocol, alternates = _pick_manifest(video.manifests)
+            return PlaybackSource(
+                manifest_url=url,
+                manifest_type=protocol,
+                alternate_manifest_urls=() if video.drm_xml else alternates,
+                drm_xml=video.drm_xml,
+                title=video.title,
+                duration=video.duration,
+                chapters=video.chapters,
+            )
         payload = self._api(
             "POST",
             f"v1/videos/{video.id}/play",
@@ -1202,22 +1396,21 @@ class GoPlayApi:
         if not isinstance(payload, dict):
             raise GoPlayError("Play playback response was not an object")
         eligibility = _text(payload.get("eligibilityStatus")).upper()
-        if eligibility in ELIGIBILITY_BLOCKED:
+        if eligibility != "ALLOWED":
             raise AvailabilityError(_eligibility_message(eligibility))
-        drm_xml = _text(payload.get("drmXml")) or video.drm_xml
+        drm_xml = _text(payload.get("drmXml"))
+        heartbeat = _integer(payload.get("heartbeatTimeMs"), default=None)
         entries = [_manifest_entry(item) for item in payload.get("manifestUrls") or []]
-        manifests = [item for item in entries if item] or list(video.manifests)
-        extra_dash = extra_hls = ""
-        if not manifests and isinstance(payload.get("manifestUrls"), dict):
-            extra_dash = _text(payload["manifestUrls"].get("dash"))
-            extra_hls = _text(payload["manifestUrls"].get("hls"))
+        manifests = [item for item in entries if item]
         try:
-            url, protocol, alternates = _pick_manifest(manifests, extra_dash=extra_dash, extra_hls=extra_hls)
+            ssai = _parse_ssai(payload)
+            if ssai:
+                return self._ssai_playback(ssai, video, drm_xml=drm_xml, heartbeat_ms=heartbeat)
+            url, protocol, alternates = _pick_manifest(manifests)
         except GoPlayError as exc:
             raise AvailabilityError(_error_text(payload, str(exc))) from exc
         if drm_xml:
             alternates = ()
-        heartbeat = _integer(payload.get("heartbeatTimeMs"), default=None)
         return PlaybackSource(
             manifest_url=url,
             manifest_type=protocol,
