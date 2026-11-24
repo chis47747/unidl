@@ -92,6 +92,11 @@ class CdmRulesScreen(Screen[str | None]):
         self.rebuild()
         self.query_one("#rules-list", OptionList).focus()
 
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
+
     def _on_theme_changed(self, _theme: object = None) -> None:
         if self.is_attached:
             self.rebuild()

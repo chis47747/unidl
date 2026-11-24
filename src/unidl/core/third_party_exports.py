@@ -224,7 +224,7 @@ def _mediaexport_entry(title: Mapping[str, Any], *, position: int):
         note = "protected tracks contain no exported content key"
     else:
         note = ""
-    note_parts = ["third-party export · generic downloader · no service login or licence"]
+    note_parts = ["third-party export · generic downloader · no service login or license"]
     if note:
         note_parts.append(note)
     return Entry(
@@ -553,7 +553,7 @@ def _legacy_entry(
         bool(track.get("keys")) or _flag(track.get("encrypted"))
         for track in tracks
     )
-    note_parts = ["third-party export · generic downloader · no service login or licence"]
+    note_parts = ["third-party export · generic downloader · no service login or license"]
     if source_count > 1:
         note_parts.append(f"{source_count} exported manifest sources merged")
     if protected and not keys:
@@ -853,7 +853,7 @@ def _unshackle_entry(
         )
 
     drm_system, pssh, wrm_header, protected = _drm_summary(tracks)
-    note_parts = ["third-party export · generic downloader · no service login or licence"]
+    note_parts = ["third-party export · generic downloader · no service login or license"]
     if region:
         note_parts.append(f"source region {region}; choose a UniDL proxy separately if needed")
     if source_count > 1:

@@ -13,7 +13,7 @@ from textual.widgets.option_list import Option
 
 from ..core.i18n import setting_help, setting_label, setting_value, tr
 from ..core.settings import Setting, Settings
-from .bidi import visual_markup
+from .bidi import escape_markup
 from .chrome import Chrome, KeyBar
 from .settings_layout import SettingRow, label_width, setting_row
 
@@ -30,7 +30,15 @@ SETTINGS_GROUPS = {
     ),
     "interface": (
         "settings.group.interface", "settings.group.interface_help",
-        ("theme", "interface_locale", "beta_interface", "beta_auto_results", "debug"),
+        (
+            "theme",
+            "accent_color",
+            "title_color",
+            "interface_locale",
+            "beta_interface",
+            "beta_auto_results",
+            "debug",
+        ),
     ),
 }
 
@@ -100,6 +108,9 @@ class SettingsGroupScreen(Screen[None]):
             bar.render_pairs()
         self.rebuild()
 
+    def refresh_after_settings(self) -> None:
+        self.rebuild()
+
     def rebuild(self) -> None:
         options = self.query_one("#settings-group-list", OptionList)
         previous = options.highlighted
@@ -119,11 +130,26 @@ class SettingsGroupScreen(Screen[None]):
             masthead.first(Static).update(tr(self.title, default=self.title))
 
     def _row_markup(self, spec: Setting) -> SettingRow:
+        from .settings_screen import APPEARANCE_SETTING_KEYS, appearance_swatch_markup
+
         value = setting_value(spec, self.scope)
         label = setting_label(spec)
+        value_markup = f"[$accent]{escape_markup(value)}[/]"
+        if spec.key in APPEARANCE_SETTING_KEYS:
+            palette = getattr(self.app, "palette", None)
+            dark = True if palette is None else palette.dark
+            accent = getattr(self.app, "accent_mode", "violet")
+            swatch = appearance_swatch_markup(
+                spec.key,
+                self.scope.get(spec.key),
+                dark=dark,
+                accent=accent,
+            )
+            if swatch:
+                value_markup = f"{swatch}  {value_markup}"
         return setting_row(
             self.query_one("#settings-group-list", OptionList),
-            label, f"[$accent]{visual_markup(value)}[/]", self._label_width,
+            label, value_markup, self._label_width,
         )
 
     def _selected(self) -> Setting | None:
@@ -133,7 +159,7 @@ class SettingsGroupScreen(Screen[None]):
     def _show_help(self, spec: Setting | None) -> None:
         if spec is not None:
             self.query_one("#settings-group-help", Static).update(
-                f"[$muted]{visual_markup(setting_help(spec) or tr(self.description, default=self.description))}[/]"
+                f"[$muted]{escape_markup(setting_help(spec) or tr(self.description, default=self.description))}[/]"
             )
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
@@ -155,6 +181,8 @@ class SettingsGroupScreen(Screen[None]):
         # Reuse the established editors so choice rows keep the same keyboard and
         # focus semantics as the ordinary Settings screen.
         from .settings_screen import (
+            APPEARANCE_SETTING_KEYS,
+            _AppearanceChoiceEditor,
             _ChoiceEditor,
             _DefaultAudioEditor,
             _DefaultSubtitleEditor,
@@ -169,6 +197,8 @@ class SettingsGroupScreen(Screen[None]):
             editor = _DefaultAudioEditor(spec, self.scope.get(spec.key))
         elif spec.key == "default_subtitle":
             editor = _DefaultSubtitleEditor(spec, self.scope.get(spec.key))
+        elif spec.key in APPEARANCE_SETTING_KEYS and spec.options:
+            editor = _AppearanceChoiceEditor(spec, self.scope.get(spec.key))
         elif spec.kind == "multi":
             editor = _MultiChoiceEditor(spec, self.scope.get(spec.key))
         elif spec.kind == "choice":
@@ -178,10 +208,14 @@ class SettingsGroupScreen(Screen[None]):
         self.app.push_screen(editor, lambda value: self._apply(spec, value) if value is not None else None)
 
     def _apply(self, spec: Setting, value: Any) -> None:
-        from .settings_screen import validate_setting_value
+        from .settings_screen import APPEARANCE_SETTING_KEYS, validate_setting_value
 
         problems = validate_setting_value(spec, value)
         if problems:
+            if spec.key in APPEARANCE_SETTING_KEYS:
+                clear_fn = getattr(self.app, "clear_appearance_preview", None)
+                if callable(clear_fn):
+                    clear_fn()
             self.notify(
                 "  ·  ".join(problems),
                 title=tr("settings.not_saved", label=setting_label(spec)),
@@ -192,6 +226,10 @@ class SettingsGroupScreen(Screen[None]):
         self.scope.set(spec.key, value)
         store_problem = getattr(self.scope._store, "problem", "")
         if store_problem:
+            if spec.key in APPEARANCE_SETTING_KEYS:
+                clear_fn = getattr(self.app, "clear_appearance_preview", None)
+                if callable(clear_fn):
+                    clear_fn()
             self.notify(
                 store_problem,
                 title=tr("settings.not_saved", label=setting_label(spec)),
@@ -200,7 +238,10 @@ class SettingsGroupScreen(Screen[None]):
             )
             self.rebuild()
             return
-        if spec.key == "theme":
+        if spec.key in APPEARANCE_SETTING_KEYS:
+            clear_fn = getattr(self.app, "clear_appearance_preview", None)
+            if callable(clear_fn):
+                clear_fn(apply=False)
             self.app.apply_theme()
         if spec.key == "interface_locale":
             self.app.apply_locale()

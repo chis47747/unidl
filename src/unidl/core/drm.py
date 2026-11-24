@@ -75,7 +75,7 @@ KeyGetter = Callable[[Exchange], list[str]]
 """Runs one exchange and returns ``kid:key`` strings."""
 
 ChallengeMaker = Callable[[Exchange], bytes]
-"""Produces a licence challenge and stops there, without asking for a licence.
+"""Produces a license challenge and stops there, without asking for a license.
 
 Needed by services that must present a challenge **before** they are allowed to
 learn anything about the content. The challenge comes first and the key ids
@@ -560,13 +560,13 @@ def _collect_widevine_keys(exchange: Exchange, get_one: Callable[[str], list[str
                 failures.append(exc)
                 if any(word in str(exc).lower() for word in _THROTTLED):
                     raise
-                exchange.log(f"Widevine: licence {index}/{len(values)} failed ({str(exc)[:160]})")
+                exchange.log(f"Widevine: license {index}/{len(values)} failed ({str(exc)[:160]})")
                 continue
             for entry in current or []:
                 pair = split_pair(str(entry))
                 if pair:
                     keys.setdefault(*pair)
-            exchange.log(f"Widevine: licence {index}/{len(values)} returned {len(current or [])} key(s)")
+            exchange.log(f"Widevine: license {index}/{len(values)} returned {len(current or [])} key(s)")
     finally:
         exchange.drm.pssh = original
     if wanted - keys.keys():
@@ -794,12 +794,12 @@ def _collect_playready_keys(
             except Exception as exc:  # noqa: BLE001 - collect every usable key
                 failures.append(exc)
                 exchange.log(
-                    f"PlayReady: licence {index}/{len(headers)} failed "
+                    f"PlayReady: license {index}/{len(headers)} failed "
                     f"({str(exc)[:160]})"
                 )
                 if any(word in str(exc).lower() for word in _THROTTLED):
                     exchange.log(
-                        "PlayReady: the licence server is throttling, stopping with "
+                        "PlayReady: the license server is throttling, stopping with "
                         f"{len(keys)} key(s)"
                     )
                     throttled = True
@@ -811,7 +811,7 @@ def _collect_playready_keys(
                 if kid and value:
                     keys.setdefault(kid, value.lower())
             exchange.log(
-                f"PlayReady: licence {index}/{len(headers)} returned "
+                f"PlayReady: license {index}/{len(headers)} returned "
                 f"{len(current)} key(s)"
             )
             if wanted and wanted <= set(keys):
@@ -822,7 +822,7 @@ def _collect_playready_keys(
     if keys:
         cache_note = f", {cached_count} from vault" if cached_count else ""
         exchange.log(
-            f"PlayReady: {len(keys)} key(s) from {asked} licence request(s)"
+            f"PlayReady: {len(keys)} key(s) from {asked} license request(s)"
             f"{cache_note} across {len(headers)} distinct header(s)"
         )
         missing = sorted(wanted - set(keys))
@@ -1066,7 +1066,7 @@ register(
         extract=None,
         networked=False,
         help="The ticket comes with the playback response and is unwrapped "
-        "locally, so there is no licence request to make.",
+        "locally, so there is no license request to make.",
         install_hint="python -m pip install pymonalisa, then configure a .mld and its "
         "wasm module under paths.cdm in unidl.yaml",
         rank=30,

@@ -517,7 +517,7 @@ def download(
     args.hls_decryptor = options.hls_decryptor
     cancel_requested = args.embedding_hooks.cancel_requested
     if cancel_requested is not None and cancel_requested():
-        raise DownloadCancelled("download cancelled before it started")
+        raise DownloadCancelled("download canceled before it started")
     if streams is not None:
         args.preparsed_streams = list(streams)
     runtime = args.embedding_hooks.runtime

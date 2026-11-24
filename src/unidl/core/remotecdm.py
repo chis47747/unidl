@@ -317,7 +317,7 @@ class RemoteCdm:
                 found.append(f"{kid}:{key}")
         if not found:
             raise CdmError(
-                f"remote CDM {self.config.name}: the licence was accepted but "
+                f"remote CDM {self.config.name}: the license was accepted but "
                 "no content keys came back"
             )
         return found
@@ -434,7 +434,7 @@ def widevine_keys(
         challenge = cdm.challenge(init_data, privacy_mode=bool(certificate))
         response = transport(challenge)
         if not response:
-            raise CdmError("the licence server returned an empty response")
+            raise CdmError("the license server returned an empty response")
         cdm.parse_license(response)
         return cdm.keys()
 
@@ -447,7 +447,7 @@ def playready_keys(
         challenge = cdm.challenge(init_data)
         response = transport(challenge.decode("utf-8", "ignore"))
         if not response:
-            raise CdmError("the licence server returned an empty response")
+            raise CdmError("the license server returned an empty response")
         cdm.parse_license(response)
         return cdm.keys()
 

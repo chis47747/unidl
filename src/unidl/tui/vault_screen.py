@@ -18,7 +18,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, OptionList, Static, TextArea
+from textual.widgets import Button, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import vaults
@@ -34,6 +34,7 @@ from ..core.vault import (
 from .bidi import visual_markup, visual_text
 from .chrome import CloseMark, refresh_locale_widgets
 from .input import ClipboardInput as Input
+from .input import ClipboardTextArea as TextArea
 
 _PAIR_IN_ERROR = re.compile(
     r"(?i)(?<![0-9a-f])(?:[0-9a-f]{32}|[0-9a-f-]{36})\s*[:：]\s*[0-9a-f]{32}(?![0-9a-f])"
@@ -117,9 +118,9 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
 
     def _footer_hint(self) -> str:
         return (
-            f"[$dim]^s {visual_markup(phrase('review and add'))}  ·  "
-            f"tab {visual_markup(phrase('move between fields'))}  ·  "
-            f"esc {visual_markup(phrase('cancel'))}[/]"
+            f"[$dim]^s {phrase('review and add')}  ·  "
+            f"tab {phrase('move between fields')}  ·  "
+            f"esc {phrase('cancel')}[/]"
         )
 
     def compose(self) -> ComposeResult:
@@ -179,8 +180,8 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
                 yield Button(tr("vault.choose_vaults"), id="vault-destination-choose")
             with Horizontal(id="vault-add-actions"):
                 yield Static(self._footer_hint(), id="vault-action-hint")
-                yield Button(phrase("Cancel"), id="vault-cancel")
                 yield Button(tr("vault.review_add"), variant="primary", id="vault-save")
+                yield Button(phrase("Cancel"), id="vault-cancel")
 
     def on_mount(self) -> None:
         self._size_classes()
@@ -224,6 +225,11 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
         if signal is not None:
             signal.subscribe(self, self._refresh_service_rows)
         self.call_after_refresh(self._refresh_service_rows)
+
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
 
     def _size_classes(self) -> None:
         self.set_class(self.size.width < 100, "narrow")

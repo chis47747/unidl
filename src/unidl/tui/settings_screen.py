@@ -39,10 +39,46 @@ from ..core.i18n import (
 from ..core.service import Service
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, cookie_profile_setting
-from .bidi import visual_markup
-from .chrome import Chrome, CloseMark, KeyBar, StatusChip
+from . import banner
+from .bidi import escape_markup, visual_markup
+from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
+from .theme import (
+    ACCENT_PRESETS,
+    DEFAULT_ACCENT,
+    DEFAULT_TITLE_COLOR,
+    normalize_accent,
+    normalize_title_color,
+    palette_for,
+    swatch_markup,
+    title_color_stops,
+)
+
+APPEARANCE_SETTING_KEYS = frozenset({"theme", "accent_color", "title_color"})
+
+
+def appearance_swatch_markup(
+    setting_key: str,
+    value: Any,
+    *,
+    dark: bool,
+    accent: str = DEFAULT_ACCENT,
+) -> str:
+    """Colour swatch representing a theme, system accent, or title colour choice."""
+    accent_key = normalize_accent(accent)
+    if setting_key == "theme":
+        mode = "light" if str(value or "").lower() == "light" else "dark"
+        pal = palette_for(mode, accent_key)
+        surface = "#3a3a3a" if mode == "dark" else "#d4d0c7"
+        return f"[{surface}]━━[/][{pal.accent}]━━[/]"
+    if setting_key == "accent_color":
+        preset = ACCENT_PRESETS[normalize_accent(str(value or ""))]
+        return swatch_markup(preset.swatch_stops(dark), blocks=4)
+    if setting_key == "title_color":
+        stops = title_color_stops(str(value or ""), dark=dark, accent=accent_key)
+        return swatch_markup(stops, blocks=4)
+    return ""
 
 
 class _Editor(ModalScreen[Any]):
@@ -79,16 +115,30 @@ class _Editor(ModalScreen[Any]):
         with Horizontal(classes="modal-card-actions"):
             yield Button(phrase("Cancel"), id="modal-cancel")
 
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#modal-card", "OptionList")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        # Textual invokes ``on_*`` handlers across the entire MRO. Keep a single
+        # handler on ``_Editor`` and delegate to ``_handle_button`` so clicking
+        # Cancel in a subclass never fires ``dismiss`` twice and pops the parent
+        # ``SettingsScreen`` as well.
         event.stop()
-        if event.button.id == "modal-cancel":
+        self._handle_button(event.button.id or "")
+
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-cancel":
             self.action_cancel()
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        if self.app.screen is self:
+            self.dismiss(None)
 
     def go_back(self) -> bool:
-        self.dismiss(None)
+        self.action_cancel()
         return True
 
 
@@ -110,11 +160,206 @@ class _ChoiceEditor(_Editor):
             if option.value == self.current:
                 option_list.highlighted = index
                 break
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         self.dismiss(self.setting.options[int(event.option.id or 0)].value)
+
+
+class _PreviewOptionList(OptionList):
+    """OptionList where mouse clicks highlight for live preview without committing."""
+
+    def on_click(self, event) -> None:
+        clicked_option = event.style.meta.get("option")
+        if clicked_option is None:
+            return
+        event.prevent_default()
+        event.stop()
+        if not self._options[clicked_option].disabled:
+            self.highlighted = clicked_option
+
+
+class _AppearanceChoiceEditor(_Editor):
+    """Choice editor for theme, system accent, and title colour with live preview."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "apply", "Apply", show=False, priority=True),
+    ]
+
+    def __init__(self, setting: Setting, current: Any):
+        super().__init__(setting, current)
+        self._committed = False
+        self._previewed: Any = current
+
+    def compose_editor(self) -> ComposeResult:
+        with Vertical(id="appearance-preview"):
+            yield Static("", id="appearance-preview-banner")
+            yield Static("", id="appearance-preview-ui")
+            yield Static(
+                tr(
+                    "appearance.live_preview",
+                    default="Click or ↑↓ to preview · Apply or Enter to save · Esc to cancel",
+                ),
+                id="appearance-preview-caption",
+            )
+        yield _PreviewOptionList(id="appearance-options")
+
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(phrase("Apply"), variant="primary", id="modal-apply")
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#modal-card", "#appearance-options")
+
+    def _preview_state(self, value: Any) -> tuple[str, str, str]:
+        mode = str(getattr(self.app, "theme_preference", "dark") or "dark").lower()
+        accent = normalize_accent(getattr(self.app, "accent_preference", DEFAULT_ACCENT))
+        title_color = normalize_title_color(
+            getattr(self.app, "title_color_preference", DEFAULT_TITLE_COLOR)
+        )
+        if self.setting.key == "theme":
+            mode = "light" if str(value or "").lower() == "light" else "dark"
+        elif self.setting.key == "accent_color":
+            accent = normalize_accent(str(value or ""))
+        elif self.setting.key == "title_color":
+            title_color = normalize_title_color(str(value or ""))
+        return mode, accent, title_color
+
+    def _option_prompts(self, value: Any) -> list[str]:
+        mode, accent, _title_color = self._preview_state(value)
+        dark = mode != "light"
+        prompts: list[str] = []
+        for option in self.setting.options:
+            mark = "▸" if option.value == self._previewed else " "
+            swatch = appearance_swatch_markup(
+                self.setting.key,
+                option.value,
+                dark=dark,
+                accent=accent,
+            )
+            label = escape_markup(option_label(self.setting, option))
+            prompts.append(f"{mark} {swatch}  {label}" if swatch else f"{mark} {label}")
+        return prompts
+
+    def _rebuild_options(self, value: Any) -> None:
+        options = self.query_one("#appearance-options", OptionList)
+        prompts = self._option_prompts(value)
+        if options.option_count == len(prompts):
+            for idx, prompt in enumerate(prompts):
+                options.replace_option_prompt_at_index(idx, prompt)
+            return
+        options.clear_options()
+        for index, prompt in enumerate(prompts):
+            options.add_option(Option(prompt, id=str(index)))
+
+    def _render_preview(self, value: Any) -> None:
+        mode, accent, title_color = self._preview_state(value)
+        pal = palette_for(mode, accent)
+        stops = title_color_stops(title_color, dark=pal.dark, accent=accent)
+        viewport_h = self.size.height or self.app.size.height
+        compact = bool(viewport_h and viewport_h < 26)
+        self.query_one("#appearance-preview-banner", Static).update(
+            banner.mini_art(stops, compact=compact)
+        )
+        prism = pal.prism
+        k1 = prism[0] if prism else pal.accent
+        k2 = prism[1 % len(prism)] if prism else pal.accent
+        k3 = prism[2 % len(prism)] if prism else pal.accent
+        settings_word = escape_markup(phrase("Settings"))
+        apply_word = escape_markup(phrase("Apply"))
+        sample = (
+            f"[{k1}]◆[/] [{pal.fg}]unidl[/]"
+            f"   [{pal.gutter}]·[/]   [{k2}]^s[/] [{pal.muted}]{settings_word}[/]"
+            f"   [{pal.gutter}]·[/]   [{k3}]✓[/] [{pal.accent}]{apply_word}[/]"
+        )
+        self.query_one("#appearance-preview-ui", Static).update(sample)
+
+    def _apply_live_preview(self, value: Any, *, repaint_app: bool = True) -> None:
+        self._previewed = value
+        if repaint_app:
+            preview_fn = getattr(self.app, "set_appearance_preview", None)
+            if callable(preview_fn):
+                if self.setting.key == "theme":
+                    preview_fn(theme=str(value))
+                elif self.setting.key == "accent_color":
+                    preview_fn(accent=str(value))
+                elif self.setting.key == "title_color":
+                    preview_fn(title_color=str(value))
+        self._render_preview(value)
+        self._rebuild_options(value)
+
+    def _restore_preview(self) -> None:
+        clear_fn = getattr(self.app, "clear_appearance_preview", None)
+        if callable(clear_fn):
+            clear_fn()
+
+    def _highlighted_value(self) -> Any:
+        options = self.query_one("#appearance-options", OptionList)
+        index = options.highlighted
+        if index is not None and 0 <= index < len(self.setting.options):
+            return self.setting.options[index].value
+        return self._previewed
+
+    def _commit(self, value: Any) -> None:
+        self._committed = True
+        if self.app.screen is self:
+            self.dismiss(value)
+
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-apply":
+            self.action_apply()
+        else:
+            self.action_cancel()
+
+    def on_mount(self) -> None:
+        self.query_one("#modal-card").add_class("appearance-modal")
+        self._rebuild_options(self.current)
+        options = self.query_one("#appearance-options", OptionList)
+        for index, option in enumerate(self.setting.options):
+            if option.value == self.current:
+                options.highlighted = index
+                break
+        self._render_preview(self.current)
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+        options.focus()
+
+    def on_resize(self) -> None:
+        self._render_preview(self._previewed)
+        self._fit_modal()
+
+    def on_unmount(self) -> None:
+        if not self._committed:
+            self._restore_preview()
+
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted
+    ) -> None:
+        event.stop()
+        index = int(event.option.id or 0)
+        if 0 <= index < len(self.setting.options):
+            self._apply_live_preview(self.setting.options[index].value)
+
+    def on_option_list_option_selected(
+        self, event: OptionList.OptionSelected
+    ) -> None:
+        event.stop()
+        index = int(event.option.id or 0)
+        if 0 <= index < len(self.setting.options):
+            self._commit(self.setting.options[index].value)
+
+    def action_apply(self) -> None:
+        self._commit(self._highlighted_value())
+
+    def action_cancel(self) -> None:
+        self._restore_preview()
+        super().action_cancel()
 
 
 class _MultiChoiceEditor(_Editor):
@@ -132,57 +377,54 @@ class _MultiChoiceEditor(_Editor):
         super().__init__(setting, current)
         self.selected = list(setting.coerce(current))
 
-    def compose_title(self) -> ComposeResult:
-        with Horizontal(classes="multi-setting-title-row"):
-            yield Label(setting_label(self.setting), classes="modal-card-title")
-            confirm = StatusChip(
-                "apply",
-                id="multi-setting-confirm",
-                classes="multi-setting-confirm",
-            )
-            confirm.update(f"✓ {tr('common.confirm', default='Confirm')}")
-            yield confirm
+    def _apply_label(self) -> str:
+        return f"{phrase('Apply')} ({len(self.selected)})"
 
     def compose_editor(self) -> ComposeResult:
         yield OptionList(id="multi-setting-options")
 
     def compose_actions(self) -> ComposeResult:
         with Horizontal(classes="modal-card-actions"):
-            yield Button(phrase("Apply"), variant="primary", id="modal-apply")
+            yield Button(self._apply_label(), variant="primary", id="modal-apply")
             yield Button(phrase("Cancel"), id="modal-cancel")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "modal-apply":
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-apply":
             self.action_apply()
         else:
             self.action_cancel()
 
     def on_mount(self) -> None:
         self._rebuild_options()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#multi-setting-options", OptionList).focus()
 
     def _rebuild_options(self) -> None:
         options = self.query_one("#multi-setting-options", OptionList)
-        previous = options.highlighted
-        options.clear_options()
-        options.add_option(
-            Option(
-                f"  [$accent]{tr('settings.use_n', count=len(self.selected))}[/]",
-                id="apply",
-            )
-        )
-        for index, item in enumerate(self.setting.options):
+        prompts: list[str] = [
+            f"  [$accent]{tr('settings.use_n', count=len(self.selected))}[/]",
+        ]
+        for item in self.setting.options:
             checked = item.value in self.selected
             mark = "[x]" if checked else "[ ]"
             role = "accent" if checked else "muted"
-            options.add_option(
-                Option(
-                    f"  [${role}]{visual_markup(mark)}[/]  {visual_markup(option_label(self.setting, item))}",
-                    id=f"value-{index}",
-                )
+            prompts.append(
+                f"  [${role}]{escape_markup(mark)}[/]  {escape_markup(option_label(self.setting, item))}"
             )
-        options.highlighted = min(previous or 0, len(self.setting.options))
+        if options.option_count == len(prompts):
+            for idx, prompt in enumerate(prompts):
+                options.replace_option_prompt_at_index(idx, prompt)
+        else:
+            previous = options.highlighted
+            options.clear_options()
+            options.add_option(Option(prompts[0], id="apply"))
+            for index, prompt in enumerate(prompts[1:]):
+                options.add_option(Option(prompt, id=f"value-{index}"))
+            options.highlighted = min(previous or 0, len(self.setting.options))
+        apply_buttons = self.query("#modal-apply")
+        if apply_buttons:
+            apply_buttons.first(Button).label = self._apply_label()
 
     def _toggle_index(self, index: int | None) -> None:
         if index is None or not 0 < index <= len(self.setting.options):
@@ -253,6 +495,8 @@ class _DefaultAudioEditor(_Editor):
         custom = self.current not in {"auto", "original", None}
         options.highlighted = 2 if custom else (1 if self.current == "original" else 0)
         field.display = custom
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         (field if custom else options).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -262,6 +506,8 @@ class _DefaultAudioEditor(_Editor):
             return
         field = self.query_one(Input)
         field.display = True
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         field.focus()
 
     def _submit_value(self, raw: str) -> None:
@@ -291,9 +537,8 @@ class _DefaultAudioEditor(_Editor):
         field.display = True
         field.focus()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "modal-save":
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-save":
             self.action_save()
         else:
             self.action_cancel()
@@ -333,6 +578,8 @@ class _DefaultSubtitleEditor(_Editor):
         custom = self.current not in {"auto", "original", None}
         options.highlighted = 2 if custom else (1 if self.current == "original" else 0)
         field.display = custom
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         (field if custom else options).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -342,6 +589,8 @@ class _DefaultSubtitleEditor(_Editor):
             return
         field = self.query_one(Input)
         field.display = True
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         field.focus()
 
     def _submit_value(self, raw: str) -> None:
@@ -371,9 +620,8 @@ class _DefaultSubtitleEditor(_Editor):
         field.display = True
         field.focus()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "modal-save":
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-save":
             self.action_save()
         else:
             self.action_cancel()
@@ -454,9 +702,8 @@ class _TextEditor(_Editor):
     def action_save(self) -> None:
         self._submit(self.query_one(Input).value)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "modal-save":
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-save":
             self.action_save()
         else:
             self.action_cancel()
@@ -510,9 +757,8 @@ class _TitleDelayEditor(_Editor):
     def action_save(self) -> None:
         self._submit(self.query_one(Input).value)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "modal-save":
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-save":
             self.action_save()
         else:
             self.action_cancel()
@@ -599,7 +845,7 @@ class SettingsScreen(Screen):
         self.rebuild()
 
     def set_hint(self, text: str) -> None:
-        note = f"[$dim]{visual_markup(text)}[/]" if text else ""
+        note = f"[$dim]{escape_markup(text)}[/]" if text else ""
         self.query_one("#crumbs-pill", Static).update(note)
 
     def _refresh_cookie_setting(self, spec: Setting, scope: Settings) -> None:
@@ -794,7 +1040,7 @@ class SettingsScreen(Screen):
         # unidl.yaml. A folder called "TV [new]" rendered as "TV " - and the editor
         # one keypress away showed the truth, so the row was the only thing lying.
         #
-        row = f"[$accent]{visual_markup(value)}[/]"
+        row = f"[$accent]{escape_markup(value)}[/]"
         if spec.inherit_global and scope.parent is not None:
             source = "settings.service_override" if scope.has_override(spec.key) else "settings.follows_global"
             service_default = (
@@ -956,6 +1202,8 @@ class SettingsScreen(Screen):
             self.app.push_screen(_DefaultAudioEditor(spec, scope.get(spec.key)), _done)
         elif spec.key == "default_subtitle":
             self.app.push_screen(_DefaultSubtitleEditor(spec, scope.get(spec.key)), _done)
+        elif spec.key in APPEARANCE_SETTING_KEYS and spec.options:
+            self.app.push_screen(_AppearanceChoiceEditor(spec, scope.get(spec.key)), _done)
         elif spec.kind == "multi" and spec.options:
             self.app.push_screen(_MultiChoiceEditor(spec, scope.get(spec.key)), _done)
         elif spec.kind == "choice" and spec.options:
@@ -1010,6 +1258,10 @@ class SettingsScreen(Screen):
         resets = scope.set(spec.key, value)
         store_problem = getattr(scope._store, "problem", "")
         if store_problem:
+            if spec.key in APPEARANCE_SETTING_KEYS:
+                clear_fn = getattr(self.app, "clear_appearance_preview", None)
+                if callable(clear_fn):
+                    clear_fn()
             self.notify(
                 store_problem,
                 title=tr("settings.not_saved", label=setting_label(spec)),
@@ -1018,6 +1270,11 @@ class SettingsScreen(Screen):
             )
             self.rebuild()
             return
+        if spec.key in APPEARANCE_SETTING_KEYS and scope is self.globals:
+            clear_fn = getattr(self.app, "clear_appearance_preview", None)
+            if callable(clear_fn):
+                clear_fn(apply=False)
+            self.app.apply_theme()
         paired_device = ""
         if spec.key == "drm_system" and scope is self.globals:
             # The main-screen DRM chip already moves the global CDM with the

@@ -32,7 +32,7 @@ from textual.widgets.selection_list import Selection
 from ..core import justwatch as jw
 from ..core.i18n import cell_width, tr
 from ..core.terminal_cells import crop as crop_cells
-from .chrome import Chrome, KeyBar, StatusChip
+from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
 from .filterbox import FILTER_MIN, FilterBox, as_number, matches
 
 #: how many search results to ask for
@@ -42,7 +42,7 @@ RESULT_COUNT = 12
 #: Said on both pickers, because the difference between them is the whole reason
 #: there are two. Kept here so the two screens cannot drift into describing it
 #: differently.
-SEARCH_REGION_NOTE = "one region: whose catalogue the title list comes from"
+SEARCH_REGION_NOTE = "one region: whose catalog the title list comes from"
 OFFER_REGION_NOTE = "many regions: who carries the title, one request each"
 
 
@@ -154,17 +154,29 @@ class SearchRegionScreen(Screen[str]):
         self.rebuild()
         self.query_one(FilterBox).focus()
 
+    def relocalize(self) -> None:
+        refresh_locale_widgets(self)
+        self.query_one("#masthead", Static).update(
+            f"{tr('justwatch.search_region')}  [$dim]{tr('justwatch.search_note')}[/]"
+        )
+        self.query_one("#subhead", Static).update(f"[$dim]{tr('justwatch.search_subhead')}[/]")
+        box = self.query_one(FilterBox)
+        box.placeholder = tr("filter.hint.country")
+        self.rebuild(box.value)
+
     def rebuild(self, needle: str = "") -> None:
         option_list = self.query_one("#region-list", OptionList)
         option_list.clear_options()
         self._codes = []
         entries = _region_entries(needle)
         if not entries:
-            option_list.add_option(Option(f"  [$dim]nothing matches '{_safe(needle)}'[/]", disabled=True))
+            option_list.add_option(
+                Option(f"  [$dim]{tr('cdm.no_match', query=_safe(needle))}[/]", disabled=True)
+            )
             return
         for code, name in entries:
             self._codes.append(code)
-            mark = "  [$ok]in use[/]" if code == self.current else ""
+            mark = f"  [$ok]{tr('cdm.in_use')}[/]" if code == self.current else ""
             option_list.add_option(Option(f"  [$foreground]{code}[/]  [$dim]{name}[/]{mark}"))
         if self.current in self._codes:
             option_list.highlighted = self._codes.index(self.current)
@@ -260,6 +272,14 @@ class RegionScreen(Screen[list]):
     def on_mount(self) -> None:
         self._render_count()
         self.query_one(SelectionList).focus()
+
+    def relocalize(self) -> None:
+        refresh_locale_widgets(self)
+        self.query_one("#masthead", Static).update(
+            f"{tr('justwatch.offer_region')}  [$dim]{tr('justwatch.offer_note')}[/]"
+        )
+        self.query_one(FilterBox).placeholder = tr("filter.hint.country_confirm")
+        self._render_count()
 
     def _render_count(self) -> None:
         changed = self._chosen != self._initial

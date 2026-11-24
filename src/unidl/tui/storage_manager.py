@@ -26,7 +26,7 @@ from ..core.i18n import cell_width, phrase, tr
 from ..core.output_paths import finished_download_root, render_episode_folder, validate_episode_folder_template
 from ..core.settings import Settings
 from ..core.terminal_cells import fit_middle
-from .bidi import visual_markup
+from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
@@ -330,7 +330,7 @@ class StorageManagerScreen(Screen[None]):
         shown_value = self._short(value, available) if row.editable else value
         return setting_row(
             self.query_one("#storage-list", OptionList), label,
-            f"[$accent]{visual_markup(shown_value)}[/]{state}",
+            f"[$accent]{escape_markup(shown_value)}[/]{state}",
             label_width(tr(f"storage.row.{item.key}", default=item.label) for item in self._rows),
             indent=4,
         )

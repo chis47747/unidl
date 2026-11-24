@@ -34,7 +34,6 @@ from textual.widgets import (
     Static,
     Tab,
     Tabs,
-    TextArea,
 )
 from textual.widgets.option_list import Option
 
@@ -46,6 +45,7 @@ from ..core.settings import Settings
 from .bidi import visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
+from .input import ClipboardTextArea as TextArea
 from .settings_layout import SettingRow, label_width, setting_row
 from .vault_targets import VaultCheckbox, VaultTargetResult, VaultTargetScreen
 

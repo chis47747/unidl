@@ -1051,13 +1051,13 @@ class Engine:
                     else:
                         payload = bytes(getattr(response, "content", b""))[:65_536]
             except requests.RequestException as exc:
-                self.log(f"video colour metadata probe skipped: {exc}")
+                self.log(f"video color metadata probe skipped: {exc}")
                 return
         detected = video_range_from_init(payload)
         if detected and detected != str(stream.video_range or "").strip().upper():
             stream.video_range = detected
             stream.extra["video_range_source"] = "MP4 init colr/nclx via bitrate probe"
-            self.log(f"video colour metadata corrected during bitrate probe: {detected}")
+            self.log(f"video color metadata corrected during bitrate probe: {detected}")
 
     def measure_video_bitrates(self, playback: Playback, tracks: TrackSet) -> None:
         """Measure selected video bitrate from response sizes without downloading media.
@@ -1343,7 +1343,7 @@ class Engine:
             if _looks_like_hls(absolute):
                 urls.append(absolute)
         if urls:
-            self.log(f"Reading {len(urls)} licence playlist(s) for per-key init data")
+            self.log(f"Reading {len(urls)} license playlist(s) for per-key init data")
         return urls
 
     def _fetch_text(self, playback: Playback, url: str) -> str:
@@ -1683,7 +1683,7 @@ class Engine:
         if not (use_local or use_remote):
             self._log_vault_status(
                 playback,
-                "vault: both vault switches are off, going to the licence server",
+                "vault: both vault switches are off, going to the license server",
             )
             return []
         # Vault coverage follows the same encrypted inventory as licensing. It is
@@ -2013,7 +2013,7 @@ class Engine:
             if wanted and wanted in held_kids:
                 automatic_error = (
                     f"KID {wanted} is already in the recording key set; automatic "
-                    "licence rotation only handles a newly observed KID"
+                    "license rotation only handles a newly observed KID"
                 )
             elif wanted and drm is not None and service is not None:
                 system = str(drm.system or WIDEVINE).lower()
@@ -2060,7 +2060,7 @@ class Engine:
                             if matched:
                                 return matched[0]
                             automatic_error = (
-                                f"{service.NAME} licence contained no key for {wanted}"
+                                f"{service.NAME} license contained no key for {wanted}"
                             )
                         else:
                             automatic_error = (
@@ -2071,7 +2071,7 @@ class Engine:
             elif not wanted:
                 automatic_error = "the live fragment did not expose its KID"
             elif service is None:
-                automatic_error = "the embedded download has no service licence context"
+                automatic_error = "the embedded download has no service license context"
             else:
                 automatic_error = "the playback has no DRM context"
 
@@ -2123,7 +2123,7 @@ class Engine:
         missing = [kid for kid in dict.fromkeys(wanted) if kid and kid not in held]
         if missing:
             self.log(
-                f"warning: {len(missing)} licence track key(s) are not in the keys "
+                f"warning: {len(missing)} license track key(s) are not in the keys "
                 f"in hand: {', '.join(missing)}"
             )
         return missing

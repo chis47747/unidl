@@ -46,7 +46,7 @@ from ..core.output_paths import finished_download_root
 from ..core.service import Service
 from . import banner
 from .askhost import MODE_LABEL as _MODE_LABEL
-from .bidi import visual_markup
+from .bidi import escape_markup, visual_markup
 from .cells import ServiceCell
 from .chrome import Chrome, KeyBar, StatusChip
 from .input import ClipboardInput as Input
@@ -230,10 +230,15 @@ class HomeScreen(Screen):
         self._render_setup_note()
 
     def refresh_banner(self) -> None:
+        found = self.query("#banner")
+        if not found:
+            return
         width = self.size.width or self.app.size.width
         height = self.size.height or self.app.size.height or None
-        self.query_one("#banner", Static).update(
-            banner.art(width, "$accent", height=height)
+        colour_fn = getattr(self.app, "title_banner_colour", None)
+        colour = colour_fn() if callable(colour_fn) else "$accent"
+        found.first(Static).update(
+            banner.art(width, colour, height=height)
         )
 
     def _render_caption(self) -> None:
@@ -460,8 +465,8 @@ class HomeScreen(Screen):
         if download_note.display:
             folder = str(finished_download_root(self.app.config, self.app.globals))
             download_note.update(
-                f"[$accent]{visual_markup(tr('home.download_location', path=folder))}[/]\n"
-                f"[$dim]{visual_markup(tr('home.download_location_hint'))}[/]"
+                f"[$accent]{escape_markup(tr('home.download_location', path=folder))}[/]\n"
+                f"[$dim]{escape_markup(tr('home.download_location_hint'))}[/]"
             )
         found = self.query("#setup-note")
         service_found = self.query("#service-setup-note")

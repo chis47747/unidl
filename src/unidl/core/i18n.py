@@ -19,7 +19,8 @@ from typing import Any
 
 from .terminal_cells import cell_width
 
-SUPPORTED_LOCALES = ("en", "zh-Hans", "zh-Hant", "es", "fr", "pt", "it", "ja", "ko", "ru", "de")
+SUPPORTED_LOCALES = ("en", "zh-Hans", "zh-Hant", "es", "fr", "pt", "it", "ja", "ko", "ru", "de", "ar")
+RTL_LOCALES = frozenset({"ar"})
 DEFAULT_LOCALE = "en"
 
 #: Known English chrome / key-bar / status phrases → stable message IDs.
@@ -244,6 +245,43 @@ _LOCALE_ALIASES = {
     "zh_mo": "zh-Hant",
     "zh-hant": "zh-Hant",
     "zh_hant": "zh-Hant",
+    "ar": "ar",
+    "ar-sa": "ar",
+    "ar_sa": "ar",
+    "ar-eg": "ar",
+    "ar_eg": "ar",
+    "ar-ae": "ar",
+    "ar_ae": "ar",
+    "ar-ma": "ar",
+    "ar_ma": "ar",
+    "ar-dz": "ar",
+    "ar_dz": "ar",
+    "ar-iq": "ar",
+    "ar_iq": "ar",
+    "ar-jo": "ar",
+    "ar_jo": "ar",
+    "ar-kw": "ar",
+    "ar_kw": "ar",
+    "ar-lb": "ar",
+    "ar_lb": "ar",
+    "ar-om": "ar",
+    "ar_om": "ar",
+    "ar-qa": "ar",
+    "ar_qa": "ar",
+    "ar-bh": "ar",
+    "ar_bh": "ar",
+    "ar-tn": "ar",
+    "ar_tn": "ar",
+    "ar-sy": "ar",
+    "ar_sy": "ar",
+    "ar-ye": "ar",
+    "ar_ye": "ar",
+    "ar-ly": "ar",
+    "ar_ly": "ar",
+    "ar-ps": "ar",
+    "ar_ps": "ar",
+    "ar-sd": "ar",
+    "ar_sd": "ar",
 }
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -257,6 +295,12 @@ class _SafeMap(dict[str, Any]):
 
 def supported_locales() -> tuple[str, ...]:
     return SUPPORTED_LOCALES
+
+
+def is_rtl_locale(locale: str | None = None) -> bool:
+    """Whether ``locale`` (or the active interface locale) reads right-to-left."""
+    active = get_translator().locale if locale is None else resolve_locale(locale)
+    return active in RTL_LOCALES
 
 
 def detect_locale() -> str:
@@ -403,7 +447,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "Videoprofil"),
         ("Audio profile", "Audioprofil"),
         ("Metadata language", "Metadatensprache"),
-        ("Catalogue language", "Katalogsprache"),
+        ("Catalog language", "Katalogsprache"), ("Catalogue language", "Katalogsprache"),
         ("Catalog languages", "Katalogsprachen"),
         ("Live recording length", "Dauer der Live-Aufnahme"),
         ("Offer the replay window", "Replay-Zeitfenster anbieten"),
@@ -447,7 +491,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "视频配置"),
         ("Audio profile", "音频配置"),
         ("Metadata language", "元数据语言"),
-        ("Catalogue language", "目录语言"),
+        ("Catalog language", "目录语言"), ("Catalogue language", "目录语言"),
         ("Catalog languages", "目录语言"),
         ("best available", "最高可用"),
         ("Automatic", "自动"),
@@ -499,7 +543,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "視訊設定"),
         ("Audio profile", "音訊設定"),
         ("Metadata language", "中繼資料語言"),
-        ("Catalogue language", "目錄語言"),
+        ("Catalog language", "目錄語言"), ("Catalogue language", "目錄語言"),
         ("Catalog languages", "目錄語言"),
         ("best available", "最高可用"),
         ("Automatic", "自動"),
@@ -551,7 +595,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "Perfil de vídeo"),
         ("Audio profile", "Perfil de audio"),
         ("Metadata language", "Idioma de metadatos"),
-        ("Catalogue language", "Idioma del catálogo"),
+        ("Catalog language", "Idioma del catálogo"), ("Catalogue language", "Idioma del catálogo"),
         ("Catalog languages", "Idiomas del catálogo"),
         ("best available", "mejor disponible"),
         ("Automatic", "Automático"),
@@ -603,7 +647,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "Profil vidéo"),
         ("Audio profile", "Profil audio"),
         ("Metadata language", "Langue des métadonnées"),
-        ("Catalogue language", "Langue du catalogue"),
+        ("Catalog language", "Langue du catalogue"), ("Catalogue language", "Langue du catalogue"),
         ("Catalog languages", "Langues du catalogue"),
         ("best available", "meilleure qualité disponible"),
         ("Automatic", "Automatique"),
@@ -655,7 +699,7 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Video profile", "Perfil de vídeo"),
         ("Audio profile", "Perfil de áudio"),
         ("Metadata language", "Idioma dos metadados"),
-        ("Catalogue language", "Idioma do catálogo"),
+        ("Catalog language", "Idioma do catálogo"), ("Catalogue language", "Idioma do catálogo"),
         ("Catalog languages", "Idiomas do catálogo"),
         ("best available", "melhor disponível"),
         ("Automatic", "Automático"),
@@ -684,10 +728,10 @@ _DYNAMIC_SETTING_PHRASES: dict[str, tuple[tuple[str, str], ...]] = {
         ("Main", "Principal"),
         ("Primary", "Principal"),
     ),
-    "it": (("Auto / best available", "Automatico / migliore disponibile"), ("Best available", "Migliore disponibile"), ("Manifest profile", "Profilo del manifesto"), ("Manifest resolution", "Risoluzione del manifesto"), ("Manifest color range", "Gamma di colori del manifesto"), ("Manifest codec", "Codec del manifesto"), ("Playback source", "Sorgente di riproduzione"), ("Playback scenario", "Scenario di riproduzione"), ("Authorization method", "Metodo di autorizzazione"), ("Sign-in method", "Metodo di accesso"), ("Login method", "Metodo di accesso"), ("Browser cookies", "Cookie del browser"), ("Apple ID account", "Account Apple ID"), ("full ladder", "scala completa"), ("Dynamic range", "Gamma dinamica"), ("Source quality", "Qualità della sorgente"), ("Stream quality", "Qualità del flusso"), ("Video quality", "Qualità video"), ("Audio quality", "Qualità audio"), ("Video profile", "Profilo video"), ("Audio profile", "Profilo audio"), ("Metadata language", "Lingua dei metadati"), ("Catalogue language", "Lingua del catalogo"), ("Catalog languages", "Lingue del catalogo"), ("best available", "migliore disponibile"), ("Automatic", "Automatico"), ("Auto", "Automatico"), ("Playback", "Riproduzione"), ("Manifest", "Manifesto"), ("Source", "Sorgente"), ("Stream", "Flusso"), ("Profile", "Profilo"), ("Quality", "Qualità"), ("Resolution", "Risoluzione"), ("Codec", "Codec"), ("Language", "Lingua"), ("Region", "Regione"), ("Country", "Paese"), ("Account", "Account"), ("Device", "Dispositivo"), ("device", "dispositivo"), ("Live", "Diretta"), ("Market", "Mercato"), ("Delivery", "Consegna"), ("Requested", "Richiesto"), ("Prefer", "Preferisci"), ("Ask", "Chiedi"), ("Any", "Qualsiasi"), ("Main", "Principale"), ("Primary", "Principale")),
-    "ja": (("Auto / best available", "自動 / 利用可能な最良"), ("Best available", "利用可能な最良"), ("Manifest profile", "マニフェストプロファイル"), ("Manifest resolution", "マニフェスト解像度"), ("Manifest color range", "マニフェスト色域"), ("Manifest codec", "マニフェストコーデック"), ("Playback source", "再生ソース"), ("Playback scenario", "再生シナリオ"), ("Authorization method", "認可方法"), ("Sign-in method", "サインイン方法"), ("Login method", "ログイン方法"), ("Browser cookies", "ブラウザ Cookie"), ("Apple ID account", "Apple ID アカウント"), ("full ladder", "全階梯"), ("Dynamic range", "ダイナミックレンジ"), ("Source quality", "ソース品質"), ("Stream quality", "ストリーム品質"), ("Video quality", "映像品質"), ("Audio quality", "音声品質"), ("Video profile", "映像プロファイル"), ("Audio profile", "音声プロファイル"), ("Metadata language", "メタデータ言語"), ("Catalogue language", "カタログ言語"), ("Catalog languages", "カタログ言語"), ("best available", "利用可能な最良"), ("Automatic", "自動"), ("Auto", "自動"), ("Playback", "再生"), ("Manifest", "マニフェスト"), ("Source", "ソース"), ("Stream", "ストリーム"), ("Profile", "プロファイル"), ("Quality", "品質"), ("Resolution", "解像度"), ("Codec", "コーデック"), ("Language", "言語"), ("Region", "地域"), ("Country", "国"), ("Account", "アカウント"), ("Device", "デバイス"), ("device", "デバイス"), ("Live", "ライブ"), ("Market", "市場"), ("Delivery", "配信"), ("Requested", "要求"), ("Prefer", "優先"), ("Ask", "尋ねる"), ("Any", "任意"), ("Main", "メイン"), ("Primary", "プライマリ")),
-    "ko": (("Auto / best available", "자동 / 사용 가능한 최고"), ("Best available", "사용 가능한 최고"), ("Manifest profile", "매니페스트 프로필"), ("Manifest resolution", "매니페스트 해상도"), ("Manifest color range", "매니페스트 색 범위"), ("Manifest codec", "매니페스트 코덱"), ("Playback source", "재생 소스"), ("Playback scenario", "재생 시나리오"), ("Authorization method", "인가 방식"), ("Sign-in method", "로그인 방식"), ("Login method", "로그인 방식"), ("Browser cookies", "브라우저 Cookie"), ("Apple ID account", "Apple ID 계정"), ("full ladder", "전체 화질 단계"), ("Dynamic range", "다이내믹 레인지"), ("Source quality", "소스 품질"), ("Stream quality", "스트림 품질"), ("Video quality", "영상 품질"), ("Audio quality", "오디오 품질"), ("Video profile", "영상 프로필"), ("Audio profile", "오디오 프로필"), ("Metadata language", "메타데이터 언어"), ("Catalogue language", "카탈로그 언어"), ("Catalog languages", "카탈로그 언어"), ("best available", "사용 가능한 최고"), ("Automatic", "자동"), ("Auto", "자동"), ("Playback", "재생"), ("Manifest", "매니페스트"), ("Source", "소스"), ("Stream", "스트림"), ("Profile", "프로필"), ("Quality", "품질"), ("Resolution", "해상도"), ("Codec", "코덱"), ("Language", "언어"), ("Region", "지역"), ("Country", "국가"), ("Account", "계정"), ("Device", "기기"), ("device", "기기"), ("Live", "라이브"), ("Market", "시장"), ("Delivery", "전송"), ("Requested", "요청"), ("Prefer", "우선"), ("Ask", "묻기"), ("Any", "임의"), ("Main", "메인"), ("Primary", "기본")),
-    "ru": (("Auto / best available", "Авто / лучшее доступное"), ("Best available", "Лучшее доступное"), ("Manifest profile", "Профиль манифеста"), ("Manifest resolution", "Разрешение манифеста"), ("Manifest color range", "Цветовой диапазон манифеста"), ("Manifest codec", "Кодек манифеста"), ("Playback source", "Источник воспроизведения"), ("Playback scenario", "Сценарий воспроизведения"), ("Authorization method", "Способ авторизации"), ("Sign-in method", "Способ входа"), ("Login method", "Способ входа"), ("Browser cookies", "Cookie браузера"), ("Apple ID account", "Учётная запись Apple ID"), ("full ladder", "полная лестница"), ("Dynamic range", "Динамический диапазон"), ("Source quality", "Качество источника"), ("Stream quality", "Качество потока"), ("Video quality", "Качество видео"), ("Audio quality", "Качество звука"), ("Video profile", "Профиль видео"), ("Audio profile", "Профиль звука"), ("Metadata language", "Язык метаданных"), ("Catalogue language", "Язык каталога"), ("Catalog languages", "Языки каталога"), ("best available", "лучшее доступное"), ("Automatic", "Автоматически"), ("Auto", "Авто"), ("Playback", "Воспроизведение"), ("Manifest", "Манифест"), ("Source", "Источник"), ("Stream", "Поток"), ("Profile", "Профиль"), ("Quality", "Качество"), ("Resolution", "Разрешение"), ("Codec", "Кодек"), ("Language", "Язык"), ("Region", "Регион"), ("Country", "Страна"), ("Account", "Учётная запись"), ("Device", "Устройство"), ("device", "устройство"), ("Live", "Эфир"), ("Market", "Рынок"), ("Delivery", "Доставка"), ("Requested", "Запрошено"), ("Prefer", "Предпочитать"), ("Ask", "Спрашивать"), ("Any", "Любой"), ("Main", "Основной"), ("Primary", "Главный")),
+    "it": (("Auto / best available", "Automatico / migliore disponibile"), ("Best available", "Migliore disponibile"), ("Manifest profile", "Profilo del manifesto"), ("Manifest resolution", "Risoluzione del manifesto"), ("Manifest color range", "Gamma di colori del manifesto"), ("Manifest codec", "Codec del manifesto"), ("Playback source", "Sorgente di riproduzione"), ("Playback scenario", "Scenario di riproduzione"), ("Authorization method", "Metodo di autorizzazione"), ("Sign-in method", "Metodo di accesso"), ("Login method", "Metodo di accesso"), ("Browser cookies", "Cookie del browser"), ("Apple ID account", "Account Apple ID"), ("full ladder", "scala completa"), ("Dynamic range", "Gamma dinamica"), ("Source quality", "Qualità della sorgente"), ("Stream quality", "Qualità del flusso"), ("Video quality", "Qualità video"), ("Audio quality", "Qualità audio"), ("Video profile", "Profilo video"), ("Audio profile", "Profilo audio"), ("Metadata language", "Lingua dei metadati"), ("Catalog language", "Lingua del catalogo"), ("Catalogue language", "Lingua del catalogo"), ("Catalog languages", "Lingue del catalogo"), ("best available", "migliore disponibile"), ("Automatic", "Automatico"), ("Auto", "Automatico"), ("Playback", "Riproduzione"), ("Manifest", "Manifesto"), ("Source", "Sorgente"), ("Stream", "Flusso"), ("Profile", "Profilo"), ("Quality", "Qualità"), ("Resolution", "Risoluzione"), ("Codec", "Codec"), ("Language", "Lingua"), ("Region", "Regione"), ("Country", "Paese"), ("Account", "Account"), ("Device", "Dispositivo"), ("device", "dispositivo"), ("Live", "Diretta"), ("Market", "Mercato"), ("Delivery", "Consegna"), ("Requested", "Richiesto"), ("Prefer", "Preferisci"), ("Ask", "Chiedi"), ("Any", "Qualsiasi"), ("Main", "Principale"), ("Primary", "Principale")),
+    "ja": (("Auto / best available", "自動 / 利用可能な最良"), ("Best available", "利用可能な最良"), ("Manifest profile", "マニフェストプロファイル"), ("Manifest resolution", "マニフェスト解像度"), ("Manifest color range", "マニフェスト色域"), ("Manifest codec", "マニフェストコーデック"), ("Playback source", "再生ソース"), ("Playback scenario", "再生シナリオ"), ("Authorization method", "認可方法"), ("Sign-in method", "サインイン方法"), ("Login method", "ログイン方法"), ("Browser cookies", "ブラウザ Cookie"), ("Apple ID account", "Apple ID アカウント"), ("full ladder", "全階梯"), ("Dynamic range", "ダイナミックレンジ"), ("Source quality", "ソース品質"), ("Stream quality", "ストリーム品質"), ("Video quality", "映像品質"), ("Audio quality", "音声品質"), ("Video profile", "映像プロファイル"), ("Audio profile", "音声プロファイル"), ("Metadata language", "メタデータ言語"), ("Catalog language", "カタログ言語"), ("Catalogue language", "カタログ言語"), ("Catalog languages", "カタログ言語"), ("best available", "利用可能な最良"), ("Automatic", "自動"), ("Auto", "自動"), ("Playback", "再生"), ("Manifest", "マニフェスト"), ("Source", "ソース"), ("Stream", "ストリーム"), ("Profile", "プロファイル"), ("Quality", "品質"), ("Resolution", "解像度"), ("Codec", "コーデック"), ("Language", "言語"), ("Region", "地域"), ("Country", "国"), ("Account", "アカウント"), ("Device", "デバイス"), ("device", "デバイス"), ("Live", "ライブ"), ("Market", "市場"), ("Delivery", "配信"), ("Requested", "要求"), ("Prefer", "優先"), ("Ask", "尋ねる"), ("Any", "任意"), ("Main", "メイン"), ("Primary", "プライマリ")),
+    "ko": (("Auto / best available", "자동 / 사용 가능한 최고"), ("Best available", "사용 가능한 최고"), ("Manifest profile", "매니페스트 프로필"), ("Manifest resolution", "매니페스트 해상도"), ("Manifest color range", "매니페스트 색 범위"), ("Manifest codec", "매니페스트 코덱"), ("Playback source", "재생 소스"), ("Playback scenario", "재생 시나리오"), ("Authorization method", "인가 방식"), ("Sign-in method", "로그인 방식"), ("Login method", "로그인 방식"), ("Browser cookies", "브라우저 Cookie"), ("Apple ID account", "Apple ID 계정"), ("full ladder", "전체 화질 단계"), ("Dynamic range", "다이내믹 레인지"), ("Source quality", "소스 품질"), ("Stream quality", "스트림 품질"), ("Video quality", "영상 품질"), ("Audio quality", "오디오 품질"), ("Video profile", "영상 프로필"), ("Audio profile", "오디오 프로필"), ("Metadata language", "메타데이터 언어"), ("Catalog language", "카탈로그 언어"), ("Catalogue language", "카탈로그 언어"), ("Catalog languages", "카탈로그 언어"), ("best available", "사용 가능한 최고"), ("Automatic", "자동"), ("Auto", "자동"), ("Playback", "재생"), ("Manifest", "매니페스트"), ("Source", "소스"), ("Stream", "스트림"), ("Profile", "프로필"), ("Quality", "품질"), ("Resolution", "해상도"), ("Codec", "코덱"), ("Language", "언어"), ("Region", "지역"), ("Country", "국가"), ("Account", "계정"), ("Device", "기기"), ("device", "기기"), ("Live", "라이브"), ("Market", "시장"), ("Delivery", "전송"), ("Requested", "요청"), ("Prefer", "우선"), ("Ask", "묻기"), ("Any", "임의"), ("Main", "메인"), ("Primary", "기본")),
+    "ru": (("Auto / best available", "Авто / лучшее доступное"), ("Best available", "Лучшее доступное"), ("Manifest profile", "Профиль манифеста"), ("Manifest resolution", "Разрешение манифеста"), ("Manifest color range", "Цветовой диапазон манифеста"), ("Manifest codec", "Кодек манифеста"), ("Playback source", "Источник воспроизведения"), ("Playback scenario", "Сценарий воспроизведения"), ("Authorization method", "Способ авторизации"), ("Sign-in method", "Способ входа"), ("Login method", "Способ входа"), ("Browser cookies", "Cookie браузера"), ("Apple ID account", "Учётная запись Apple ID"), ("full ladder", "полная лестница"), ("Dynamic range", "Динамический диапазон"), ("Source quality", "Качество источника"), ("Stream quality", "Качество потока"), ("Video quality", "Качество видео"), ("Audio quality", "Качество звука"), ("Video profile", "Профиль видео"), ("Audio profile", "Профиль звука"), ("Metadata language", "Язык метаданных"), ("Catalog language", "Язык каталога"), ("Catalogue language", "Язык каталога"), ("Catalog languages", "Языки каталога"), ("best available", "лучшее доступное"), ("Automatic", "Автоматически"), ("Auto", "Авто"), ("Playback", "Воспроизведение"), ("Manifest", "Манифест"), ("Source", "Источник"), ("Stream", "Поток"), ("Profile", "Профиль"), ("Quality", "Качество"), ("Resolution", "Разрешение"), ("Codec", "Кодек"), ("Language", "Язык"), ("Region", "Регион"), ("Country", "Страна"), ("Account", "Учётная запись"), ("Device", "Устройство"), ("device", "устройство"), ("Live", "Эфир"), ("Market", "Рынок"), ("Delivery", "Доставка"), ("Requested", "Запрошено"), ("Prefer", "Предпочитать"), ("Ask", "Спрашивать"), ("Any", "Любой"), ("Main", "Основной"), ("Primary", "Главный")),
 }
 
 
@@ -808,6 +852,55 @@ _DYNAMIC_SETTING_PHRASES["ru"] += (
     ("Offer", "Предлагать"), ("Replay", "Повтор"), ("window", "окно"), ("Check", "Проверять"),
     ("remote vaults", "удалённые хранилища"), ("licensed keys", "полученные ключи"), ("Store", "Сохранять"),
     ("before licensing", "до лицензии"), ("licensing", "лицензия"), ("hybrid output", "гибридный вывод"),
+)
+_DYNAMIC_SETTING_PHRASES["ar"] = (
+    ("Auto / best available", "تلقائي / الأفضل المتاح"),
+    ("Best available", "الأفضل المتاح"),
+    ("Manifest profile", "ملف تعريف البيان"),
+    ("Manifest resolution", "دقة البيان"),
+    ("Manifest color range", "نطاق ألوان البيان"),
+    ("Manifest codec", "ترميز البيان"),
+    ("Playback source", "مصدر التشغيل"),
+    ("Playback scenario", "سيناريو التشغيل"),
+    ("Authorization method", "طريقة التفويض"),
+    ("Sign-in method", "طريقة تسجيل الدخول"),
+    ("Login method", "طريقة تسجيل الدخول"),
+    ("Browser cookies", "ملفات تعريف الارتباط"),
+    ("Apple ID account", "حساب Apple ID"),
+    ("full ladder", "كامل درجات الجودة"),
+    ("Dynamic range", "النطاق الديناميكي"),
+    ("Source quality", "جودة المصدر"),
+    ("Stream quality", "جودة البث"),
+    ("Video quality", "جودة الفيديو"),
+    ("Audio quality", "جودة الصوت"),
+    ("Video profile", "ملف تعريف الفيديو"),
+    ("Audio profile", "ملف تعريف الصوت"),
+    ("Metadata language", "لغة البيانات الوصفية"),
+    ("Catalog language", "لغة الكتالوج"), ("Catalogue language", "لغة الكتالوج"),
+    ("Catalog languages", "لغات الكتالوج"),
+    ("Live recording length", "مدة تسجيل البث المباشر"),
+    ("Offer the replay window", "عرض نافذة الإعادة"),
+    ("Check remote vaults before licensing", "فحص المخازن البعيدة قبل الترخيص"),
+    ("Store licensed keys in remote vaults", "حفظ المفاتيح المرخّصة في المخازن البعيدة"),
+    ("Dolby Vision + HDR10 hybrid output", "إخراج هجين Dolby Vision + HDR10"),
+    ("Netflix video codec profile", "ملف تعريف ترميز فيديو Netflix"),
+    ("Netflix video quality profile", "ملف تعريف جودة فيديو Netflix"),
+    ("best available", "الأفضل المتاح"),
+    ("Automatic", "تلقائي"), ("Auto", "تلقائي"),
+    ("Playback", "التشغيل"), ("Manifest", "البيان"),
+    ("Source", "المصدر"), ("Stream", "البث"), ("Profile", "ملف التعريف"),
+    ("Quality", "الجودة"), ("Resolution", "الدقة"), ("Codec", "الترميز"),
+    ("Language", "اللغة"), ("Region", "المنطقة"), ("Country", "الدولة"),
+    ("Account", "الحساب"), ("Device", "الجهاز"), ("device", "الجهاز"),
+    ("Live", "مباشر"), ("Market", "السوق"), ("Delivery", "التسليم"),
+    ("Requested", "مطلوب"), ("Prefer", "تفضيل"),
+    ("Ask", "اسأل"), ("Any", "أي"), ("Main", "رئيسي"),
+    ("Primary", "أساسي"), ("Video", "فيديو"), ("Audio", "صوت"),
+    ("recording", "تسجيل"), ("length", "المدة"), ("Offer", "عرض"),
+    ("Replay", "إعادة"), ("window", "نافذة"), ("Check", "فحص"),
+    ("remote vaults", "المخازن البعيدة"), ("licensed keys", "المفاتيح المرخّصة"),
+    ("Store", "حفظ"), ("before licensing", "قبل الترخيص"),
+    ("licensing", "الترخيص"), ("hybrid output", "إخراج هجين"),
 )
 
 
@@ -941,11 +1034,13 @@ def unknown_placeholders(catalogue: Mapping[str, str], english: Mapping[str, str
 
 __all__ = [
     "DEFAULT_LOCALE",
+    "RTL_LOCALES",
     "SUPPORTED_LOCALES",
     "Translator",
     "cell_width",
     "detect_locale",
     "get_translator",
+    "is_rtl_locale",
     "load_catalogue",
     "option_label",
     "phrase",

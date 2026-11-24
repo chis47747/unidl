@@ -20,7 +20,15 @@ from textual.widgets.option_list import Option
 from textual.worker import Worker, WorkerState, get_current_worker
 
 from ..core import exports
-from ..core.i18n import cell_width, get_translator, load_catalogue, setting_help, setting_label, tr
+from ..core.i18n import (
+    cell_width,
+    get_translator,
+    is_rtl_locale,
+    load_catalogue,
+    setting_help,
+    setting_label,
+    tr,
+)
 from ..core.service import Service
 from ..core.settings import BETA_AUTO_RESULT_TYPES, TRACK_SETTINGS
 from ..core.vault import KeyRecord, hex_ids, normalize_hex, split_pair
@@ -265,11 +273,11 @@ class _ChoicePicker(ModalScreen[object | None]):
     _ChoicePicker { align: center middle; background: $base 75%; padding: 2 0; }
     #beta-picker-card {
         width: 64; max-width: 94%; max-height: 100%;
-        border: round $gutter; background: $recessed; padding: 1 2;
+        border: round $rule; background: $recessed; padding: 1 2;
     }
     _ChoicePicker.service-picker #beta-picker-card { width: 52; }
     #beta-picker-head { height: 1; }
-    #beta-picker-title { width: 1fr; text-style: bold; }
+    #beta-picker-title { width: 1fr; color: $accent; text-style: bold; }
     #beta-picker-filter { height: 1; min-height: 1; padding: 0 1; margin-top: 1; }
     #beta-picker-list { height: 1fr; min-height: 1; max-height: 14; margin-top: 1; }
     _ChoicePicker.service-picker #beta-picker-list { max-height: 8; }
@@ -288,6 +296,7 @@ class _ChoicePicker(ModalScreen[object | None]):
         self.filterable = filterable
         self.set_class(filterable, "service-picker")
         self._visible: list[object] = []
+        self._query = ""
 
     def compose(self) -> ComposeResult:
         card = Vertical(id="beta-picker-card")
@@ -305,10 +314,28 @@ class _ChoicePicker(ModalScreen[object | None]):
             yield OptionList(id="beta-picker-list")
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self.rebuild("")
         self.query_one("#beta-picker-filter" if self.filterable else "#beta-picker-list").focus()
 
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if not self.is_attached or not self.is_mounted:
+            return
+        options = self.query_one("#beta-picker-list", OptionList)
+        highlighted = options.highlighted
+        self.rebuild(self._query)
+        if highlighted is not None and self._visible:
+            options.highlighted = min(highlighted, len(self._visible) - 1)
+
     def rebuild(self, query: str) -> None:
+        self._query = query
         options = self.query_one("#beta-picker-list", OptionList)
         options.clear_options()
         self._visible = []
@@ -316,9 +343,9 @@ class _ChoicePicker(ModalScreen[object | None]):
             if not matches(query, label, detail):
                 continue
             self._visible.append(value)
-            text = Text(visual_text(label), no_wrap=True, overflow="ellipsis")
+            text = Text(label, no_wrap=True, overflow="ellipsis")
             if detail:
-                text.append(f"  {visual_text(detail)}", style=self.app.palette.dim)
+                text.append(f"  {detail}", style=self.app.palette.dim)
             options.add_option(Option(text))
         if self._visible:
             options.highlighted = 0
@@ -538,10 +565,16 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 with Vertical(id="beta-column"):
                     yield Static(tr("beta.title"), id="beta-heading")
                     with Horizontal(id="beta-card"):
-                        yield Button("", id="beta-mode")
-                        yield _SearchInput(id="filter", max_length=MAX_QUERY_CHARS)
-                        yield Button("×", id="beta-clear", tooltip=tr("beta.clear"))
-                        yield Button(tr("beta.submit"), id="beta-submit")
+                        mode_btn = Button("", id="beta-mode")
+                        search_input = _SearchInput(id="filter", max_length=MAX_QUERY_CHARS)
+                        clear_btn = Button("×", id="beta-clear", tooltip=tr("beta.clear"))
+                        submit_btn = Button(tr("beta.submit"), id="beta-submit")
+                        ordered = (
+                            (submit_btn, clear_btn, search_input, mode_btn)
+                            if is_rtl_locale()
+                            else (mode_btn, search_input, clear_btn, submit_btn)
+                        )
+                        yield from ordered
                     yield Static(tr("beta.hint"), id="beta-hint")
                     yield Static("", id="beta-summary")
                     yield Static("", id="beta-empty")
@@ -569,6 +602,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self.rebuild()
         self.focus_search()
         self.check_updates()
+
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
 
     def on_resize(self, event: events.Resize) -> None:
         self.refresh_banner()
@@ -618,11 +656,32 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self._refresh_local_keys(force=True)
         self.rebuild()
 
+    def _sync_card_direction(self) -> None:
+        cards = self.query("#beta-card")
+        if not cards:
+            return
+        card = cards.first(Horizontal)
+        mode_btn = self.query_one("#beta-mode", Button)
+        search_input = self.query_one("#filter", _SearchInput)
+        clear_btn = self.query_one("#beta-clear", Button)
+        submit_btn = self.query_one("#beta-submit", Button)
+        wanted = (
+            [submit_btn, clear_btn, search_input, mode_btn]
+            if is_rtl_locale()
+            else [mode_btn, search_input, clear_btn, submit_btn]
+        )
+        if list(card.children) == wanted:
+            return
+        for index, child in enumerate(wanted):
+            if child.parent is card:
+                card.move_child(child, before=index)
+
     def relocalize(self) -> None:
         from .chrome import refresh_locale_widgets
 
         self._rendered_locale = get_translator().locale
         refresh_locale_widgets(self)
+        self._sync_card_direction()
         self._render_caption()
         self.refresh_env()
         self.query_one("#beta-heading", Static).update(tr("beta.title"))

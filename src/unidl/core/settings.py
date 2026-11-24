@@ -260,7 +260,7 @@ def proxy_setting() -> Setting:
         default="",
         help="Empty means whatever is set app-wide - including nothing, which is "
         "the default. A name from the `proxies` section of unidl.yaml, or a full "
-        "URI. Applies to this service's API calls, its licence request, the "
+        "URI. Applies to this service's API calls, its license request, the "
         "manifest and the download.",
     )
 
@@ -339,7 +339,7 @@ def _device_choices(system_id: str, config: Any) -> list[tuple[Any, str]]:
             continue
         # the folder is left out on purpose: names are unique in this list, so it
         # would only lengthen a row that has to fit next to a setting's label. A
-        # remote one still says so, because that changes where the licence goes.
+        # remote one still says so, because that changes where the license goes.
         remote = f"remote · {device.where}" if device.is_remote else ""
         bits = (device.name, device.level, remote)
         choices.append((device.name, "  ".join(b for b in bits if b)))
@@ -536,7 +536,7 @@ def _vault_target_settings(config: Any = None) -> list[Setting]:
             picker="vaults:write",
             visible=False,
             help=(
-                "Choose one or more writable vaults for licence, rotation and "
+                "Choose one or more writable vaults for license, rotation and "
                 "manual keys. Empty means all writable configured vaults; a remote "
                 "vault is still subject to the remote-vault safety switch during "
                 "automatic playback."
@@ -621,7 +621,7 @@ def service_license_settings(config: Any = None, *, custom_license: bool = False
             inherit_global=True,
             help=(
                 "After final video selection, sample media response sizes to show "
-                "an actual bitrate and correct available colour metadata. Off skips "
+                "an actual bitrate and correct available color metadata. Off skips "
                 "the probe and keeps manifest metadata. Follows the global default "
                 "until this service saves an override."
             ),
@@ -765,11 +765,11 @@ GLOBAL_SETTINGS: list[Setting] = [
             ("ask", "Ask me each time"),
         ],
         "download",
-        "Downloading and saving the command both need a licence, and both leave the "
+        "Downloading and saving the command both need a license, and both leave the "
         "command file and any keys behind. Listing asks for nothing: it reads the "
-        "manifest, shows what is in it, and stops. An export is the licence written "
+        "manifest, shows what is in it, and stops. An export is the license written "
         "down: one file that can be imported here or by someone else, and finished "
-        "without an account, a CDM or a second licence request. It holds the content "
+        "without an account, a CDM or a second license request. It holds the content "
         "keys, so treat it like one.",
         visible=False,
     ),
@@ -802,7 +802,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "Widevine rule and one PlayReady rule live at the same threshold. Empty "
         "means what it always meant: one device for everything. The resolution "
         "read here is the automatic selection's, since that is what is settled "
-        "when the licence is asked for.",
+        "when the license is asked for.",
         # a screen, not a text field: these are device names, and typing one is
         # how you get a rule that points at nothing
         picker="cdm_rules",
@@ -810,13 +810,56 @@ GLOBAL_SETTINGS: list[Setting] = [
     ),
     _choice(
         "theme",
-        "Colour theme",
+        "Color theme",
         [
             ("dark", "Dark"),
             ("light", "Light"),
         ],
         "dark",
         "Takes effect immediately and repaints the current screen.",
+        visible=False,
+    ),
+    _choice(
+        "accent_color",
+        "System color",
+        [
+            ("violet", "Violet (default)"),
+            ("colorful", "Colorful"),
+            ("blue", "Blue"),
+            ("cyan", "Cyan"),
+            ("green", "Green"),
+            ("amber", "Amber"),
+            ("orange", "Orange"),
+            ("rose", "Rose"),
+            ("mono", "Monochrome"),
+        ],
+        "violet",
+        "Controls the system accent color for buttons, highlights and shortcuts. "
+        "Colorful adds multi-hue shortcuts and pairs with a rainbow title by default. "
+        "Previews live as you browse options.",
+        visible=False,
+    ),
+    _choice(
+        "title_color",
+        "Title color",
+        [
+            ("accent", "Follow system color"),
+            ("rainbow", "Rainbow"),
+            ("aurora", "Aurora"),
+            ("sunset", "Sunset"),
+            ("ocean", "Ocean"),
+            ("violet", "Violet"),
+            ("blue", "Blue"),
+            ("cyan", "Cyan"),
+            ("green", "Green"),
+            ("amber", "Amber"),
+            ("orange", "Orange"),
+            ("rose", "Rose"),
+            ("mono", "Monochrome"),
+        ],
+        "accent",
+        "Sets the color or gradient used for the unidl wordmark and service banners. "
+        "Previews live as you browse options.",
         visible=False,
     ),
     _choice(
@@ -835,6 +878,7 @@ GLOBAL_SETTINGS: list[Setting] = [
             ("ko", "Korean"),
             ("ru", "Russian"),
             ("de", "Deutsch"),
+            ("ar", "العربية"),
         ],
         "system",
         "Language of UniDL's own labels, prompts and settings. Service names, "
@@ -908,10 +952,10 @@ GLOBAL_SETTINGS: list[Setting] = [
         "bool",
         default=True,
         help="On, a title whose key IDs are all already in the local vault is "
-        "served from there and no licence request is made - which is why a second "
+        "served from there and no license request is made - which is why a second "
         "download of the same title is instant. Off, every title goes through a "
-        "real licence exchange, which is what you want when a stored key is "
-        "suspect, when the CDM or the licence server is what is being tested, or "
+        "real license exchange, which is what you want when a stored key is "
+        "suspect, when the CDM or the license server is what is being tested, or "
         "when a service has re-encrypted something under the same key IDs. Keys "
         "are still written to selected local write targets either way: switching "
         "this off means you do not trust what is stored, not that you want to "
@@ -963,7 +1007,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "bool",
         default=True,
         help=(
-            "After a service licence succeeds, push its KID:key pairs to selected "
+            "After a service license succeeds, push its KID:key pairs to selected "
             "remote writable vaults. Each destination is independent; a failed "
             "remote write is logged as a warning and never fails the download."
         ),
@@ -975,10 +1019,10 @@ GLOBAL_SETTINGS: list[Setting] = [
         "bool",
         default=True,
         help=(
-            "Before a service's own licence request, query selected remote vaults "
-            "for missing KIDs. A complete hit skips that service licence; a partial "
+            "Before a service's own license request, query selected remote vaults "
+            "for missing KIDs. A complete hit skips that service license; a partial "
             "hit is merged with the service response. The service remains the only "
-            "licence transport."
+            "license transport."
         ),
         visible=False,
     ),
@@ -1007,7 +1051,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "imposed. A value is either a name from the `proxies` section of unidl.yaml "
         "or a full URI - http://host:port, socks5://host:port, with credentials in "
         "it if the proxy needs them. It applies to everything a service does: its "
-        "API calls, the manifest, the licence request and the download. A service "
+        "API calls, the manifest, the license request and the download. A service "
         "can name its own in its own settings, which is what a single geofenced "
         "service wants without routing the other 34 through it.",
         visible=False,
@@ -1022,7 +1066,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "the CDN is open worldwide, and wrong when the manifest host is the thing "
         "that is geofenced, because UniDL fetches the manifest again itself. "
         "unidl's own reads - the manifest it inspects for DRM init data, the "
-        "playlists, and the licence request - stay on the proxy either way, so the "
+        "playlists, and the license request - stay on the proxy either way, so the "
         "keys always come from the same region the session was opened in.",
         visible=False,
     ),
@@ -1258,7 +1302,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         default="",
         picker="justwatch",
         help=(
-            "Set the one catalogue used to find titles and the separate list of "
+            "Set the one catalog used to find titles and the separate list of "
             "countries checked for streaming availability. Both choices remain "
             "available from the JustWatch search and results screens too."
         ),
@@ -1270,7 +1314,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         default="",
         picker="interface",
         help=(
-            "Choose the colour theme, interface language and diagnostic logging. "
+            "Choose the color theme, interface language and diagnostic logging. "
             "Debug mode also enables the explicit service-code reload shortcut; "
             "it never watches files."
         ),
@@ -1285,7 +1329,7 @@ GLOBAL_SETTINGS: list[Setting] = [
         "Title search region",
         "text",
         default=_JUSTWATCH_DEFAULT_REGIONS[0],
-        help="Whose catalogue the title list comes from - one ISO country code. "
+        help="Whose catalog the title list comes from - one ISO country code. "
         "It decides which titles a search finds and what they are called, not "
         "where they can be watched. Editable from the search screen too.",
         visible=False,
@@ -1342,7 +1386,7 @@ TRACK_SETTINGS: list[Setting] = [
             ("custom", "Custom"),
         ],
         "package",
-        "Choose which media types automatic selection should output. Normal package keeps the existing video, audio and subtitle behaviour.",
+        "Choose which media types automatic selection should output. Normal package keeps the existing video, audio and subtitle behavior.",
     ),
     Setting(
         "output_types",

@@ -132,7 +132,7 @@ class KeyProbe:
     def check(self) -> None:
         stopped = (getattr(self.cancel, "is_set", None) or self.cancel) if self.cancel is not None else None
         if stopped is not None and stopped():
-            raise DownloadCancelled("key verification cancelled")
+            raise DownloadCancelled("key verification canceled")
         runtime = current_download_runtime()
         if runtime is not None:
             runtime.checkpoint()

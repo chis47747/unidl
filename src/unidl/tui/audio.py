@@ -208,7 +208,7 @@ def _cover_bytes(source: str, headers: Mapping[str, str], proxy: str | None) -> 
                 length = response.headers.get("Content-Length")
                 if length and int(length) > MAX_COVER_BYTES:
                     raise ValueError("album cover is too large")
-                data = response.raw.read(MAX_COVER_BYTES + 1)
+                data = response.raw.read(MAX_COVER_BYTES + 1, decode_content=True)
         else:
             path = Path(unquote(parsed.path) if parsed.scheme == "file" else source).expanduser()
             data = path.read_bytes()
@@ -569,7 +569,10 @@ class AudioPreviewWidget(Vertical):
             status.first().display = False
             target.display = True
         if protocol_image_class() is not None and not isinstance(target, Static):
-            bg = _hex_rgb(getattr(getattr(self.app, "palette", None), "bg", None))
+            palette = getattr(self.app, "palette", None)
+            on_recessed = any(getattr(ancestor, "id", None) == "delivery-audio-side" for ancestor in self.ancestors)
+            surface = getattr(palette, "panel", None) if on_recessed else getattr(palette, "bg", None)
+            bg = _hex_rgb(surface or getattr(palette, "bg", None))
             width, height = getattr(self, "_cover_size", (COVER_WIDTH, COVER_HEIGHT))
             target.image = _letterbox_image(image, width, height, background=bg)
         else:
@@ -588,6 +591,9 @@ class AudioPreviewWidget(Vertical):
     def on_unmount(self) -> None:
         """Release a native terminal image before the preview leaves the DOM."""
 
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
         try:
             target = self.query_one("#audio-cover")
         except Exception:

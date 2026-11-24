@@ -72,6 +72,19 @@ class UpdateScreen(ModalScreen[None]):
         self._render_remote()
         self.query_one("#update-notes", VerticalScroll).focus()
 
+    def relocalize(self) -> None:
+        self.query_one("#update-modal-title", Static).update(tr("update.title"))
+        self.query_one("#update-current", Static).update(
+            f"[$muted]{tr('update.current')}[/] [$accent]v{__version__}[/]"
+        )
+        self.query_one("#update-remote-notes-title", Static).update(tr("update.remote_notes"))
+        self.query_one("#update-notes-title", Static).update(tr("update.release_notes"))
+        for widget, note in zip(self.query(".update-note"), RELEASE_NOTES, strict=False):
+            if isinstance(widget, Static):
+                widget.update(f"[$accent]•[/] {tr(note)}")
+        self.query_one("#update-modal-hint", Static).update(tr("update.close_hint"))
+        self._render_remote()
+
     def action_scroll(self, delta: int) -> None:
         self.query_one("#update-notes", VerticalScroll).scroll_relative(y=delta, animate=False)
 

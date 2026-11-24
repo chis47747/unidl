@@ -22,7 +22,8 @@ from pathlib import Path
 
 from .. import __version__
 from ..core.terminal_cells import cell_width as _cell_width
-from .bidi import visual_markup, visual_text
+from .bidi import escape_markup, visual_markup, visual_text
+from .theme import interpolate_stops
 
 # --------------------------------------------------------------- large: unidl
 ART = [
@@ -168,11 +169,95 @@ _WINDOWS_FONT_NAMES = (
 )
 
 
-def art(width: int, colour: str, *, height: int | None = None) -> str:
+BannerColour = str | tuple[str, ...]
+
+
+def _colorize_line(
+    line: str,
+    stops: tuple[str, ...],
+    total_width: int,
+    *,
+    bold: bool = False,
+    apply_visual: bool = False,
+) -> str:
+    rendered = visual_text(line) if apply_visual else line
+    prefix = "bold " if bold else ""
+    if len(stops) == 1:
+        return f"[{prefix}{stops[0]}]{escape_markup(rendered)}[/]"
+    denom = max(1, total_width - 1)
+    chunks: list[str] = []
+    run_style: str | None = None
+    run_chars: list[str] = []
+    column = 0
+
+    def _flush() -> None:
+        nonlocal run_style, run_chars
+        if not run_chars:
+            return
+        text = "".join(run_chars)
+        if run_style is None:
+            chunks.append(text)
+        else:
+            chunks.append(f"[{run_style}]{text}[/]")
+        run_style = None
+        run_chars = []
+
+    for ch in rendered:
+        width = max(0, _cell_width(ch))
+        if ch.isspace():
+            if run_style is not None:
+                _flush()
+            run_chars.append(ch)
+        else:
+            midpoint = column + (0.5 if width > 1 else 0.0)
+            style = f"{prefix}{interpolate_stops(stops, midpoint / denom)}"
+            if style != run_style:
+                _flush()
+                run_style = style
+            run_chars.append(escape_markup(ch))
+        column += width or (1 if ch.isspace() else 0)
+    _flush()
+    return "".join(chunks)
+
+
+def colorize_lines(
+    lines: list[str],
+    colour: BannerColour,
+    *,
+    bold: bool = False,
+    apply_visual: bool = False,
+) -> str:
+    """Colour a block-letter banner using a single colour token/hex or gradient stops."""
+    if isinstance(colour, str):
+        prefix = "bold " if bold else ""
+        if apply_visual:
+            return "\n".join(f"[{prefix}{colour}]{visual_markup(line)}[/]" for line in lines)
+        return "\n".join(f"[{prefix}{colour}]{line}[/]" for line in lines)
+    stops = tuple(stop for stop in colour if stop)
+    if not stops:
+        return "\n".join(visual_markup(line) if apply_visual else line for line in lines)
+    if len(stops) == 1:
+        return colorize_lines(lines, stops[0], bold=bold, apply_visual=apply_visual)
+    rendered_lines = [visual_text(line) if apply_visual else line for line in lines]
+    total_width = max((_cell_width(line) for line in rendered_lines), default=1)
+    return "\n".join(
+        _colorize_line(line, stops, total_width, bold=bold, apply_visual=False)
+        for line in rendered_lines
+    )
+
+
+def art(width: int, colour: BannerColour, *, height: int | None = None) -> str:
     """The application banner, or a plain title when there is not room."""
     if width < ART_WIDTH + 4 or (height is not None and height < COMPACT_HEIGHT):
-        return f"[{colour}]unidl[/]"
-    return "\n".join(f"[{colour}]{line}[/]" for line in ART)
+        return colorize_lines(["unidl"], colour, bold=not isinstance(colour, str))
+    return colorize_lines(ART, colour)
+
+
+def mini_art(colour: BannerColour, *, compact: bool = False) -> str:
+    """Three-row miniature ``unidl`` wordmark for live appearance previews."""
+    if compact:
+        return colorize_lines(["unidl"], colour, bold=True)
+    return colorize_lines(_glyph_rows(list("UNIDL")), colour)
 
 
 def caption(version_colour: str, note_colour: str) -> str:
@@ -427,12 +512,12 @@ def _unicode_title_lines(text: str) -> list[str]:
     return [f"╭{edge}╮", middle, f"╰{edge}╯"]
 
 
-def small_art(text: str, width: int, colour: str) -> str:
+def small_art(text: str, width: int, colour: BannerColour) -> str:
     """Service name one size down from :func:`art`, with a plain fallback."""
     lines = small_lines(text)
     if lines is None or max(_cell_width(line) for line in lines) > max(0, width - 4):
-        return f"[{colour}]{visual_markup(text)}[/]"
-    return "\n".join(f"[{colour}]{visual_markup(line)}[/]" for line in lines)
+        return colorize_lines([text], colour, apply_visual=True)
+    return colorize_lines(lines, colour, apply_visual=True)
 
 
 def small_height(text: str, width: int) -> int:
@@ -452,6 +537,8 @@ __all__ = [
     "_MOSAIC_ROWS",
     "art",
     "caption",
+    "colorize_lines",
+    "mini_art",
     "small_art",
     "small_height",
     "small_lines",

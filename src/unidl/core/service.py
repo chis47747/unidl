@@ -1317,7 +1317,7 @@ class Service:
         """
         raise CdmError(
             f"{self.NAME} does not implement get_license(). A service that needs a "
-            "licence makes its own request - see its api module for where the other "
+            "license makes its own request - see its api module for where the other "
             "calls live."
         )
 
@@ -1551,7 +1551,7 @@ class Service:
         """
         raise CdmError(
             f"{self.NAME} does not implement get_license_soap(). A service that needs "
-            "a PlayReady licence makes its own request."
+            "a PlayReady license makes its own request."
         )
 
     def get_keys(self, playback: Playback) -> list[str]:

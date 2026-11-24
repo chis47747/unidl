@@ -52,10 +52,29 @@ from ..core.i18n import tr
 from ..core.service import Capabilities, Service, registry
 from ..core.settings import SettingsStore, global_settings
 from ..core.vault import KeyVault
+from .bidi import (
+    EXPLICIT_BIDI_ENTER,
+    EXPLICIT_BIDI_EXIT,
+    install_textual_rtl_shaping,
+    rtl_shaping_disabled,
+)
 from .clipboard import write_system_clipboard
 from .home import HomeScreen
 from .palette import UnidlCommands
-from .theme import CSS, THEME_NAMES, THEMES, Palette, palette_for
+from .theme import (
+    ALL_THEMES,
+    CSS,
+    DEFAULT_ACCENT,
+    DEFAULT_TITLE_COLOR,
+    THEME_NAMES,
+    Palette,
+    normalize_accent,
+    normalize_title_color,
+    palette_for,
+    textual_theme,
+    theme_name_for,
+    title_color_stops,
+)
 
 #: quitting is destructive, so it needs a second press within this window.
 QUIT_CONFIRM_WINDOW = 1.5
@@ -103,10 +122,10 @@ def _portable_import_service_class(document) -> type[Service]:
             # there is nothing for a KID:key to unlock.
             return []
         raise CdmError(
-            "This import declares licence-bound DRM but contains no usable KID:key. "
+            "This import declares license-bound DRM but contains no usable KID:key. "
             "Clear DASH/HLS, direct media and playlist AES-128 do not need an exported "
             "content key; Widevine, PlayReady and similar CENC streams do. No service "
-            "or licence request was attempted; create a complete export again."
+            "or license request was attempted; create a complete export again."
         )
 
     def exported_manifest_variants(self, playback, log):
@@ -153,7 +172,7 @@ def _portable_import_service_class(document) -> type[Service]:
 # bypass that path and leave iTerm in mouse-reporting mode.  Keep this cleanup
 # deliberately independent from Textual so it also covers a renderer failure.
 _TERMINAL_RESET = (
-    "\x1b[0m\x1b[<u\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
+    f"\x1b[0m\x1b[<u{EXPLICIT_BIDI_EXIT}\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
     "\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[?2048l"
     # Disable reporting on the restored primary screen, after leaving every
     # alternate-screen mode. Include UTF-8 mouse mode as well as SGR.
@@ -309,11 +328,15 @@ class UnidlApp(App):
         # a device chosen in a previous run lives in settings.json, not the
         # config file, so it has to be handed to the resolver on the way up
         self.apply_device_choice()
+        self._preview_theme: str | None = None
+        self._preview_accent: str | None = None
+        self._preview_title_color: str | None = None
         # Themes have to be registered and selected here, not in on_mount: the
         # stylesheet is parsed before then, and it refers to this theme's own
         # variables, which would be undefined under the default one.
-        for theme in THEMES.values():
+        for theme in ALL_THEMES.values():
             self.register_theme(theme)
+        install_textual_rtl_shaping()
         self.apply_theme()
         self.apply_locale()
 
@@ -329,13 +352,43 @@ class UnidlApp(App):
             for screen in getattr(self, "screen_stack", ())
         )
 
+    def _sync_terminal_bidi(self, *, enable_explicit: bool = True) -> None:
+        """Toggle ECMA-48 explicit BiDi mode on interactive terminals.
+
+        BiDi-capable terminals (iTerm2 3.5+, VTE/GNOME Terminal, Konsole,
+        WezTerm) otherwise run row-wide UAX #9 reordering over full-screen TUI
+        rows, double-reversing pre-shaped Arabic and scrambling text across box
+        borders. Headless test drivers and ``UNIDL_DISABLE_RTL_SHAPING=1`` skip
+        entering explicit mode.
+        """
+        if getattr(self, "is_headless", False):
+            return
+        driver = getattr(self, "_driver", None)
+        if driver is None or not hasattr(driver, "write"):
+            return
+        sequence = (
+            EXPLICIT_BIDI_ENTER
+            if (enable_explicit and not rtl_shaping_disabled())
+            else EXPLICIT_BIDI_EXIT
+        )
+        try:
+            driver.write(sequence)
+            if hasattr(driver, "flush"):
+                driver.flush()
+        except Exception:
+            pass
+
     def on_mount(self) -> None:
         # Keep initial composition on Textual's get_default_screen path, which
         # puts the root on its stack before mounting children. In Textual 8.2,
         # a pre-registered named mode mounts its children first; run_async's
         # eager tasks then let Input access an empty stack. Register only after
         # startup so switch_mode can safely return to this already-mounted root.
+        self._sync_terminal_bidi(enable_explicit=True)
         self.add_mode(self.DEFAULT_MODE, self.get_default_screen)
+
+    def on_app_focus(self) -> None:
+        self._sync_terminal_bidi(enable_explicit=True)
 
     def exit(self, *args, **kwargs):  # noqa: D102 - Textual lifecycle override
         arm_deadline = getattr(self, "_arm_exit_deadline", None)
@@ -353,6 +406,7 @@ class UnidlApp(App):
         hook during its async shutdown phase, so the bounded wait runs in a
         helper thread while the loop remains able to drain those callbacks.
         """
+        self._sync_terminal_bidi(enable_explicit=False)
         self.abort_sessions()
         await asyncio.to_thread(self.wait_for_sessions, SESSION_SHUTDOWN_TIMEOUT)
 
@@ -791,8 +845,39 @@ class UnidlApp(App):
 
     @property
     def theme_mode(self) -> str:
-        """The concrete palette currently in use."""
-        return self.theme_preference
+        """The concrete palette currently in use (including live preview)."""
+        return self._preview_theme or self.theme_preference
+
+    @property
+    def accent_preference(self) -> str:
+        """The persisted system accent colour preset."""
+        return normalize_accent(self.globals.get("accent_color", DEFAULT_ACCENT))
+
+    @property
+    def accent_mode(self) -> str:
+        """The active system accent preset (including live preview)."""
+        return self._preview_accent or self.accent_preference
+
+    @property
+    def title_color_preference(self) -> str:
+        """The persisted title/banner colour preset."""
+        return normalize_title_color(self.globals.get("title_color", DEFAULT_TITLE_COLOR))
+
+    @property
+    def title_color_mode(self) -> str:
+        """The active title/banner colour preset (including live preview)."""
+        return self._preview_title_color or self.title_color_preference
+
+    def title_banner_colour(self) -> str | tuple[str, ...]:
+        """Colour token or gradient stops for the ``unidl`` and service banners."""
+        stops = title_color_stops(
+            self.title_color_mode,
+            dark=self.palette.dark,
+            accent=self.accent_mode,
+        )
+        if self.title_color_mode == DEFAULT_TITLE_COLOR and len(stops) == 1:
+            return "$accent"
+        return stops
 
     @property
     def palette(self) -> Palette:
@@ -802,10 +887,79 @@ class UnidlApp(App):
         styles itself without knowing about Textual's design tokens, so those
         call sites need the numbers.
         """
-        return palette_for(self.theme_mode)
+        return palette_for(self.theme_mode, self.accent_mode)
+
+    def set_appearance_preview(
+        self,
+        *,
+        theme: str | None = None,
+        accent: str | None = None,
+        title_color: str | None = None,
+    ) -> None:
+        """Temporarily preview appearance changes without writing settings.json."""
+        if theme is not None:
+            mode = str(theme).lower()
+            self._preview_theme = mode if mode in THEME_NAMES else None
+        if accent is not None:
+            self._preview_accent = normalize_accent(accent)
+        if title_color is not None:
+            self._preview_title_color = normalize_title_color(title_color)
+        self.apply_theme()
+
+    def clear_appearance_preview(self, *, apply: bool = True) -> None:
+        """Drop any active live preview overrides and optionally repaint."""
+        had_preview = (
+            self._preview_theme is not None
+            or self._preview_accent is not None
+            or self._preview_title_color is not None
+        )
+        self._preview_theme = None
+        self._preview_accent = None
+        self._preview_title_color = None
+        if apply and had_preview:
+            self.apply_theme()
 
     def apply_theme(self) -> None:
-        self.theme = THEME_NAMES.get(self.theme_mode, THEME_NAMES["dark"])
+        target = theme_name_for(self.theme_mode, self.accent_mode)
+        if target not in self.available_themes:
+            self.register_theme(textual_theme(self.palette))
+        self.theme = target
+        if not self.is_running:
+            return
+        from .chrome import Chrome, KeyBar
+
+        for screen in self._all_live_screens():
+            refresh_banner = getattr(screen, "refresh_banner", None)
+            if callable(refresh_banner):
+                try:
+                    refresh_banner()
+                except Exception:
+                    pass
+            try:
+                for chrome in screen.query(Chrome):
+                    chrome.refresh_theme()
+                for bar in screen.query(KeyBar):
+                    bar.refresh_theme()
+            except Exception:
+                pass
+
+    def _all_live_screens(self) -> list[object]:
+        """Every mounted screen across the active stack and cached home modes."""
+        seen: set[int] = set()
+        screens: list[object] = []
+        stacks: list[list[object]] = [list(getattr(self, "screen_stack", ()))]
+        screen_stacks = getattr(self, "_screen_stacks", None)
+        if isinstance(screen_stacks, dict):
+            for stack in screen_stacks.values():
+                if isinstance(stack, list):
+                    stacks.append(list(stack))
+        for stack in stacks:
+            for screen in stack:
+                ident = id(screen)
+                if ident not in seen:
+                    seen.add(ident)
+                    screens.append(screen)
+        return screens
 
     def apply_locale(self, *, only_if_changed: bool = False) -> bool:
         """Install the interface translator and redraw labels already on screen."""
@@ -815,12 +969,30 @@ class UnidlApp(App):
         if only_if_changed and current.locale == locale and current.debug == debug:
             return False
         i18n.set_translator(i18n.Translator(locale, debug=debug))
+        rtl = i18n.is_rtl_locale(locale)
+        self.set_class(rtl, "rtl")
+        self._sync_terminal_bidi(enable_explicit=True)
         if not self.is_running:
             return True
-        for screen in list(self.screen_stack):
+        from textual.widgets import OptionList
+
+        for screen in self._all_live_screens():
+            # Textual's App.set_class only re-applies CSS to the active top
+            # screen; explicitly sync background screens so returning to
+            # SettingsScreen or HomeScreen never leaves stale .rtl styles.
+            screen.set_class(rtl, "rtl")
+            self.stylesheet.update(screen)
+            # Flush cached option strips so RTL alignment and Arabic shaping
+            # repaint immediately when switching languages live.
+            for option_list in screen.query(OptionList):
+                cache = getattr(option_list, "_option_render_cache", None)
+                if hasattr(cache, "clear"):
+                    cache.clear()
+                option_list.refresh(layout=True)
             relocalize = getattr(screen, "relocalize", None)
             if callable(relocalize):
                 relocalize()
+                screen.refresh(layout=True)
                 continue
             try:
                 from .chrome import Chrome, KeyBar
@@ -840,6 +1012,7 @@ class UnidlApp(App):
             refresh = getattr(screen, "refresh_after_settings", None)
             if callable(refresh):
                 refresh()
+            screen.refresh(layout=True)
         return True
 
     def action_toggle_theme(self) -> None:

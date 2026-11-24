@@ -122,9 +122,22 @@ class JobDetailsScreen(ModalScreen[None]):
             yield Static(tr("job.close_hint"), id="job-modal-hint", markup=False)
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self.refresh_details()
         self.query_one("#job-modal-scroll", VerticalScroll).focus()
         self.set_interval(0.5, self.refresh_details)
+
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if self.is_attached and self.is_mounted:
+            self._last_title = None
+            self.refresh_details()
 
     def relocalize(self) -> None:
         self._last_title = None
@@ -144,10 +157,10 @@ class JobDetailsScreen(ModalScreen[None]):
         details = getattr(job, "details", JobDetails())
         jobs = self._jobs()
         index = next((index for index, item in enumerate(jobs) if item is job), -1)
-        title = Text(tr("job.title"), style=f"bold {self.app.palette.fg}")
+        title = Text(tr("job.title"), style=f"bold {self.app.palette.accent}")
         if index >= 0:
             title.append(f"  {index + 1}/{len(jobs)}", style=self.app.palette.dim)
-        title_key = f"{title.plain}:{self.app.palette.fg}"
+        title_key = f"{title.plain}:{self.app.palette.accent}"
         if title_key != self._last_title:
             self._last_title = title_key
             self.query_one("#job-modal-title", Static).update(title)

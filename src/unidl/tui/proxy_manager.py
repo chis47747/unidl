@@ -25,8 +25,8 @@ from ..core.i18n import phrase, tr
 from ..core.proxy import PROVIDER_LABELS, PROVIDER_ORDER, safe_proxy_label
 from ..core.proxy_express import DeviceAuthorization, ExpressVPNClient
 from ..core.settings import Settings
-from .bidi import visual_markup
-from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
+from .bidi import escape_markup, visual_markup
+from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
 from .vault_targets import VaultCheckbox
@@ -181,7 +181,15 @@ class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
                 yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#proxy-name", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
@@ -277,7 +285,15 @@ class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
                 yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#provider-username", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
@@ -380,7 +396,15 @@ class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
                 yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#express-region-map", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
@@ -560,7 +584,15 @@ class _ProviderTypeEditor(ModalScreen[str | None]):
                 yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#proxy-provider-types", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", "#proxy-provider-types")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -741,7 +773,7 @@ class ProxyManagerScreen(Screen[None]):
     def _row_markup(self, row: ProxyRow) -> SettingRow:
         if row.kind == "route":
             value = str(self.globals.get("proxy") or "") or tr("proxy.direct")
-            markup = f"[$accent]{visual_markup(value)}[/]"
+            markup = f"[$accent]{escape_markup(value)}[/]"
         elif row.kind == "download":
             value = tr("value.on") if self.globals.get("proxy_downloads") else tr("value.off")
             markup = f"[$accent]{value}[/]"

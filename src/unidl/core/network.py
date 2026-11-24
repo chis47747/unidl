@@ -60,7 +60,7 @@ class NetworkCancellation:
     def _attach(self, key, sock) -> None:
         with self._lock:
             if self.stopped:
-                raise NetworkStopped("network operation cancelled")
+                raise NetworkStopped("network operation canceled")
             self._sockets[key] = sock
 
     def _detach(self, key) -> None:
@@ -70,7 +70,7 @@ class NetworkCancellation:
 
 def network_checkpoint() -> None:
     if any(scope.stopped for scope in _active.get()):
-        raise NetworkStopped("network operation cancelled")
+        raise NetworkStopped("network operation canceled")
 
 
 def network_retry_delay(seconds: float) -> None:

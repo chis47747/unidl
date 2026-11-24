@@ -371,7 +371,7 @@ class CancellationToken:
 
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
-            raise DeliveryCancelled("delivery cancelled")
+            raise DeliveryCancelled("delivery canceled")
 
 
 class PauseToken:
@@ -401,7 +401,7 @@ class PauseToken:
         """Block while paused, but still honour an explicit cancel."""
         while self.paused:
             if cancelled is not None and cancelled():
-                raise DeliveryCancelled("delivery cancelled")
+                raise DeliveryCancelled("delivery canceled")
             time.sleep(0.1)
 
 

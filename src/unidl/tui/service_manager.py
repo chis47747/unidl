@@ -16,7 +16,7 @@ from ..core.i18n import phrase, setting_label, setting_value, tr
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, service_license_settings
 from .bidi import visual_markup
-from .chrome import Chrome, CloseMark, KeyBar
+from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card
 from .settings_layout import label_width, setting_row
 
 # Static declarations shared by the manager and Home's metadata-only search.
@@ -65,7 +65,15 @@ class _ChapterPolicyScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#service-chapters-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-chapters-list")
 
     def rebuild(self) -> None:
         options = self.query_one("#service-chapters-list", OptionList)
@@ -125,7 +133,15 @@ class _AttachmentPolicyScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#service-attachments-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-attachments-list")
 
     def rebuild(self) -> None:
         options = self.query_one("#service-attachments-list", OptionList)
@@ -195,22 +211,15 @@ class _BitratePolicyScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
-        self._fit_help()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#service-bitrate-list", OptionList).focus()
 
     def on_resize(self) -> None:
-        self._fit_help()
+        self._fit_modal()
 
-    def _fit_help(self) -> None:
-        found = self.query("#service-bitrate-help")
-        if found:
-            hint = found.first(Label)
-            hint.styles.width = "1fr"
-            hint.styles.height = "auto"
-            hint.styles.max_height = max(2, min(8, self.app.size.height - 8))
-        actions = self.query(".modal-card-actions")
-        if actions:
-            actions.first().display = self.app.size.height >= 20
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-bitrate-list")
 
     def rebuild(self) -> None:
         options = self.query_one("#service-bitrate-list", OptionList)
@@ -293,7 +302,15 @@ class _RegistrationEditor(ModalScreen[str | None]):
                 if source.service_id not in self.registered:
                     options.highlighted = index
                     break
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         options.focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-registration-list")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -340,7 +357,15 @@ class _ExportManifestEditor(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#service-export-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-export-list")
 
     def rebuild(self) -> None:
         options = self.query_one("#service-export-list", OptionList)
@@ -440,7 +465,7 @@ class ServicesManagerScreen(Screen[None]):
     BINDINGS = [
         Binding("b", "back", "Back", show=False),
         Binding("ctrl+b", "back", "Back", show=False),
-        Binding("escape", "back", "Back", show=False),
+        Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Change", show=True),
     ]
 
@@ -456,7 +481,7 @@ class ServicesManagerScreen(Screen[None]):
         yield Static(tr("settings.services.title"), id="masthead")
         yield Static(tr("settings.services.help"), id="settings-group-help")
         yield OptionList(id="settings-group-list")
-        yield KeyBar(("enter", "change"), ("^b", "back"), ("esc", "back"))
+        yield KeyBar(("enter", "change"), ("^b", "back"), ("esc", "quit"))
 
     def on_mount(self) -> None:
         self._refresh_sources()

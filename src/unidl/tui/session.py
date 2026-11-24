@@ -316,7 +316,7 @@ def _cover_reference(value: Any) -> str:
         # so signed cover URLs are not copied into the visible log by accident.
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     if parsed.scheme == "data":
-        return "embedded data"
+        return tr("audio.cover_embedded")
     return source
 
 
@@ -330,7 +330,13 @@ def _audio_metadata_lines(playback: Playback) -> list[str]:
     tags = dict(AudioPreview.from_playback(playback).tags)
     rows = [f"  {label}  ·  {value}" for key, label in _AUDIO_TAG_ROWS if (value := _metadata_value(tags.get(key)))]
     cover = _cover_reference(tags.get("cover"))
-    rows.append(f"  cover  ·  {'available  ·  ' + cover if cover else 'not available'}")
+    cover_label = tr("audio.preview.cover")
+    cover_status = (
+        f"{tr('audio.preview.available')}  ·  {cover}"
+        if cover
+        else tr("audio.preview.unavailable")
+    )
+    rows.append(f"  {cover_label}  ·  {cover_status}")
     return rows
 
 
@@ -343,7 +349,12 @@ def _subtitle_reference_lines(playback: Playback) -> list[str]:
             current_kind = kind
             rows.append(f"  [{kind.upper()}]")
         flags = [
-            value for value, enabled in (("Original", subtitle.original), ("Selected", subtitle.selected)) if enabled
+            value
+            for value, enabled in (
+                (tr("setting.default_subtitle.option.original"), subtitle.original),
+                (tr("vault.selected"), subtitle.selected),
+            )
+            if enabled
         ]
         suffix = f" ({', '.join(flags)})" if flags else ""
         label = subtitle.language or "und"
@@ -1357,7 +1368,7 @@ class SessionController:
             else:
                 self.pending_jobs = []
             self.render_queue()
-            self.post_log("batch cancelled", "warning")
+            self.post_log("batch canceled", "warning")
             raise Back()
 
     # ---------------------------------------------------------- cancellation
@@ -1986,10 +1997,10 @@ class SessionController:
             try:
                 self.app.call_from_thread(self.mount_ask, ask, box, event)
             except RuntimeError as exc:
-                raise KeyboardInterrupt("live key entry cancelled") from exc
+                raise KeyboardInterrupt("live key entry canceled") from exc
             while not event.wait(_ANSWER_POLL):
                 if self.aborted or self.cancel_requested:
-                    raise KeyboardInterrupt("live key entry cancelled")
+                    raise KeyboardInterrupt("live key entry canceled")
                 if self.recording_stop_requested:
                     raise LiveRecordingStopped()
             value = box.get("value")
@@ -1997,7 +2008,7 @@ class SessionController:
                 raise LiveRecordingStopped()
             if box.get("quit") or value is BACK or self.aborted:
                 self.request_cancel()
-                raise KeyboardInterrupt("live key entry cancelled")
+                raise KeyboardInterrupt("live key entry canceled")
             raw = str(value or "").strip()
             pair = split_pair(raw) if ":" in raw or "=" in raw else None
             if pair is None and expected:
@@ -2289,7 +2300,7 @@ class SessionController:
         if getattr(self.service, "_THIRD_PARTY_IMPORT", False):
             ctx.log(
                 "third-party import: using generic delivery only; source service "
-                "sessions and licence transports are disabled"
+                "sessions and license transports are disabled"
             )
         elif getattr(self.service, "_PORTABLE_IMPORT_FALLBACK", False):
             ctx.log(
@@ -2844,7 +2855,7 @@ class SessionController:
                     "Could not get the content key",
                     str(exc),
                     "Check the CDM on the main screen. An L3 device cannot open some "
-                    "streams, and an expired session cannot request a licence.",
+                    "streams, and an expired session cannot request a license.",
                 )
                 return FAILED, "key acquisition failed"
 
@@ -2983,7 +2994,7 @@ class SessionController:
                     "Could not get the content key",
                     str(exc),
                     "Check the CDM on the main screen. An L3 device cannot open some "
-                    "streams, and an expired session cannot request a licence.",
+                    "streams, and an expired session cannot request a license.",
                 )
                 return FAILED, "key acquisition failed"
             report_keys()
@@ -3055,7 +3066,7 @@ class SessionController:
                                 "Could not get the content key",
                                 str(exc),
                                 "Check the CDM on the main screen. An L3 device cannot open some "
-                                "streams, and an expired session cannot request a licence.",
+                                "streams, and an expired session cannot request a license.",
                             )
                             return FAILED, "key acquisition failed"
                         report_keys()
@@ -3824,7 +3835,7 @@ class SessionController:
             and any(stream.encrypted for stream in inventory.streams)
             and not playback.keys and not playback.display_keys
         ):
-            raise RuntimeError("The licence returned no usable content keys.")
+            raise RuntimeError("The license returned no usable content keys.")
 
     def _ask_tracks(
         self,

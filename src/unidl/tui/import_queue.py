@@ -181,6 +181,9 @@ class ImportQueueScreen(Screen[None]):
         )
 
     def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
         self._scan_generation += 1
         self.workers.cancel_group(self, "import-queue-scan")
 

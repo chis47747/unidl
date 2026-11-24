@@ -84,6 +84,12 @@ class AboutScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         self.query_one("#about-list", VerticalScroll).focus()
 
+    def relocalize(self) -> None:
+        self.query_one("#about-modal-title", Static).update(tr("about.title"))
+        self.query_one("#about-intro", Static).update(tr("about.intro"))
+        self.query_one("#about-license-note", Static).update(tr("about.license_note"))
+        self.query_one("#about-modal-hint", Static).update(tr("about.close_hint"))
+
     def action_scroll(self, delta: int) -> None:
         self.query_one("#about-list", VerticalScroll).scroll_relative(y=delta, animate=False)
 

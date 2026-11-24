@@ -125,7 +125,9 @@ class ServiceScreen(AskHost):
             return
         # the qualifier ("/ CBS", "(DASH)") stays on the identity row below
         name = banner.title_for(self.service.NAME)
-        found.first(Static).update(banner.small_art(name, self.size.width, "$accent"))
+        colour_fn = getattr(self.app, "title_banner_colour", None)
+        colour = colour_fn() if callable(colour_fn) else "$accent"
+        found.first(Static).update(banner.small_art(name, self.size.width, colour))
 
     # ------------------------------------------------------------------ worker
     @work(thread=True, exclusive=True, group="service-flow")

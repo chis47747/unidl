@@ -107,7 +107,7 @@ def _runtime_sleep(seconds: float) -> None:
 def _raise_if_cancelled(options: LiveRecordOptions) -> None:
     callback = options.cancel_requested
     if callback is not None and callback():
-        raise DownloadCancelled("live recording cancelled")
+        raise DownloadCancelled("live recording canceled")
 
 
 def _recording_stop_requested(options: LiveRecordOptions) -> bool:

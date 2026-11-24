@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.7.3] - 2026-11-24
+
+### Interface and themes
+
+- Fixed additional focus, sizing, redraw, navigation, input, and settings issues across the TUI.
+- Added selectable theme accent colors and carried the choice through the interface and settings screens.
+
+### Arabic interface
+
+- Added Arabic UI localization with right-to-left-aware text layout and terminal rendering.
+
 ## [2.7.2] - 2026-11-23
 
 ### Interface

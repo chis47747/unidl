@@ -9,8 +9,8 @@ DRM keys through the service contract, and download or record the result.
 
 The project is designed around three clear layers:
 
-- **Services** handle login, catalogues, search, manifests, service settings and
-  service-owned licence requests.
+- **Services** handle login, catalogs, search, manifests, service settings and
+  service-owned license requests.
 - **Core/TUI** handles navigation, settings, credentials, CDM/vault selection,
   track selection, progress, logs and the interactive workflow.
 - **Native downloader** parses manifests, downloads segments, decrypts media,
@@ -60,10 +60,10 @@ The project is designed around three clear layers:
 - Local CDM device contracts with strict system
   matching.
 - Optional remote CDM endpoints for systems that support remote challenge and
-  licence parsing.
+  license parsing.
 - Local SQLite key vaults and compatible remote key vaults, with multi-vault
   read/write policies, service scoping and manual KID:key entry.
-- Service-local licence transport: the shared layer creates challenges and
+- Service-local license transport: the shared layer creates challenges and
   parses responses, while each service owns its endpoint, headers and request
   format.
 - Independent credential slots, cookie profiles, token stores and refresh

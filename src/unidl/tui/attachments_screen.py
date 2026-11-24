@@ -53,6 +53,7 @@ class AttachmentsScreen(ModalScreen[None]):
         self.proxy = proxy
         self.index = 0
         self._load_token = 0
+        self._raw_image: Image.Image | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="attachment-modal"):
@@ -78,7 +79,16 @@ class AttachmentsScreen(ModalScreen[None]):
             yield Static(tr("attachments.browse_hint"), id="attachment-modal-hint")
 
     def on_mount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_theme_changed)
         self._refresh()
+
+    def _on_theme_changed(self, _theme: object = None) -> None:
+        if not self.is_attached or not self.is_mounted:
+            return
+        if self._raw_image is not None:
+            self._paint_image(self._raw_image)
 
     def relocalize(self) -> None:
         self.query_one("#attachment-modal-title", Static).update(
@@ -96,6 +106,7 @@ class AttachmentsScreen(ModalScreen[None]):
         if not self.attachments:
             return
         self._load_token += 1
+        self._raw_image = None
         attachment = self.attachments[self.index]
         self.query_one("#attachment-summary", Static).update(
             f"[$muted]{count_label(self.attachments)}  ·  {self.index + 1}/{len(self.attachments)}[/]"
@@ -131,9 +142,34 @@ class AttachmentsScreen(ModalScreen[None]):
         except RuntimeError:
             pass
 
+    def _paint_image(self, image: Image.Image) -> None:
+        target = self.query_one("#attachment-image")
+        status = self.query("#attachment-status")
+        if status:
+            status.first().display = False
+            target.display = True
+        if protocol_image_class() is not None and not isinstance(target, Static):
+            palette = getattr(self.app, "palette", None)
+            # #attachment-modal paints on $recessed (palette.panel), not $base.
+            bg = _hex_rgb(getattr(palette, "panel", None) or getattr(palette, "bg", None))
+            target_width = int(getattr(target.size, "width", 0) or 0)
+            target_height = int(getattr(target.size, "height", 0) or 0)
+            if target_width > 0 and target_height > 0:
+                target.image = _letterbox_image(image, target_width, target_height, background=bg)
+            else:
+                max_height = max(6, min(24, int(self.size.height) - 10))
+                max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
+                target.image = _contain_image(image, max_width, max_height, background=bg)
+        else:
+            max_height = max(6, min(24, int(self.size.height) - 10))
+            max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
+            width, height = _contain_dimensions(image, max_width, max_height)
+            target.update(_cover_renderable(image, width=width, height=height), layout=False)
+
     def _show_image(self, token: int, image: Image.Image | None) -> None:
         if token != self._load_token or not self.is_mounted:
             return
+        self._raw_image = image
         target = self.query_one("#attachment-image")
         status = self.query("#attachment-status")
         if image is None:
@@ -147,27 +183,7 @@ class AttachmentsScreen(ModalScreen[None]):
             else:
                 target.image = None
             return
-        if status:
-            status.first().display = False
-            target.display = True
-        if protocol_image_class() is not None and not isinstance(target, Static):
-            bg = _hex_rgb(getattr(getattr(self.app, "palette", None), "bg", None))
-            target_width = int(getattr(target.size, "width", 0) or 0)
-            target_height = int(getattr(target.size, "height", 0) or 0)
-            if target_width > 0 and target_height > 0:
-                target.image = _letterbox_image(image, target_width, target_height, background=bg)
-            else:
-                max_height = max(6, min(24, int(self.size.height) - 10))
-                max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
-                target.image = _contain_image(image, max_width, max_height, background=bg)
-        else:
-            height = max(6, min(24, int(self.size.height) - 10))
-            width, height = _contain_dimensions(
-                image,
-                max(16, min(COVER_WIDTH, int(self.size.width) - 8)),
-                height,
-            )
-            target.update(_cover_renderable(image, width=width, height=height), layout=False)
+        self._paint_image(image)
 
     def action_previous(self) -> None:
         if len(self.attachments) > 1:
@@ -194,6 +210,10 @@ class AttachmentsScreen(ModalScreen[None]):
         return True
 
     def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
+        self._raw_image = None
         try:
             target = self.query_one("#attachment-image")
             if protocol_image_class() is not None and not isinstance(target, Static):

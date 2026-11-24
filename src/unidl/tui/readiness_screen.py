@@ -95,6 +95,9 @@ class ReadinessScreen(Screen[None]):
         self.build()
 
     def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
         self._survey_generation += 1
         self.workers.cancel_group(self, "readiness-survey")
 

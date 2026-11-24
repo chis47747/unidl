@@ -2009,7 +2009,7 @@ def _check_embedding_cancelled(args) -> None:
         raise DownloadCancelled("another track failed")
     callback = _embedding_cancel_callback(args)
     if callback is not None and callback():
-        raise DownloadCancelled("download cancelled")
+        raise DownloadCancelled("download canceled")
 
 
 def _embedding_vod_progress(
@@ -3363,7 +3363,7 @@ def _filter_incompatible_apple_credit_sections(stream, result):
     filtered = replace(result, sections=[path for index, path in enumerate(result.sections) if index not in skipped], parts=parts)
     return filtered, (
         f"Apple HLS: skipped {len(skipped)} incompatible appended credit section(s), {duration:.3f}s; "
-        "the main programme is retained without transcoding."
+        "the main program is retained without transcoding."
     )
 
 

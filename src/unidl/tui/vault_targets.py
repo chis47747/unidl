@@ -16,7 +16,7 @@ from textual.widgets.option_list import Option
 from ..core import vaults
 from ..core.i18n import phrase, tr
 from .bidi import visual_markup
-from .chrome import CloseMark
+from .chrome import CloseMark, fit_modal_card
 
 
 class VaultCheckbox(Checkbox):
@@ -170,7 +170,15 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
             (box for box, descriptor in zip(self._boxes, self.descriptors, strict=True) if descriptor.enabled),
             self.query_one("#vault-target-cancel", Button),
         )
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         focusable.focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#vault-target-card", "#vault-target-list")
 
     def _update_count(self) -> None:
         enabled = sum(descriptor.enabled for descriptor in self.descriptors)
@@ -268,6 +276,14 @@ class VaultSearchPicker(ModalScreen[str | None]):
         if option_list.option_count:
             option_list.highlighted = 0
             option_list.focus()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#vault-target-card", "#vault-target-list")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -337,7 +353,15 @@ class VaultServicePicker(ModalScreen[str | None]):
     def on_mount(self) -> None:
         option_list = self.query_one("#vault-target-list", OptionList)
         option_list.highlighted = 0
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         option_list.focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#vault-target-card", "#vault-target-list")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()

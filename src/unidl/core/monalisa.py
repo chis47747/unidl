@@ -106,7 +106,7 @@ def get_keys(device_path: Path | str, ticket: str) -> list[str]:
             "The device and its module have to sit together."
         )
     if not (ticket or "").strip():
-        raise MonaLisaUnavailable("No licence ticket to unwrap")
+        raise MonaLisaUnavailable("No license ticket to unwrap")
 
     from pymonalisa.cdm import Cdm
     from pymonalisa.license import License

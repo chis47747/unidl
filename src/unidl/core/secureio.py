@@ -9,22 +9,30 @@ contract here avoids each store growing a subtly different ``.tmp`` protocol.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-try:  # POSIX is the primary runtime; the thread lock remains on other systems.
+try:  # POSIX cross-process locking.
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows installations
     fcntl = None  # type: ignore[assignment]
+
+try:  # Windows cross-process locking.
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX installations
+    msvcrt = None  # type: ignore[assignment]
 
 FILE_MODE = 0o600
 DIRECTORY_MODE = 0o700
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
+_held_paths = threading.local()
 
 
 def set_fd_mode(descriptor: int, mode: int) -> bool:
@@ -112,27 +120,71 @@ def secure_tree(root: Path) -> None:
                 pass
 
 
+def _acquire_file_lock(descriptor: int) -> bool:
+    """Acquire an OS-level exclusive lock on ``descriptor`` when supported."""
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return True
+    if msvcrt is not None:  # pragma: no cover - exercised on Windows installations
+        delay = 0.01
+        while True:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EDEADLK, errno.EAGAIN}:
+                    raise
+                time.sleep(delay)
+                delay = min(0.05, delay * 1.5)
+    return False
+
+
+def _release_file_lock(descriptor: int) -> None:
+    """Release an OS-level exclusive lock previously acquired on ``descriptor``."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    elif msvcrt is not None:  # pragma: no cover - exercised on Windows installations
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+
 @contextlib.contextmanager
 def locked_path(path: Path) -> Iterator[None]:
-    """Hold an in-process and, on POSIX, cross-process lock for ``path``."""
+    """Hold an in-process and cross-process exclusive lock for ``path``."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f".{path.name}.lock")
+    key = os.path.abspath(lock_path)
     thread_lock = _thread_lock(lock_path)
     with thread_lock:
+        held: set[str] = getattr(_held_paths, "keys", None)  # type: ignore[assignment]
+        if held is None:
+            held = set()
+            _held_paths.keys = held
+        if key in held:
+            # Same thread already owns the OS lock on this path; re-opening and
+            # re-locking a second descriptor would deadlock on POSIX and Windows.
+            yield
+            return
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(lock_path, flags, FILE_MODE)
+        locked = False
         try:
             set_fd_mode(descriptor, FILE_MODE)
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = _acquire_file_lock(descriptor)
+            held.add(key)
             yield
         finally:
-            if fcntl is not None:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                except OSError:
-                    pass
+            held.discard(key)
+            if locked:
+                _release_file_lock(descriptor)
             os.close(descriptor)
 
 

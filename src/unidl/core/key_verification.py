@@ -114,7 +114,7 @@ def verify_selected_keys(engine, playback, tracks, settings, *, service=None, ca
 
     def check_cancel():
         if cancel is not None and cancel.is_set():
-            raise DownloadCancelled("key verification cancelled")
+            raise DownloadCancelled("key verification canceled")
     # One representative per origin, KID, scheme and codec. Unselected profiles
     # never enter this inventory, even when licensing happened before selection.
     origins: dict[int, tuple[object, dict]] = {}

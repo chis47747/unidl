@@ -143,7 +143,12 @@ def _styled_progress_text(
         for match in re.finditer(r"─+", clean):
             line.stylize(palette.gutter, *match.span())
         rendered.append(line)
-    return Text("\n").join(rendered)
+    result = Text("\n").join(rendered)
+    # The sampler's layout key is the row count. Translation or a narrow
+    # viewport must not turn one logical row into two physical rows.
+    result.no_wrap = True
+    result.overflow = "crop"
+    return result
 
 
 class QueueRow(Static):
@@ -388,9 +393,6 @@ class DownloadScreen(AskHost):
         attachments_found = self.query("#delivery-attachments")
         if attachments_found:
             attachments_found.first(StatusChip).display = False
-        attachments_found = self.query("#delivery-attachments")
-        if attachments_found:
-            attachments_found.first(StatusChip).display = False
         self.refresh_keys()
         queue = getattr(self.controller, "queue_jobs", None)
         self.render_queue(queue() if callable(queue) else self.controller.jobs, self.controller.batch_total)
@@ -502,8 +504,9 @@ class DownloadScreen(AskHost):
         # and avoids a blank bordered box on Textual versions that defer refreshes
         # for hidden widgets. Progress text is cheap and must repaint even when
         # the number of rows stays the same but the percentage changes.
+        was_visible = panel.display
         panel.display = True
-        panel.update(body, layout=True)
+        panel.update(body, layout=layout or not was_visible)
 
     def _sync_pause_clock(self) -> None:
         """Freeze the elapsed clock while a transfer is paused in place."""
@@ -537,8 +540,9 @@ class DownloadScreen(AskHost):
         widget = found.first(Static)
         started_at = getattr(self, "_download_started_at", None)
         if started_at is None:
-            widget.update("")
-            widget.display = False
+            if widget.display:
+                widget.update("")
+                widget.display = False
             self._shown_elapsed = ""
             return
         finished_at = getattr(self, "_download_finished_at", None) or time.monotonic()

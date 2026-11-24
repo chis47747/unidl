@@ -127,6 +127,9 @@ class ImportScreen(Screen[None]):
         self.query_one("#import-list", OptionList).focus()
 
     def on_unmount(self) -> None:
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
         self._scan_generation += 1
         self.workers.cancel_group(self, "import-scan")
 
@@ -268,10 +271,12 @@ class ImportScreen(Screen[None]):
                 timeout=8,
             )
             return
+        if len(document.entries) > 1:
+            self.app.push_screen(ExportEntryScreen(document, source_name=path.name))
+            return
         # This screen stays underneath, like the platform list does under a
         # service: it is where this download came from, so it is where Back should
-        # land and where the next one is picked. An import that cannot start says
-        # so with the list still in front of you rather than dropping you home.
+        # land. A one-entry export needs no extra picker.
         self.app.open_import(document)
 
     def action_reveal(self) -> None:
@@ -292,12 +297,6 @@ class ExportEntryScreen(Screen[list[int] | None]):
     other multi-pick in UniDL: Space toggles one row, ``a`` selects all, ``n``
     clears the list, and Enter confirms. With no boxes ticked, Enter means the
     highlighted row, which keeps the common one-title action a single keypress.
-    """
-
-    DEFAULT_CSS = """
-    #import-entry-head { height: 2; padding: 1 2 0 2; }
-    #import-entry-note { height: 1; padding: 0 2; }
-    #import-entry-list { height: 1fr; padding: 0 1; }
     """
 
     BINDINGS = [

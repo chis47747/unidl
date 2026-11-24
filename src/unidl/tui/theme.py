@@ -19,7 +19,7 @@ tokens; :func:`palette_for` hands those call sites the live values.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from textual.theme import Theme
 
@@ -88,6 +88,10 @@ class Palette:
     scroll_bg: str
     scroll_fg: str
 
+    # accent scheme identity and optional multi-hue prism cycle for colourful mode
+    accent_key: str = "violet"
+    prism: tuple[str, ...] = ()
+
 
 #: The dark palette. Its grey ramp used to bottom out at ``#414141``, which against
 #: a near-black page is a ratio of 1.8 - so the platform numbers, the filter hint
@@ -100,10 +104,10 @@ DARK = Palette(
     fg="#e1e1e1",
     fg2="#c8c8c8",
     muted="#9c9c9c",
-    dim="#868686",
+    dim="#929292",
     # the row numbers live here, and a number you are asked to type has to be as
     # readable as the name beside it - on the page and on the row under the pointer
-    gutter="#848484",
+    gutter="#8c8c8c",
     accent="#bb9af7",
     manifest="#7aa2f7",
     ok="#9ece6a",
@@ -196,10 +200,262 @@ LIGHT = Palette(
 
 PALETTES: dict[str, Palette] = {"dark": DARK, "light": LIGHT}
 
+DEFAULT_ACCENT = "violet"
+DEFAULT_TITLE_COLOR = "accent"
 
-def palette_for(mode: str) -> Palette:
-    """The palette for a setting value, defaulting to dark."""
-    return PALETTES.get(str(mode or "").lower(), DARK)
+
+@dataclass(frozen=True)
+class AccentPreset:
+    """One system accent scheme, tuned separately for dark and light surfaces."""
+
+    key: str
+    dark_accent: str
+    light_accent: str
+    light_highlight: str
+    light_visual: str
+    colorful: bool = False
+    dark_prism: tuple[str, ...] = ()
+    light_prism: tuple[str, ...] = ()
+
+    def accent_for(self, dark: bool) -> str:
+        return self.dark_accent if dark else self.light_accent
+
+    def swatch_stops(self, dark: bool) -> tuple[str, ...]:
+        if self.colorful:
+            return self.dark_prism if dark else self.light_prism
+        return (self.accent_for(dark),)
+
+
+@dataclass(frozen=True)
+class TitleColorPreset:
+    """One solid colour or horizontal gradient for block-letter titles."""
+
+    key: str
+    dark_stops: tuple[str, ...]
+    light_stops: tuple[str, ...]
+
+    def stops_for(self, dark: bool) -> tuple[str, ...]:
+        return self.dark_stops if dark else self.light_stops
+
+
+_DARK_RAINBOW: tuple[str, ...] = (
+    "#f7768e",
+    "#ff9e64",
+    "#e0af68",
+    "#73d88c",
+    "#2ac3de",
+    "#7aa2f7",
+    "#bb9af7",
+)
+_LIGHT_RAINBOW: tuple[str, ...] = (
+    "#b52348",
+    "#a33b0a",
+    "#8a5200",
+    "#1d6f35",
+    "#0b6e82",
+    "#1d4ed8",
+    "#5b3aa6",
+)
+
+#: System accent presets. Every value maintains >= 4.7:1 WCAG contrast on both
+#: dark and light surfaces, including light-mode tinted highlight/visual rows.
+ACCENT_PRESETS: dict[str, AccentPreset] = {
+    "violet": AccentPreset(
+        key="violet",
+        dark_accent=DARK.accent,
+        light_accent=LIGHT.accent,
+        light_highlight=LIGHT.highlight,
+        light_visual=LIGHT.visual,
+    ),
+    "colorful": AccentPreset(
+        key="colorful",
+        dark_accent="#4fd6be",
+        light_accent="#0e6f73",
+        light_highlight="#dff0ef",
+        light_visual="#d3eae8",
+        colorful=True,
+        dark_prism=("#4fd6be", "#bb9af7", "#73d88c", "#e0af68", "#f7768e", "#7aa2f7"),
+        light_prism=("#0e6f73", "#5b3aa6", "#1d6f35", "#8a5200", "#ad1f43", "#1d4ed8"),
+    ),
+    "blue": AccentPreset(
+        key="blue",
+        dark_accent="#7aa2f7",
+        light_accent="#1d4ed8",
+        light_highlight="#e2eaf9",
+        light_visual="#d5e2f7",
+    ),
+    "cyan": AccentPreset(
+        key="cyan",
+        dark_accent="#2ac3de",
+        light_accent="#0b6e82",
+        light_highlight="#e0f0f4",
+        light_visual="#d3eaf0",
+    ),
+    "green": AccentPreset(
+        key="green",
+        dark_accent="#73d88c",
+        light_accent="#1d6f35",
+        light_highlight="#e2f1e6",
+        light_visual="#d4ebd9",
+    ),
+    "amber": AccentPreset(
+        key="amber",
+        dark_accent="#e0af68",
+        light_accent="#8a5200",
+        light_highlight="#f3ebd9",
+        light_visual="#ece0c6",
+    ),
+    "orange": AccentPreset(
+        key="orange",
+        dark_accent="#ff9e64",
+        light_accent="#a33b0a",
+        light_highlight="#f6e7df",
+        light_visual="#f0dbd0",
+    ),
+    "rose": AccentPreset(
+        key="rose",
+        dark_accent="#f7768e",
+        light_accent="#ad1f43",
+        light_highlight="#f6e2e8",
+        light_visual="#f0d4dc",
+    ),
+    "mono": AccentPreset(
+        key="mono",
+        dark_accent="#d6d6d6",
+        light_accent="#2f333b",
+        light_highlight="#e6e6e4",
+        light_visual="#dcdcd9",
+    ),
+}
+
+#: Title/banner colour presets (solid hues and multi-stop gradients).
+#: ``"accent"`` is handled dynamically by :func:`title_color_stops`.
+TITLE_COLOR_PRESETS: dict[str, TitleColorPreset] = {
+    "rainbow": TitleColorPreset("rainbow", _DARK_RAINBOW, _LIGHT_RAINBOW),
+    "aurora": TitleColorPreset(
+        "aurora",
+        ("#73d88c", "#4fd6be", "#2ac3de", "#7aa2f7", "#bb9af7"),
+        ("#1d6f35", "#0e6f73", "#0b6e82", "#1d4ed8", "#5b3aa6"),
+    ),
+    "sunset": TitleColorPreset(
+        "sunset",
+        ("#f7768e", "#ff9e64", "#e0af68"),
+        ("#ad1f43", "#a33b0a", "#8a5200"),
+    ),
+    "ocean": TitleColorPreset(
+        "ocean",
+        ("#4fd6be", "#2ac3de", "#7aa2f7", "#9d7cd8"),
+        ("#0e6f73", "#0b6e82", "#1d4ed8", "#5b3aa6"),
+    ),
+    "violet": TitleColorPreset("violet", ("#bb9af7",), ("#5b3aa6",)),
+    "blue": TitleColorPreset("blue", ("#7aa2f7",), ("#1d4ed8",)),
+    "cyan": TitleColorPreset("cyan", ("#2ac3de",), ("#0b6e82",)),
+    "green": TitleColorPreset("green", ("#73d88c",), ("#1d6f35",)),
+    "amber": TitleColorPreset("amber", ("#e0af68",), ("#8a5200",)),
+    "orange": TitleColorPreset("orange", ("#ff9e64",), ("#a33b0a",)),
+    "rose": TitleColorPreset("rose", ("#f7768e",), ("#ad1f43",)),
+    "mono": TitleColorPreset("mono", ("#d6d6d6",), ("#2f333b",)),
+}
+
+
+def normalize_accent(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    return key if key in ACCENT_PRESETS else DEFAULT_ACCENT
+
+
+def normalize_title_color(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    if key == DEFAULT_TITLE_COLOR or key in TITLE_COLOR_PRESETS:
+        return key
+    return DEFAULT_TITLE_COLOR
+
+
+def theme_name_for(mode: str, accent: str = DEFAULT_ACCENT) -> str:
+    base = "light" if str(mode or "").lower() == "light" else "dark"
+    accent_key = normalize_accent(accent)
+    return base if accent_key == DEFAULT_ACCENT else f"{base}-{accent_key}"
+
+
+def palette_for(mode: str, accent: str = DEFAULT_ACCENT) -> Palette:
+    """The palette for a theme mode and accent preset, defaulting to dark violet."""
+    base_name = "light" if str(mode or "").lower() == "light" else "dark"
+    base = PALETTES.get(base_name, DARK)
+    accent_key = normalize_accent(accent)
+    if accent_key == DEFAULT_ACCENT:
+        return base
+    preset = ACCENT_PRESETS[accent_key]
+    if base.dark:
+        return replace(
+            base,
+            name=theme_name_for(base_name, accent_key),
+            accent=preset.dark_accent,
+            accent_key=accent_key,
+            prism=preset.dark_prism if preset.colorful else (),
+        )
+    return replace(
+        base,
+        name=theme_name_for(base_name, accent_key),
+        accent=preset.light_accent,
+        highlight=preset.light_highlight,
+        visual=preset.light_visual,
+        accent_key=accent_key,
+        prism=preset.light_prism if preset.colorful else (),
+    )
+
+
+def title_color_stops(
+    title_color: str | None,
+    *,
+    dark: bool,
+    accent: str = DEFAULT_ACCENT,
+) -> tuple[str, ...]:
+    """Concrete hex stop(s) for rendering the ``unidl`` and service titles."""
+    mode = normalize_title_color(title_color)
+    accent_key = normalize_accent(accent)
+    if mode == DEFAULT_TITLE_COLOR:
+        preset = ACCENT_PRESETS[accent_key]
+        if preset.colorful:
+            return TITLE_COLOR_PRESETS["rainbow"].stops_for(dark)
+        return (preset.accent_for(dark),)
+    return TITLE_COLOR_PRESETS[mode].stops_for(dark)
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    cleaned = color.lstrip("#")
+    return int(cleaned[0:2], 16), int(cleaned[2:4], 16), int(cleaned[4:6], 16)
+
+
+def interpolate_stops(stops: tuple[str, ...], position: float) -> str:
+    """Linearly interpolate an RGB hex colour along ``stops`` for ``0.0 <= position <= 1.0``."""
+    if not stops:
+        return DARK.accent
+    if len(stops) == 1:
+        return stops[0]
+    clamped = max(0.0, min(1.0, float(position)))
+    scaled = clamped * (len(stops) - 1)
+    low = int(scaled)
+    high = min(len(stops) - 1, low + 1)
+    frac = scaled - low
+    r1, g1, b1 = _hex_to_rgb(stops[low])
+    r2, g2, b2 = _hex_to_rgb(stops[high])
+    r = round(r1 + (r2 - r1) * frac)
+    g = round(g1 + (g2 - g1) * frac)
+    b = round(b1 + (b2 - b1) * frac)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def swatch_markup(stops: tuple[str, ...], *, blocks: int = 4) -> str:
+    """Fixed-width Rich markup colour chip for option rows and settings summaries."""
+    if not stops:
+        return ""
+    count = max(2, blocks)
+    if len(stops) == 1:
+        return f"[{stops[0]}]{'━' * count}[/]"
+    parts = [
+        f"[{interpolate_stops(stops, idx / max(1, count - 1))}]━[/]"
+        for idx in range(count)
+    ]
+    return "".join(parts)
 
 
 def textual_theme(palette: Palette) -> Theme:
@@ -260,7 +516,15 @@ def textual_theme(palette: Palette) -> Theme:
 
 THEMES: dict[str, Theme] = {name: textual_theme(p) for name, p in PALETTES.items()}
 
-#: mode -> the registered Textual theme name
+#: Every (mode, accent) Textual theme registered at startup so switching accent
+#: or live-previewing options repaints without dynamic stylesheet rebuilds.
+ALL_THEMES: dict[str, Theme] = {
+    theme_name_for(mode, accent): textual_theme(palette_for(mode, accent))
+    for mode in ("dark", "light")
+    for accent in ACCENT_PRESETS
+}
+
+#: mode -> the registered Textual theme name (default accent)
 THEME_NAMES: dict[str, str] = {name: p.name for name, p in PALETTES.items()}
 
 #: `◆` marks a default bullet; `▸` marks something expandable.
@@ -437,6 +701,7 @@ Screen {
     width: 1fr;
     height: 1;
     padding: 0;
+    overflow-x: hidden;
     color: $foreground;
 }
 #delivery-elapsed {
@@ -465,16 +730,16 @@ Screen {
    underneath is not paused or cancelled; ✕ / esc returns to that same screen. */
 ChaptersScreen {
     align: center middle;
-    background: $base 70%;
+    background: $base 75%;
 }
 #chapter-modal {
     width: 88;
     max-width: 94%;
     height: auto;
-    max-height: 80%;
+    max-height: 82%;
     background: $recessed;
-    border-left: solid $accent;
-    padding: 1 1 1 1;
+    border: round $rule;
+    padding: 1 2;
 }
 #chapter-modal-head {
     height: 1;
@@ -483,7 +748,7 @@ ChaptersScreen {
 #chapter-modal-title {
     width: 1fr;
     height: 1;
-    color: $foreground;
+    color: $accent;
     text-style: bold;
 }
 #chapter-modal-close {
@@ -526,16 +791,16 @@ ChaptersScreen {
 }
 LyricsScreen {
     align: center middle;
-    background: $base 70%;
+    background: $base 75%;
 }
 #lyrics-modal {
     width: 88;
     max-width: 94%;
     height: auto;
-    max-height: 80%;
+    max-height: 82%;
     background: $recessed;
-    border-left: solid $accent;
-    padding: 1;
+    border: round $rule;
+    padding: 1 2;
 }
 #lyrics-modal-head {
     height: 1;
@@ -544,7 +809,7 @@ LyricsScreen {
 #lyrics-modal-title {
     width: 1fr;
     height: 1;
-    color: $foreground;
+    color: $accent;
     text-style: bold;
 }
 #lyrics-modal-close {
@@ -587,7 +852,7 @@ LyricsScreen {
 }
 AttachmentsScreen {
     align: center middle;
-    background: $base 70%;
+    background: $base 75%;
 }
 #attachment-modal {
     width: 72;
@@ -595,16 +860,51 @@ AttachmentsScreen {
     height: auto;
     max-height: 86%;
     background: $recessed;
-    border-left: solid $accent;
+    border: round $rule;
+    padding: 1 2;
+}
+#attachment-modal-head {
+    height: 1;
+    padding: 0 1;
+}
+#attachment-modal-title {
+    width: 1fr;
+    height: 1;
+    overflow-x: hidden;
+    color: $accent;
+    text-style: bold;
+}
+#attachment-modal-close {
+    width: 5;
+    height: 1;
+    content-align: right middle;
+    color: $accent;
+    text-style: bold;
+}
+#attachment-modal-close:hover {
+    background: $highlight;
+    color: $foreground;
+}
+#attachment-summary, #attachment-info {
+    height: auto;
+    padding: 1 2 0 2;
+    color: $muted;
+    text-align: center;
+}
+#attachment-image {
+    width: 1fr;
+    height: 1fr;
+    min-height: 8;
+    max-height: 28;
+    content-align: center middle;
     padding: 1;
 }
-#attachment-modal-head { height: 1; padding: 0 1; }
-#attachment-modal-title { width: 1fr; height: 1; color: $foreground; text-style: bold; }
-#attachment-modal-close { width: 5; height: 1; content-align: right middle; color: $accent; text-style: bold; }
-#attachment-modal-close:hover { background: $highlight; color: $foreground; }
-#attachment-summary, #attachment-info { height: auto; padding: 1 2 0 2; color: $muted; text-align: center; }
-#attachment-image { width: 1fr; height: 1fr; min-height: 8; max-height: 28; content-align: center middle; padding: 1; }
-#attachment-modal-hint { height: 1; padding: 0 2; color: $muted; text-align: center; }
+#attachment-modal-hint {
+    height: 1;
+    padding: 0 2;
+    color: $muted;
+    text-align: center;
+}
 #attachment-modal-nav, #chapter-modal-nav, #lyrics-modal-nav {
     width: 1fr;
     height: 1;
@@ -644,8 +944,9 @@ AttachmentsScreen {
     padding: 0;
 }
 .ask-title-row .ask-title {
-    width: auto;
+    width: 1fr;
     max-width: 1fr;
+    overflow-x: hidden;
 }
 .chapter-chip {
     width: auto;
@@ -805,15 +1106,15 @@ AttachmentsScreen {
 /* Batch inspection follows the same compact, scrollable card as chapters. */
 JobDetailsScreen {
     align: center middle;
-    background: $base 70%;
+    background: $base 75%;
 }
 #job-modal {
     width: 100;
     max-width: 94%;
-    height: 80%;
+    height: 82%;
     background: $recessed;
-    border-left: solid $accent;
-    padding: 1;
+    border: round $rule;
+    padding: 1 2;
 }
 #job-modal-head {
     height: 1;
@@ -1819,7 +2120,7 @@ CommandPalette #--container {
 }
 
 ModalScreen {
-    background: $base 70%;
+    background: $base 75%;
     align: center middle;
 }
 /* See-through overlay cards hide the parent chrome. The ✕ in the card
@@ -1834,7 +2135,7 @@ ModalScreen {
     height: 1;
     padding: 0;
 }
-.modal-close {
+.modal-head > .modal-close, .modal-close {
     width: 5;
     height: 1;
     content-align: right middle;
@@ -1845,19 +2146,14 @@ ModalScreen {
     background: $highlight;
     color: $foreground;
 }
-/* carries its own chrome, so it must not show the screen below's as well */
-ModalScreen.editor {
-    background: $base;
-    align: left top;
-}
 #about-modal, #update-modal {
     width: 86;
     max-width: 94%;
     height: auto;
-    max-height: 82%;
+    max-height: 84%;
     padding: 1 2;
     background: $recessed;
-    border-left: solid $accent;
+    border: round $rule;
 }
 #about-modal-head, #update-modal-head {
     width: 100%;
@@ -1866,14 +2162,15 @@ ModalScreen.editor {
 #about-modal-title, #update-modal-title {
     width: 1fr;
     height: 1;
-    color: $foreground;
+    color: $accent;
     text-style: bold;
 }
 #about-modal-close, #update-modal-close {
-    width: 3;
+    width: 5;
     height: 1;
-    text-align: center;
-    color: $muted;
+    content-align: right middle;
+    color: $accent;
+    text-style: bold;
 }
 #about-modal-close:hover, #update-modal-close:hover {
     background: $highlight;
@@ -1943,10 +2240,6 @@ ModalScreen.editor {
     padding: 1 0 0 0;
     color: $dim;
 }
-#modal-body {
-    height: 1fr;
-    align: center middle;
-}
 #modal-card {
     width: 78;
     max-width: 94%;
@@ -1985,6 +2278,30 @@ ModalScreen.editor {
     background: $base;
     border: round $rule;
 }
+#modal-card.modal-card-flex {
+    height: 86%;
+}
+#modal-card.appearance-modal {
+    max-height: 92%;
+}
+#modal-card.appearance-modal.modal-card-flex {
+    height: 92%;
+}
+.service-policy-card.modal-card-flex,
+.proxy-editor-card.modal-card-flex {
+    height: 90%;
+}
+#vault-target-card.modal-card-flex {
+    height: 82%;
+}
+#modal-card.modal-card-flex OptionList,
+.service-policy-card.modal-card-flex OptionList,
+#vault-target-card.modal-card-flex #vault-target-list,
+.proxy-editor-card.modal-card-flex .proxy-editor-fields,
+.proxy-editor-card.modal-card-flex #proxy-provider-types {
+    height: 1fr;
+    max-height: 100%;
+}
 #modal-card Input {
     width: 100%;
     height: 1;
@@ -2006,6 +2323,32 @@ ModalScreen.editor {
     background: $base;
     color: $fg2;
 }
+#appearance-preview {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0 2;
+    background: $base;
+    border: round $rule;
+}
+#appearance-preview-banner {
+    width: 100%;
+    height: auto;
+    text-align: center;
+}
+#appearance-preview-ui {
+    width: 100%;
+    height: 1;
+    margin: 0;
+    text-align: center;
+    color: $fg2;
+}
+#appearance-preview-caption {
+    width: 100%;
+    height: 1;
+    text-align: center;
+    color: $dim;
+}
 .modal-card-actions {
     width: 100%;
     height: 2;
@@ -2023,33 +2366,10 @@ ModalScreen.editor {
 }
 /* Help text is a sentence. Label defaults to width:auto, which sizes to the
    text and then gets clipped by the card instead of wrapping inside it. */
-#modal-body .ask-title, #modal-body .ask-hint,
 #modal-card .ask-title, #modal-card .ask-hint {
     width: 1fr;
     height: auto;
     padding: 0 1 1 1;
-}
-.multi-setting-title-row {
-    width: 100%;
-    height: auto;
-    min-height: 2;
-}
-#modal-card .multi-setting-title-row .ask-title,
-#modal-card .multi-setting-title-row .modal-card-title {
-    width: 1fr;
-    max-width: 1fr;
-}
-#multi-setting-confirm {
-    width: auto;
-    height: 1;
-    padding: 0 2;
-    background: $accent;
-    color: $base;
-    text-style: bold;
-}
-#multi-setting-confirm:hover {
-    background: $visual;
-    color: $foreground;
 }
 
 /* ------------------------------------------------ multi-vault destination */
@@ -2527,8 +2847,15 @@ ModalScreen.editor {
 #resource-editor-fields Input {
     width: 100%;
     height: 1;
+    padding: 0 1;
     border: none;
+    border-left: solid $rule;
     background: $highlight;
+    color: $foreground;
+}
+#resource-editor-fields Input:focus {
+    border-left: solid $accent;
+    background: $visual;
 }
 #resource-editor-fields Select {
     width: 100%;
@@ -2594,7 +2921,13 @@ ModalScreen.editor {
     height: 4;
     min-height: 4;
     border: none;
+    border-left: solid $rule;
     background: $highlight;
+    color: $foreground;
+}
+#resource-editor-fields TextArea:focus {
+    border-left: solid $accent;
+    background: $visual;
 }
 #resource-editor-fields VaultCheckbox, #resource-policy-card VaultCheckbox {
     width: 100%;
@@ -2836,13 +3169,31 @@ ModalScreen.editor {
 .short .proxy-editor-help, .short .modal-card-help {
     padding: 0;
 }
-.short .proxy-editor-fields {
+.short #modal-card.modal-card-flex,
+.short .service-policy-card.modal-card-flex,
+.short .proxy-editor-card.modal-card-flex {
+    height: 94%;
+}
+.short #vault-target-card.modal-card-flex {
+    height: 92%;
+}
+.short #vault-target-card.modal-card-flex #vault-target-list {
     height: 1fr;
-    max-height: 1fr;
+    max-height: 100%;
 }
 .short .proxy-editor-actions, .short .modal-card-actions {
     height: 1;
     margin: 0;
+}
+.short #appearance-preview {
+    margin: 0;
+    padding: 0 1;
+}
+.short #appearance-preview-ui {
+    margin: 0;
+}
+.short #appearance-preview-caption {
+    display: none;
 }
 .short #resource-editor-card {
     height: 94%;
@@ -2930,6 +3281,18 @@ ModalScreen.editor {
     padding: 0 2;
 }
 #import-list {
+    height: 1fr;
+    padding: 0 1;
+}
+#import-entry-head {
+    height: 2;
+    padding: 1 2 0 2;
+}
+#import-entry-note {
+    height: 1;
+    padding: 0 2;
+}
+#import-entry-list {
     height: 1fr;
     padding: 0 1;
 }
@@ -3040,6 +3403,10 @@ ModalScreen.editor {
     height: 2;
     padding: 1 1 0 1;
 }
+.short #import-entry-head {
+    height: 1;
+    padding: 0 2;
+}
 .short .service-grid {
     grid-gutter: 0 1;
 }
@@ -3050,5 +3417,222 @@ JumpToBottom {
 JumpToBottom:hover {
     color: $foreground;
     background: $highlight;
+}
+
+/* --------------------------------------------------------------- RTL layout
+   Active whenever the interface language is right-to-left (Arabic). Mirrors
+   text alignment, modal header close marks, action button alignment and side
+   accent bars while leaving LTR editable inputs and code/URL fields intact. */
+.rtl .modal-head > .modal-close,
+.rtl .modal-close,
+.rtl #about-modal-close,
+.rtl #update-modal-close,
+.rtl #chapter-modal-close,
+.rtl #lyrics-modal-close,
+.rtl #attachment-modal-close,
+.rtl #job-modal-close,
+.rtl #beta-picker-close {
+    dock: left;
+    width: 5;
+    content-align: left middle;
+}
+.rtl #masthead,
+.rtl #subhead,
+.rtl #prompt-hint,
+.rtl #ident-line,
+.rtl #param-line,
+.rtl #status-line,
+.rtl #delivery-head,
+.rtl #delivery-elapsed,
+.rtl #delivery-details-body,
+.rtl #keybar,
+.rtl #resource-manager-help,
+.rtl #storage-manager-help,
+.rtl #proxy-manager-help,
+.rtl #justwatch-settings-help,
+.rtl #settings-group-help,
+.rtl #storage-preview,
+.rtl #storage-editor-preview,
+.rtl #proxy-preview,
+.rtl .modal-card-title,
+.rtl .modal-card-help,
+.rtl .proxy-editor-title,
+.rtl .proxy-editor-help,
+.rtl .proxy-field-label,
+.rtl #proxy-editor-error,
+.rtl #express-login-status,
+.rtl #express-login-code,
+.rtl #express-login-url,
+.rtl #resource-editor-title,
+.rtl #resource-editor-help,
+.rtl #resource-policy-title,
+.rtl #resource-policy-help,
+.rtl #resource-confirm-title,
+.rtl #resource-confirm-help,
+.rtl .resource-field-label,
+.rtl #resource-editor-error,
+.rtl .resource-policy-section,
+.rtl .resource-policy-gate-note,
+.rtl #resource-policy-remote-operations-help,
+.rtl .resource-policy-target-title,
+.rtl .resource-policy-row Static,
+.rtl #resource-editor-fields Select > SelectCurrent Static#label,
+.rtl #beta-heading,
+.rtl #beta-hint,
+.rtl #beta-summary,
+.rtl #beta-empty,
+.rtl #setup-note,
+.rtl #service-setup-note,
+.rtl #download-setup-note,
+.rtl #vault-target-title,
+.rtl #vault-target-help,
+.rtl .vault-target-group,
+.rtl #vault-target-empty,
+.rtl .vault-field-label,
+.rtl #vault-keys-help,
+.rtl #vault-service-state,
+.rtl #vault-destination-state,
+.rtl #vault-validation,
+.rtl #vault-action-hint,
+.rtl #about-modal-title,
+.rtl #update-modal-title,
+.rtl #chapter-modal-title,
+.rtl #lyrics-modal-title,
+.rtl #attachment-modal-title,
+.rtl #job-modal-title,
+.rtl #beta-picker-title,
+.rtl #about-intro,
+.rtl #about-license-note,
+.rtl #about-modal-hint,
+.rtl #update-current,
+.rtl #update-status,
+.rtl #update-result,
+.rtl #update-notes-title,
+.rtl #update-remote-notes-title,
+.rtl .update-note,
+.rtl #update-modal-hint,
+.rtl #chapter-summary,
+.rtl #chapter-modal-hint,
+.rtl .chapter-row,
+.rtl #lyrics-summary,
+.rtl #lyrics-modal-hint,
+.rtl .lyrics-row,
+.rtl #job-modal-body,
+.rtl #job-modal-hint,
+.rtl .ask-title,
+.rtl .ask-hint,
+.rtl .section-head,
+.rtl #import-head,
+.rtl #import-note,
+.rtl #import-entry-head,
+.rtl #import-entry-note,
+.rtl #rules-head,
+.rtl #rules-note,
+.rtl #ready-head,
+.rtl .ready-group,
+.rtl .ready-row,
+.rtl OptionList,
+.rtl SelectionList,
+.rtl VaultCheckbox,
+.rtl Toast {
+    text-align: right;
+}
+.rtl .modal-card-actions,
+.rtl .proxy-editor-actions,
+.rtl #resource-editor-actions,
+.rtl #resource-policy-actions,
+.rtl #resource-confirm-actions,
+.rtl #vault-target-actions,
+.rtl #vault-add-actions {
+    align: left middle;
+}
+.rtl #search-statusline,
+.rtl #update-links,
+.rtl #resource-manager-actions,
+.rtl #proxy-manager-actions {
+    align: right middle;
+}
+.rtl #modal-card Input,
+.rtl .proxy-editor-card Input,
+.rtl #resource-editor-fields Input,
+.rtl #resource-editor-fields TextArea {
+    border-left: none;
+    border-right: solid $rule;
+}
+.rtl #modal-card Input:focus,
+.rtl .proxy-editor-card Input:focus,
+.rtl #resource-editor-fields Input:focus,
+.rtl #resource-editor-fields TextArea:focus {
+    border-left: none;
+    border-right: solid $accent;
+}
+.rtl #resource-editor-fields {
+    padding: 0 2 0 1;
+}
+.rtl #resource-editor-fields Select > SelectCurrent {
+    border-left: none !important;
+    border-right: solid $rule !important;
+}
+.rtl #resource-editor-fields Select > SelectCurrent .arrow {
+    dock: left;
+    width: 2;
+}
+.rtl #resource-editor-fields Select:focus > SelectCurrent {
+    border-left: none !important;
+    border-right: solid $accent !important;
+}
+.rtl #resource-policy-card VaultCheckbox,
+.rtl .vault-target-option,
+.rtl #vault-target-all {
+    border-left: none;
+    border-right: solid transparent;
+}
+.rtl #resource-editor-fields VaultCheckbox:focus,
+.rtl #resource-policy-card VaultCheckbox:focus,
+.rtl .proxy-editor-fields VaultCheckbox:focus,
+.rtl .vault-target-option:focus,
+.rtl #vault-target-all:focus {
+    border-left: none;
+    border-right: solid $accent;
+}
+.rtl #resource-policy-remote-operations-help {
+    height: auto;
+    max-height: 2;
+}
+.rtl .resource-policy-row {
+    padding: 0 1 0 0;
+}
+.rtl .resource-policy-row Button {
+    dock: left;
+}
+.rtl .resource-policy-row Button:focus {
+    border-left: none;
+    border-right: solid $accent;
+}
+.rtl .resource-policy-section {
+    border-left: none;
+    border-right: solid $accent;
+}
+.rtl #setup-note,
+.rtl #service-setup-note,
+.rtl #download-setup-note {
+    border-left: none;
+    border-right: solid $warn;
+}
+.rtl BetaHomeScreen #beta-mode {
+    border-right: none;
+    border-left: solid $rule;
+}
+.rtl BetaHomeScreen #beta-submit {
+    border-left: none;
+    border-right: solid $rule;
+}
+.rtl #delivery-details {
+    border-left: none;
+    border-right: solid $rule;
+}
+.rtl #update-result {
+    border-left: none;
+    border-right: solid $ok;
 }
 """
