@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.7.4] - 2026-11-24
+
+### Interface
+
+- Fixed navigation, dialog layout, and shortcut conflicts, including shortcuts firing while typing into filters.
+- Fixed pausing, resuming, and retrying downloads without discarding the remaining batch queue.
+- Added confirmation before discarding unsaved edits or a nonempty import queue.
+
+### Arabic on macOS
+
+- Fixed Arabic text ordering and alignment in macOS Terminal so right-to-left text stayed inside buttons and borders.
+
+### Live recording
+
+- Fixed HLS live recording when the video input listed audio first or used a separate audio rendition.
+- Fixed MKV recording when AAC codec information arrived in the first audio packets rather than in the playlist.
+
 ## [2.7.3] - 2026-11-24
 
 ### Interface and themes

@@ -12,7 +12,7 @@ from textual.widgets.option_list import Option
 from ..core import justwatch as jw
 from ..core.i18n import tr
 from ..core.settings import Settings
-from .bidi import visual_markup
+from .bidi import escape_markup
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .justwatch_screen import RegionScreen, SearchRegionScreen, regions_from, search_region_from
 from .settings_layout import label_width, setting_row
@@ -97,7 +97,7 @@ class JustWatchSettingsScreen(Screen[None]):
                 Option(
                     setting_row(
                         options, label,
-                        f"[$accent]{visual_markup(value)}[/]\n[$dim]{visual_markup(help_text)}[/]",
+                        f"[$accent]{escape_markup(value)}[/]\n[$dim]{escape_markup(help_text)}[/]",
                         longest,
                     )
                 )

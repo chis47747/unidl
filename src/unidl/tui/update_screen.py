@@ -144,7 +144,7 @@ class UpdateScreen(ModalScreen[None]):
         github = self.query_one("#update-github", StatusChip)
         pypi.update(tr("update.open_pypi"))
         github.update(tr("update.open_github"))
-        pypi.display = bool(info.pypi_version)
+        pypi.display = bool(info.pypi_url)
         github.display = bool(info.github_url)
         links_widget.display = pypi.display or github.display
         has_notes = bool(info.release_notes)

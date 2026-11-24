@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import unicodedata
-from typing import Any
+from typing import Any, Literal
 
 import arabic_reshaper
 from bidi import algorithm as _bidi_alg
@@ -26,14 +26,38 @@ from rich.markup import escape
 from rich.segment import Segment
 from rich.style import Style
 
+RtlTerminalMode = Literal["explicit", "apple_terminal", "off"]
+
 _RTL_CLASSES = frozenset({"R", "AL", "AN"})
 _CONTROL_CHARS = frozenset(
     "\u061c\u200e\u200f"  # Arabic/LTR/RTL marks
     "\u202a\u202b\u202c\u202d\u202e"  # embeddings, overrides, pop
     "\u2066\u2067\u2068\u2069"  # directional isolates and pop
 )
+# U+1160 (HANGUL JUNGSEONG FILLER): non-Cf (category Lo), strong LTR
+# (Bidi_Class=L), wcwidth=0, rich cell width=0, zero-width empty glyph in
+# macOS SF Mono & Menlo. Unlike U+200E/U+202D/U+2066 (which Terminal.app
+# strips from its screen buffer), Terminal.app preserves U+1160 attached to
+# its preceding cell, isolating each pre-shaped RTL glyph into a length-1 run
+# so Apple CoreText cannot reverse text or drag glyphs out of button/border
+# cells.
+_RTL_FREEZE_MARK = "\u1160"
 _LAM_ALEF_LIGATURES = frozenset("\ufef5\ufef6\ufef7\ufef8\ufef9\ufefa\ufefb\ufefc")
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_MULTIPLEXER_TERM_PROGRAMS = frozenset({"tmux", "screen"})
+_NON_APPLE_TERMINAL_ENV = (
+    "KITTY_WINDOW_ID",
+    "WT_SESSION",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_PANE",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "GHOSTTY_RESOURCES_DIR",
+    "ITERM_SESSION_ID",
+    "KONSOLE_VERSION",
+    "VTE_VERSION",
+    "VSCODE_PID",
+)
 _ARABIC_RESHAPER = arabic_reshaper.ArabicReshaper(
     configuration={
         # Keep vowel marks (harakat). Moving them one position before visual
@@ -53,9 +77,49 @@ EXPLICIT_BIDI_ENTER = "\x1b[8l\x1b[1 k\x1b[?2501l"
 EXPLICIT_BIDI_EXIT = "\x1b[?2501h\x1b[0 k\x1b[8h"
 
 
+def is_apple_terminal() -> bool:
+    """Detect macOS built-in Terminal.app (including inside tmux/screen)."""
+    term_program = os.environ.get("TERM_PROGRAM", "").strip()
+    if term_program == "Apple_Terminal":
+        return True
+    if term_program and term_program.lower() not in _MULTIPLEXER_TERM_PROGRAMS:
+        return False
+    if any(os.environ.get(var) for var in _NON_APPLE_TERMINAL_ENV):
+        return False
+    return os.environ.get("__CFBundleIdentifier", "").strip() == "com.apple.Terminal"
+
+
+def rtl_terminal_mode() -> RtlTerminalMode:
+    """Resolve the active RTL terminal rendering strategy.
+
+    - ``"off"``: ``UNIDL_DISABLE_RTL_SHAPING=1`` or ``UNIDL_RTL_MODE=off``
+      (leave logical Unicode untouched for terminals where the user wants raw
+      implicit BiDi).
+    - ``"apple_terminal"``: macOS ``Terminal.app`` (auto-detected or via
+      ``UNIDL_RTL_MODE=apple``), which ignores ``CSI 8 l`` and runs CoreText
+      row-wide BiDi; pre-shaped visual strips are frozen at compositor output
+      time using zero-width ``U+1160`` LTR anchors.
+    - ``"explicit"``: default for all other terminals (iTerm2 3.5+, WezTerm,
+      Kitty, Alacritty, Ghostty, Windows Terminal, VS Code, GNOME VTE,
+      Konsole, foot, xterm, etc.).
+    """
+    if os.environ.get("UNIDL_DISABLE_RTL_SHAPING", "").strip().lower() in _TRUTHY:
+        return "off"
+    override = os.environ.get("UNIDL_RTL_MODE", "").strip().lower()
+    if override in {"off", "disabled", "none", "native"}:
+        return "off"
+    if override in {"explicit", "standard", "cell"}:
+        return "explicit"
+    if override in {"apple", "apple_terminal", "freeze"}:
+        return "apple_terminal"
+    if is_apple_terminal():
+        return "apple_terminal"
+    return "explicit"
+
+
 def rtl_shaping_disabled() -> bool:
-    """Whether ``UNIDL_DISABLE_RTL_SHAPING=1`` opts out for native-BiDi terminals."""
-    return os.environ.get("UNIDL_DISABLE_RTL_SHAPING", "").strip().lower() in _TRUTHY
+    """Whether RTL pre-shaping is explicitly opted out via environment."""
+    return rtl_terminal_mode() == "off"
 
 
 def _is_unshaped_arabic(char: str) -> bool:
@@ -406,11 +470,140 @@ def shape_strip(
     return result
 
 
+def _strip_has_rtl(strip: Any) -> bool:
+    """Whether ``strip`` contains any strong RTL or Arabic-number character."""
+    segments = getattr(strip, "_segments", None)
+    if not segments:
+        return False
+    for seg in segments:
+        if seg.control or not seg.text or seg.text.isascii():
+            continue
+        if any(unicodedata.bidirectional(ch) in _RTL_CLASSES for ch in seg.text):
+            return True
+    return False
+
+
+def freeze_strip_for_apple_terminal(
+    strip: Any,
+    *,
+    anchor_col0: bool = False,
+) -> Any:
+    """Freeze pre-shaped RTL visual order for macOS Terminal.app CoreText.
+
+    macOS ``Terminal.app`` ignores ECMA-48 ``CSI 8 l`` / ``CSI ? 2501 l``,
+    strips zero-width ``Cf`` BiDi controls (``U+200E``, ``U+202D``, ``U+2066``),
+    paints cell backgrounds at fixed LTR columns, and runs CoreText row-wide
+    UAX #9 BiDi over the row text.  Appending ``U+1160`` (non-``Cf``,
+    ``Bidi_Class=L``, ``wcwidth=0``, zero-width invisible glyph in SF Mono &
+    Menlo) after each RTL base+combining cluster turns every RTL glyph into a
+    length-1 run that CoreText cannot reverse or drag across borders/buttons,
+    while anchoring column 0 (and the cell before the first RTL char) keeps
+    CoreText's paragraph base direction strictly LTR.
+
+    Always returns a fresh ``Strip`` when modified so cached widget/compositor
+    strips, text selection, and clipboard copy remain pure Unicode.
+    """
+    segments = getattr(strip, "_segments", None)
+    if not segments:
+        return strip
+    has_any_rtl = _strip_has_rtl(strip)
+    if not has_any_rtl and not anchor_col0:
+        return strip
+
+    chars: list[tuple[str, Style | None]] = []
+    controls: dict[int, list[Segment]] = {}
+    for seg in segments:
+        if seg.control:
+            controls.setdefault(len(chars), []).append(seg)
+        elif seg.text:
+            style = seg.style
+            for ch in seg.text:
+                chars.append((ch, style))
+
+    if not chars:
+        return strip
+
+    first_rtl_idx = (
+        next(
+            (i for i, (ch, _) in enumerate(chars) if unicodedata.bidirectional(ch) in _RTL_CLASSES),
+            -1,
+        )
+        if has_any_rtl
+        else -1
+    )
+
+    if first_rtl_idx == -1 and anchor_col0:
+        if unicodedata.bidirectional(chars[0][0]) == "L":
+            return strip
+
+    out_segments: list[Segment] = []
+    pending_chars: list[tuple[str, Style | None]] = []
+
+    def flush_pending() -> None:
+        if pending_chars:
+            out_segments.extend(_coalesce_segments(pending_chars))
+            pending_chars.clear()
+
+    total = len(chars)
+    index = 0
+    while index < total:
+        if index in controls:
+            flush_pending()
+            out_segments.extend(controls[index])
+
+        ch, style = chars[index]
+        bc = unicodedata.bidirectional(ch)
+        is_rtl = bc in _RTL_CLASSES
+
+        if index == 0 and anchor_col0 and is_rtl:
+            pending_chars.append((_RTL_FREEZE_MARK, style))
+
+        pending_chars.append((ch, style))
+        last_style = style
+
+        # Keep trailing combining marks (harakat, etc.) attached to their base.
+        end = index + 1
+        while end < total and unicodedata.category(chars[end][0]) in ("Mn", "Me"):
+            if end in controls:
+                flush_pending()
+                out_segments.extend(controls[end])
+            mark_ch, mark_style = chars[end]
+            pending_chars.append((mark_ch, mark_style))
+            last_style = mark_style
+            end += 1
+
+        need_mark = False
+        if is_rtl:
+            need_mark = True
+        elif index == 0 and anchor_col0 and bc != "L":
+            need_mark = True
+        elif first_rtl_idx > 0 and end == first_rtl_idx and bc != "L":
+            need_mark = True
+
+        if need_mark and (end >= total or chars[end][0] != _RTL_FREEZE_MARK):
+            pending_chars.append((_RTL_FREEZE_MARK, last_style))
+
+        index = end
+
+    if total in controls:
+        flush_pending()
+        out_segments.extend(controls[total])
+    else:
+        flush_pending()
+
+    from textual.strip import Strip
+
+    return Strip(out_segments, cell_length=strip.cell_length)
+
+
 def install_textual_rtl_shaping() -> None:
-    """Hook Textual's ``Visual.to_strips`` once so all Arabic UI renders shaped."""
+    """Hook Textual's strip and compositor emission once for cross-terminal RTL."""
     global _TEXTUAL_RTL_INSTALLED
     if _TEXTUAL_RTL_INSTALLED:
         return
+    from rich._loop import loop_last
+    from rich.control import Control
+    from textual._compositor import ChopsUpdate, LayoutUpdate
     from textual.visual import Visual
     from textual.widgets import Input as TextualInput
     from textual.widgets import TextArea as TextualTextArea
@@ -418,6 +611,8 @@ def install_textual_rtl_shaping() -> None:
     from ..core.i18n import is_rtl_locale
 
     original_to_strips = Visual.to_strips.__func__  # type: ignore[attr-defined]
+    original_layout_render_segments = LayoutUpdate.render_segments
+    original_chops_render_segments = ChopsUpdate.render_segments
 
     @classmethod  # type: ignore[misc]
     def _rtl_to_strips(
@@ -448,18 +643,99 @@ def install_textual_rtl_shaping() -> None:
         rtl_base = is_rtl_locale()
         return [shape_strip(strip, rtl_base=rtl_base) for strip in strips]
 
+    def _rtl_layout_render_segments(self, console) -> str:
+        if rtl_terminal_mode() != "apple_terminal":
+            return original_layout_render_segments(self, console)
+        sequences: list[str] = []
+        append = sequences.append
+        x = self.region.x
+        move_to = Control.move_to
+        rtl_locale = is_rtl_locale()
+        for last, (y, line) in loop_last(enumerate(self.strips, self.region.y)):
+            append(move_to(x, y).segment.text)
+            row_strips = list(line)
+            need_anchor = (x == 0) and (
+                rtl_locale or any(_strip_has_rtl(strip) for strip in row_strips)
+            )
+            anchored = False
+            for strip in row_strips:
+                anchor_this = need_anchor and not anchored and strip.cell_length > 0
+                if anchor_this:
+                    anchored = True
+                append(
+                    freeze_strip_for_apple_terminal(
+                        strip,
+                        anchor_col0=anchor_this,
+                    ).render(console)
+                )
+            if not last:
+                append("\n")
+        return "".join(sequences)
+
+    def _rtl_chops_render_segments(self, console) -> str:
+        if rtl_terminal_mode() != "apple_terminal":
+            return original_chops_render_segments(self, console)
+        if not self.spans:
+            return ""
+        sequences: list[str] = []
+        append = sequences.append
+        move_to = Control.move_to
+        chops = self.chops
+        chop_ends = self.chop_ends
+        last_y = self.spans[-1][0]
+        rtl_locale = is_rtl_locale()
+
+        for y, x1, x2 in self.spans:
+            line = chops[y]
+            ends = chop_ends[y]
+            emitted: list[tuple[int, Any]] = []
+            for end, (x, strip) in zip(ends, line.items(), strict=False):
+                if strip is None:
+                    continue
+                if x > x2 or end <= x1:
+                    continue
+                if not (x2 > x >= x1 and end <= x2):
+                    strip = strip.crop(0, min(end, x2) - x)
+                emitted.append((x, strip))
+
+            row_has_rtl = any(_strip_has_rtl(strip) for _, strip in emitted)
+            need_anchor = rtl_locale or row_has_rtl
+            anchored = False
+            for x, strip in emitted:
+                anchor_this = need_anchor and not anchored and x == 0 and strip.cell_length > 0
+                if anchor_this:
+                    anchored = True
+                append(move_to(x, y).segment.text)
+                append(
+                    freeze_strip_for_apple_terminal(
+                        strip,
+                        anchor_col0=anchor_this,
+                    ).render(console)
+                )
+
+            if y != last_y:
+                append("\n")
+
+        return "".join(sequences)
+
     Visual.to_strips = _rtl_to_strips  # type: ignore[assignment]
+    LayoutUpdate.render_segments = _rtl_layout_render_segments  # type: ignore[method-assign]
+    ChopsUpdate.render_segments = _rtl_chops_render_segments  # type: ignore[method-assign]
     _TEXTUAL_RTL_INSTALLED = True
 
 
 __all__ = [
     "EXPLICIT_BIDI_ENTER",
     "EXPLICIT_BIDI_EXIT",
+    "RtlTerminalMode",
     "escape_markup",
+    "freeze_strip_for_apple_terminal",
     "has_rtl",
     "has_unshaped_arabic",
     "install_textual_rtl_shaping",
+    "is_apple_terminal",
     "rtl_shaping_disabled",
+    "rtl_terminal_mode",
     "shape_strip",
     "visual_markup",
     "visual_text",

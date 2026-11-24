@@ -33,6 +33,8 @@ _PHRASES: dict[str, str] = {
     "Settings": "chrome.settings",
     "Pause": "chrome.pause",
     "Resume": "chrome.resume",
+    "pause": "chrome.pause",
+    "resume": "chrome.resume",
     "Stopping": "chrome.stopping",
     "Starting": "chrome.starting",
     "Done": "chrome.done",

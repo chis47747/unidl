@@ -46,13 +46,11 @@ class ServiceScreen(AskHost):
             ("^l", "log"),
         ]
 
-    def on_mount(self) -> None:
-        super().on_mount()
+    def _on_host_mount(self) -> None:
         self.refresh_banner()
         self.run_service_flow()
 
-    def on_screen_resume(self, event) -> None:
-        super().on_screen_resume(event)
+    def _on_host_resume(self, _event) -> None:
         if (
             self.controller.aborted
             and not self.waiting
@@ -105,18 +103,12 @@ class ServiceScreen(AskHost):
         fresh.attach(self)
         self.run_service_flow()
 
-    def on_unmount(self) -> None:
+    def _on_host_unmount(self) -> None:
         release = getattr(self.controller, "release_reserved_worker", None)
         if callable(release):
             release()
-        super().on_unmount()
 
-    def on_resize(self) -> None:
-        # super() as well as the banner: the host re-wraps the log and re-fits the
-        # identity rows, and this override used to replace all of that with a
-        # banner redraw - so a resized service screen kept every log line wrapped
-        # for the width it no longer had.
-        super().on_resize()
+    def _on_host_resize(self) -> None:
         self.refresh_banner()
 
     def refresh_banner(self) -> None:

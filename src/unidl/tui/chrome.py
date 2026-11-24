@@ -15,6 +15,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from ..core.i18n import cell_width, is_rtl_locale, phrase
+from ..core.terminal_cells import crop
 
 __all__ = [
     "Chrome",
@@ -36,6 +37,8 @@ class ChromeButton(Static):
     columns of padding so it reads as a button rather than as a stray word.
     """
 
+    ALLOW_SELECT = False
+
     def __init__(
         self,
         key: str,
@@ -49,8 +52,11 @@ class ChromeButton(Static):
         self._action = action
         self._key = key
         self._label = label
+        self._display_label: str | None = None
         self.enabled = enabled
         self._prism_index = prism_index
+        self._pressed = False
+        self._handled_up = False
         super().__init__(self._markup(key, label, enabled), id=id)
         self.add_class("chrome-button")
         if not enabled:
@@ -64,15 +70,25 @@ class ChromeButton(Static):
         return "$accent"
 
     def _markup(self, key: str, label: str, enabled: bool) -> str:
-        text = phrase(label)
+        text = self._display_label if self._display_label is not None else phrase(label)
         if not enabled:
             return f"[$gutter]{key} {text}[/]"
         return f"[{self._key_colour()}]{key}[/] [bold]{text}[/bold]"
+
+    def full_text_width(self) -> int:
+        return cell_width(self._key) + 1 + cell_width(phrase(self._label))
+
+    def set_display_label(self, text: str | None) -> None:
+        if self._display_label == text:
+            return
+        self._display_label = text
+        self.update(self._markup(self._key, self._label, self.enabled))
 
     def on_mount(self) -> None:
         self.update(self._markup(self._key, self._label, self.enabled))
 
     def relocalize(self) -> None:
+        self._display_label = None
         self.update(self._markup(self._key, self._label, self.enabled))
 
     def refresh_theme(self) -> None:
@@ -89,9 +105,36 @@ class ChromeButton(Static):
         """Change a stateful control without replacing the whole chrome bar."""
         self._key = key
         self._label = label
+        self._display_label = None
         self.update(self._markup(key, label, self.enabled))
+        parent = self.parent
+        fit = getattr(parent, "_fit_width", None)
+        if callable(fit):
+            fit()
+
+    def on_leave(self) -> None:
+        self._pressed = False
+
+    def on_mouse_down(self, event) -> None:
+        if getattr(event, "button", 1) == 1 and self.enabled:
+            self._pressed = True
+            self._handled_up = False
+            self.screen.clear_selection()
+            event.stop()
+
+    async def on_mouse_up(self, event) -> None:
+        if not self._pressed:
+            return
+        self._pressed = False
+        event.stop()
+        if self.enabled and self.region.contains_point(event.screen_offset):
+            self._handled_up = True
+            await self.app.run_action(self._action)
 
     async def on_click(self) -> None:
+        if self._handled_up:
+            self._handled_up = False
+            return
         if self.enabled:
             await self.app.run_action(self._action)
 
@@ -103,6 +146,8 @@ class CloseMark(Static):
     labels behind them are not live controls. A control you cannot use is not a
     control; this mark is the click target that actually dismisses the card.
     """
+
+    ALLOW_SELECT = False
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__("✕", id=id)
@@ -129,6 +174,8 @@ class StatusChip(Static):
     actions instead of everything having to be an app action.
     """
 
+    ALLOW_SELECT = False
+
     def __init__(self, action: str = "", *, id: str | None = None, classes: str = ""):
         super().__init__("", id=id, classes=f"chip {classes}".strip())
         self._action = action
@@ -148,6 +195,8 @@ class KeyBar(Static):
     nothing. This bar always states what is available in the current context,
     so it is written explicitly per screen.
     """
+
+    ALLOW_SELECT = False
 
     def __init__(self, *pairs: tuple[str, str]):
         self._pairs = list(pairs)
@@ -171,7 +220,9 @@ class KeyBar(Static):
 
     def _fit(self, width: int) -> str:
         """As many hints as fit, in declared order of usefulness."""
-        available = max(0, (width or 80) - 4)
+        # Textual's Widget.size already reflects the inner content width
+        # (after #keybar's horizontal padding), so do not subtract padding twice.
+        available = max(0, width if width > 0 else 76)
         prism = (
             getattr(getattr(self.app, "palette", None), "prism", ())
             if getattr(self, "_is_mounted", False)
@@ -190,8 +241,16 @@ class KeyBar(Static):
         return "  ".join(shown)
 
 
+class _ChromeGap(Static):
+    """Non-selectable spacer between the navigation and utility chrome groups."""
+
+    ALLOW_SELECT = False
+
+
 class Chrome(Horizontal):
     """The persistent top bar."""
+
+    ALLOW_SELECT = False
 
     def __init__(
         self,
@@ -239,7 +298,7 @@ class Chrome(Horizontal):
 
         self._nav_buttons = nav
         self._util_buttons = util
-        gap = Static("", id="chrome-gap")
+        gap = _ChromeGap("", id="chrome-gap")
         self._gap = gap
         ordered = (
             [*reversed(util), gap, *reversed(nav)]
@@ -265,20 +324,82 @@ class Chrome(Horizontal):
             if child.parent is self:
                 self.move_child(child, before=index)
 
+    def on_mount(self) -> None:
+        self._fit_width()
+
+    def on_resize(self) -> None:
+        self._fit_width()
+
+    def _fit_width(self) -> None:
+        """Keep every Chrome button on screen at 80 cols across all locales."""
+        if not self.is_mounted:
+            return
+        width = self.size.width or (self.app.size.width if self.app else 80)
+        if width <= 0:
+            return
+        available = max(20, width - 2)
+        buttons = [button for button in self.query(ChromeButton) if button.display]
+        if not buttons:
+            return
+        for button in buttons:
+            button.set_display_label(None)
+        widths = [button.full_text_width() for button in buttons]
+        if sum(w + 5 for w in widths) <= available:
+            self.set_class(False, "tight")
+            self.set_class(False, "compact")
+            return
+        if sum(w + 3 for w in widths) <= available:
+            self.set_class(True, "tight")
+            self.set_class(False, "compact")
+            return
+        self.set_class(False, "tight")
+        self.set_class(True, "compact")
+        total = sum(w + 2 for w in widths)
+        if total <= available:
+            return
+        # Still wider than the bar (e.g. 6 buttons in French/German at 80 cols):
+        # trim the longest labels fairly while preserving shortcut keys and core nav.
+        excess = total - available
+        full_labels = [phrase(button._label) for button in buttons]
+        targets = [cell_width(label) for label in full_labels]
+        # Prefer trimming extra left actions before core Back/Quit/Search/Settings.
+        core_actions = {"app.global_back", "app.global_quit", "app.global_search", "app.global_settings"}
+        min_label = [3 if button._action in core_actions else 2 for button in buttons]
+        while excess > 0:
+            candidates = [
+                (0 if buttons[i]._action not in core_actions else 1, -targets[i], i)
+                for i in range(len(buttons))
+                if targets[i] > min_label[i]
+            ]
+            if not candidates:
+                break
+            candidates.sort()
+            idx = candidates[0][2]
+            targets[idx] -= 1
+            excess -= 1
+        for button, full_label, target in zip(buttons, full_labels, targets, strict=True):
+            if target < cell_width(full_label):
+                short = crop(full_label, max(1, target - 1)) + "…" if target >= 2 else crop(full_label, target)
+                button.set_display_label(short)
+            else:
+                button.set_display_label(None)
+
     def refresh_locale(self) -> None:
         for button in self.query(ChromeButton):
             button.relocalize()
         self._sync_direction()
+        self._fit_width()
 
     def refresh_theme(self) -> None:
         for button in self.query(ChromeButton):
             button.refresh_theme()
+        self._fit_width()
 
 
 def fit_modal_card(
     screen,
     card_selector: str,
-    body_selector: str,
+    body_selector: str = "",
 ) -> None:
     """Keep a modal card's trailing actions visible when its body exceeds max-height.
 
@@ -287,15 +408,17 @@ def fit_modal_card(
     the bottom on long lists or compact terminals. Adding ``.modal-card-flex``
     only when the natural content height exceeds the vertical budget switches
     the scrollable body to ``height: 1fr`` while keeping short modals snug.
+    For non-scrollable text/template modals without a matching body widget,
+    clamps tall help/preview blocks so Save/Cancel actions stay inside the card.
     """
     if not getattr(screen, "is_mounted", False):
         return
     cards = screen.query(card_selector)
-    bodies = screen.query(body_selector)
-    if not cards or not bodies:
+    if not cards:
         return
     card = cards.first()
-    body = bodies.first()
+    bodies = screen.query(body_selector) if body_selector else None
+    body = bodies.first() if bodies else None
     viewport = screen.size
     if viewport.height <= 0:
         return
@@ -308,20 +431,49 @@ def fit_modal_card(
     inner_budget = max(1, budget - card.styles.gutter.height)
 
     visible_children = [child for child in card.children if child.display]
-    help_child = next(
-        (
-            child
-            for child in visible_children
-            if child is not body
-            and (
-                child.has_class("modal-card-help")
-                or child.has_class("proxy-editor-help")
-            )
-        ),
-        None,
-    )
-    if help_child is not None:
-        help_child.styles.max_height = None
+    clampable: list[object] = []
+    help_child = None
+    for child in visible_children:
+        if child is body:
+            continue
+        if (
+            child.has_class("modal-card-help")
+            or child.has_class("proxy-editor-help")
+        ):
+            help_child = child
+            clampable.append(child)
+        elif child.id == "storage-editor-preview":
+            clampable.append(child)
+    for child in clampable:
+        child.styles.max_height = None
+
+    if body is None:
+        needed = 0
+        prev_bottom = 0
+        heights: dict[int, int] = {}
+        for index, child in enumerate(visible_children):
+            margin = child.styles.margin
+            gap = margin.top if index == 0 else max(prev_bottom, margin.top)
+            child_h = child.region.height
+            if child_h <= 0:
+                style_h = child.styles.height
+                child_h = int(style_h.value) if style_h is not None and style_h.is_cells else 1
+            heights[id(child)] = child_h
+            needed += gap + child_h
+            prev_bottom = margin.bottom
+        needed += prev_bottom
+        excess = needed - inner_budget
+        if excess > 0 and clampable:
+            # Shrink help and preview blocks down to at least 1 row each so
+            # Input and Save/Cancel action rows stay visible inside the card.
+            for child in clampable:
+                cur = heights.get(id(child), 1)
+                reducible = max(0, cur - 1)
+                if reducible > 0 and excess > 0:
+                    take = min(reducible, excess)
+                    child.styles.max_height = max(1, cur - take)
+                    excess -= take
+        return
 
     min_h = body.styles.min_height
     min_body = int(min_h.value) if min_h is not None and min_h.is_cells else 3

@@ -105,10 +105,18 @@ class ChaptersScreen(ModalScreen[None]):
         if not self.is_attached:
             return
         listing = self.query_one("#chapter-list", VerticalScroll)
-        self.query_one("#chapter-previous", Button).disabled = listing.scroll_y <= 0
-        self.query_one("#chapter-next", Button).disabled = (
+        was_focused = self.focused
+        prev_btn = self.query_one("#chapter-previous", Button)
+        next_btn = self.query_one("#chapter-next", Button)
+        prev_btn.disabled = listing.scroll_y <= 0
+        next_btn.disabled = (
             listing.max_scroll_y <= 0 or listing.scroll_y >= listing.max_scroll_y
         )
+        if was_focused is not None and getattr(was_focused, "disabled", False):
+            for candidate in (next_btn, prev_btn, listing):
+                if not getattr(candidate, "disabled", False):
+                    candidate.focus()
+                    break
 
     def action_scroll(self, delta: int) -> None:
         self.query_one("#chapter-list", VerticalScroll).scroll_relative(

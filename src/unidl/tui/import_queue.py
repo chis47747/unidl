@@ -121,6 +121,7 @@ class ImportQueueScreen(Screen[None]):
         self.items: list[ImportQueueItem] = []
         self._rows: list[tuple[Path, exports.Document | None, str]] = []
         self._drawing = False
+        self._discard_armed = False
         self._scan_generation = 0
 
     def compose(self) -> ComposeResult:
@@ -280,6 +281,7 @@ class ImportQueueScreen(Screen[None]):
 
     def _sync_actions(self) -> None:
         index = self._queue_index()
+        was_focused = self.focused
         for identifier, key, enabled in (
             ("queue-up", "up", index is not None and index > 0),
             ("queue-down", "down", index is not None and index + 1 < len(self.items)),
@@ -295,6 +297,13 @@ class ImportQueueScreen(Screen[None]):
             button.label = f"▶ {label}" if key == "start" else label
             button.tooltip = full
             button.disabled = not enabled
+        if was_focused is not None and getattr(was_focused, "disabled", False):
+            target = (
+                self.query_one("#import-queue-items", OptionList)
+                if self.items
+                else self.query_one("#import-queue-files", OptionList)
+            )
+            target.focus()
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "import-queue-items":
@@ -340,6 +349,7 @@ class ImportQueueScreen(Screen[None]):
         )
 
     def _render_queue(self) -> None:
+        self._discard_armed = False
         listing = self.query_one("#import-queue-items", OptionList)
         previous = listing.highlighted
         self._drawing = True
@@ -409,6 +419,23 @@ class ImportQueueScreen(Screen[None]):
         if action := actions.get(event.button.id):
             event.stop()
             action()
+
+    def go_back(self) -> bool:
+        if self.items and not self._discard_armed:
+            self._discard_armed = True
+            self.notify(
+                tr(
+                    "confirm.discard_queue",
+                    count=len(self.items),
+                    default=f"Queue has {len(self.items)} item(s) — press ^b again to leave and clear",
+                ),
+                severity="warning",
+                timeout=4,
+            )
+            return True
+        if self.app.screen is self:
+            self.dismiss(None)
+        return True
 
 
 def build_import_service(app, document: exports.Document):

@@ -44,6 +44,7 @@ from ..core.devreload import ReloadError
 from ..core.i18n import cell_width, get_translator, phrase, tr
 from ..core.output_paths import finished_download_root
 from ..core.service import Service
+from ..core.terminal_cells import crop, fit_middle
 from . import banner
 from .askhost import MODE_LABEL as _MODE_LABEL
 from .bidi import escape_markup, visual_markup
@@ -460,14 +461,30 @@ class HomeScreen(Screen):
         point the user has picked a platform, signed in and chosen an episode. Said
         here, it costs two rows once, and it goes away the moment a device exists.
         """
+        compact = (
+            self.app.has_class("short")
+            or (self.size.height or self.app.size.height or 30) < 28
+        )
+        avail = max(36, (self.size.width or self.app.size.width or 80) - 8)
+
+        def _fit_line(text: str) -> str:
+            if cell_width(text) <= avail:
+                return text
+            return crop(text, max(1, avail - 1)) + "…"
+
         download_note = self.query_one("#download-setup-note", StatusChip)
         download_note.display = not self.app.globals.get("download_location_confirmed", False)
         if download_note.display:
             folder = str(finished_download_root(self.app.config, self.app.globals))
-            download_note.update(
-                f"[$accent]{escape_markup(tr('home.download_location', path=folder))}[/]\n"
-                f"[$dim]{escape_markup(tr('home.download_location_hint'))}[/]"
-            )
+            if compact:
+                shown = fit_middle(folder, max(16, avail - 24), head_share=0.45)
+                line = _fit_line(tr("home.download_location", path=shown))
+                download_note.update(f"[$accent]{escape_markup(line)}[/]")
+            else:
+                download_note.update(
+                    f"[$accent]{escape_markup(tr('home.download_location', path=folder))}[/]\n"
+                    f"[$dim]{escape_markup(tr('home.download_location_hint'))}[/]"
+                )
         found = self.query("#setup-note")
         service_found = self.query("#service-setup-note")
         if not found or not service_found:
@@ -476,10 +493,14 @@ class HomeScreen(Screen):
         service_note = service_found.first(StatusChip)
         if not self.app.registry.all():
             folder = service_catalog.user_service_root(self.app.config.paths.home)
-            service_note.update(
-                f"[$warn]{tr('home.setup_services')}[/]\n"
-                f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
-            )
+            if compact:
+                line = _fit_line(tr("home.setup_services"))
+                service_note.update(f"[$warn]{escape_markup(line)}[/]")
+            else:
+                service_note.update(
+                    f"[$warn]{tr('home.setup_services')}[/]\n"
+                    f"[$dim]{tr('home.setup_services_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
+                )
             service_note.display = True
         else:
             service_note.display = False
@@ -487,10 +508,20 @@ class HomeScreen(Screen):
             note.display = False
         else:
             folder = self.app.config.paths.cdm
-            note.update(
-                f"[$warn]{tr('home.setup_cdm')}[/] [$muted]· {tr('home.setup_cdm_detail')}[/]\n"
-                f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
-            )
+            if compact:
+                lead = tr("home.setup_cdm")
+                detail = tr("home.setup_cdm_detail")
+                joined = _fit_line(f"{lead} · {detail}")
+                if joined.startswith(lead) and len(joined) > len(lead):
+                    rest = joined[len(lead):]
+                    note.update(f"[$warn]{escape_markup(lead)}[/][$muted]{escape_markup(rest)}[/]")
+                else:
+                    note.update(f"[$warn]{escape_markup(joined)}[/]")
+            else:
+                note.update(
+                    f"[$warn]{tr('home.setup_cdm')}[/] [$muted]· {tr('home.setup_cdm_detail')}[/]\n"
+                    f"[$dim]{tr('home.setup_cdm_hint', folder=f'[$accent]{visual_markup(str(folder))}[/][$dim]')}[/]"
+                )
             note.display = True
 
     def _set_chip(self, chip_id: str, markup: str, plain: str) -> bool:
@@ -766,10 +797,11 @@ class HomeScreen(Screen):
         return max(1, min(MAX_COLUMNS, (width - 1) // CELL_WIDTH))
 
     def on_resize(self) -> None:
-        self.refresh_banner()
-        self._fit_statusline()
         if not self.USES_SERVICE_GRID:
             return
+        self.refresh_banner()
+        self._fit_statusline()
+        self._render_setup_note()
         columns = self._column_count()
         if columns == self._columns:
             return

@@ -115,7 +115,6 @@ def _rank(service: type[Service], needle: str) -> int:
 
 class GlobalSearchScreen(Screen):
     BINDINGS = [
-        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("ctrl+f", "app.global_search", "Search", show=False),
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
@@ -882,18 +881,17 @@ class GlobalSearchScreen(Screen):
             return
         if row.kind == "service" and row.service is not None:
             query = self.query_one("#query", Input).value.strip()
-            self.app.pop_screen()
             if query.lower().startswith(("http://", "https://")):
-                self.app.open_service(row.service, target=query)
+                self.app.open_service(row.service, target=query, replace_screen=self)
             elif (
                 row.service.SUPPORTS_SEARCH
                 and query
                 and not normalize_hex(query)
                 and _rank(row.service, query.lower()) != 0
             ):
-                self.app.open_service(row.service, search=query)
+                self.app.open_service(row.service, search=query, replace_screen=self)
             else:
-                self.app.open_service(row.service)
+                self.app.open_service(row.service, replace_screen=self)
             return
         if row.kind == "key" and row.record is not None:
             self._copy(row.record)

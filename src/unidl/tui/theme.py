@@ -611,6 +611,14 @@ Screen {
     color: $gutter;
     text-style: none;
 }
+#chrome.tight .chrome-button {
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+#chrome.compact .chrome-button {
+    padding: 0 1;
+    margin: 0;
+}
 
 /* ----------------------------------------------------------------- header */
 #banner {

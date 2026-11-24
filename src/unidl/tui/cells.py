@@ -16,6 +16,7 @@ from textual.widgets import Static
 class ServiceCell(Static):
     """One service. Focusable so the keyboard works, clickable so the mouse does."""
 
+    ALLOW_SELECT = False
     can_focus = True
 
     BINDINGS = [Binding("enter", "choose", "Open", show=False)]

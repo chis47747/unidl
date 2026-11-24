@@ -117,6 +117,7 @@ class _Editor(ModalScreen[Any]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, "#modal-card", "OptionList")
@@ -147,7 +148,7 @@ class _ChoiceEditor(_Editor):
         yield OptionList(
             *[
                 Option(
-                    f"{'>' if option.value == self.current else ' '} {option_label(self.setting, option)}",
+                    f"{'>' if option.value == self.current else ' '} {escape_markup(option_label(self.setting, option))}",
                     id=str(index),
                 )
                 for index, option in enumerate(self.setting.options)
@@ -668,9 +669,14 @@ class _TextEditor(_Editor):
         Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
+    def __init__(self, setting: Setting, current: Any):
+        super().__init__(setting, current)
+        self._initial_text = "" if current is None else str(current)
+        self._discard_armed = False
+
     def compose_editor(self) -> ComposeResult:
         yield Input(
-            value="" if self.current is None else str(self.current),
+            value=self._initial_text,
             placeholder=tr("settings.placeholder"),
             classes="ask-input",
         )
@@ -681,7 +687,12 @@ class _TextEditor(_Editor):
             yield Button(phrase("Cancel"), id="modal-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one(Input).focus()
+
+    def on_input_changed(self, _event: Input.Changed) -> None:
+        self._discard_armed = False
 
     def _submit(self, value: str) -> None:
         problems = validate_setting_value(self.setting, value)
@@ -701,6 +712,18 @@ class _TextEditor(_Editor):
 
     def action_save(self) -> None:
         self._submit(self.query_one(Input).value)
+
+    def action_cancel(self) -> None:
+        field = self.query_one(Input)
+        if field.value != self._initial_text and not self._discard_armed:
+            self._discard_armed = True
+            self.notify(
+                tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                severity="warning",
+                timeout=4,
+            )
+            return
+        super().action_cancel()
 
     def _handle_button(self, button_id: str) -> None:
         if button_id == "modal-save":
@@ -1316,6 +1339,7 @@ class SettingsScreen(Screen):
             if spec.kind == "action":
                 return
             if spec.inherit_global and scope is not self.globals:
+                previous = scope.get(spec.key)
                 scope.clear(spec.key)
                 store_problem = getattr(scope._store, "problem", "")
                 if store_problem:
@@ -1328,7 +1352,11 @@ class SettingsScreen(Screen):
                     self.rebuild()
                     return
                 self.rebuild()
-                self.set_hint(tr("settings.inherited_global", label=setting_label(spec)))
+                note = tr("settings.inherited_global", label=setting_label(spec))
+                if spec.resets_session and self.service is not None and scope.get(spec.key) != previous:
+                    self.service.logout()
+                    note += tr("settings.signed_out")
+                self.set_hint(note)
                 return
             self._apply(spec, scope, spec.default)
 

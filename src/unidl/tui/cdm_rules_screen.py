@@ -73,7 +73,7 @@ class CdmRulesScreen(Screen[str | None]):
         self._rows: list[Rule | str | None] = []
 
     def compose(self) -> ComposeResult:
-        yield Chrome(can_go_back=True, show_settings=False)
+        yield Chrome(can_go_back=True, show_search=False, show_settings=False)
         yield Static("", id="rules-head")
         yield Static("", id="rules-note")
         yield OptionList(id="rules-list")

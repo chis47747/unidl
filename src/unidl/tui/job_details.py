@@ -205,8 +205,11 @@ class JobDetailsScreen(ModalScreen[None]):
         if body != self._last_body and (not selecting or self._last_body is None):
             self._last_body = body
             self.query_one("#job-modal-body", Static).update(Text(visual_text(body)))
-        self.query_one("#job-previous", Button).disabled = index <= 0
-        self.query_one("#job-next", Button).disabled = index < 0 or index >= len(jobs) - 1
+        was_focused = self.focused
+        prev_btn = self.query_one("#job-previous", Button)
+        next_btn = self.query_one("#job-next", Button)
+        prev_btn.disabled = index <= 0
+        next_btn.disabled = index < 0 or index >= len(jobs) - 1
         retry = self.query_one("#job-retry", Button)
         retry.display = bool(getattr(job, "retryable", False))
         retry.disabled = bool(
@@ -215,6 +218,13 @@ class JobDetailsScreen(ModalScreen[None]):
             or getattr(self.controller, "_retry_pending", False)
             or getattr(self.controller, "aborted", False)
         )
+        if was_focused is not None and (
+            getattr(was_focused, "disabled", False) or not getattr(was_focused, "display", True)
+        ):
+            for candidate in (next_btn, prev_btn, retry, self.query_one("#job-modal-scroll", VerticalScroll)):
+                if getattr(candidate, "display", True) and not getattr(candidate, "disabled", False):
+                    candidate.focus()
+                    break
 
     def action_scroll(self, delta: int) -> None:
         self.query_one("#job-modal-scroll", VerticalScroll).scroll_relative(y=delta, animate=False)

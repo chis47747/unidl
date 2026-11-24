@@ -217,6 +217,7 @@ class AskHost(Screen):
         #: all - has to be laid out again or its long lines keep the wrapping of a
         #: size the pane no longer is.
         self._drawn_width = 0
+        self._log_dirty = False
         self._reflow_timer: Timer | None = None
         #: The identity row's segments, as (markup, plain) pairs. Kept because
         #: building them asks the service for its login state, which reads the token
@@ -296,6 +297,18 @@ class AskHost(Screen):
         if found:
             found.first(KeyBar).render_pairs(*self.key_hints())
 
+    def _on_host_mount(self) -> None:
+        """Subclass hook called once after :meth:`on_mount`."""
+
+    def _on_host_resume(self, _event: events.ScreenResume) -> None:
+        """Subclass hook called once after :meth:`on_screen_resume`."""
+
+    def _on_host_unmount(self) -> None:
+        """Subclass hook called once before :meth:`on_unmount` tears down."""
+
+    def _on_host_resize(self) -> None:
+        """Subclass hook called once after :meth:`on_resize`."""
+
     def on_mount(self) -> None:
         self.refresh_after_settings()
         self._render_waiting()
@@ -310,11 +323,13 @@ class AskHost(Screen):
         signal = getattr(self.app, "theme_changed_signal", None)
         if signal is not None:
             signal.subscribe(self, self._theme_changed)
+        self._on_host_mount()
 
-    def on_screen_resume(self, _event: events.ScreenResume) -> None:
+    def on_screen_resume(self, event: events.ScreenResume) -> None:
         self.call_after_refresh(self.controller.resume_deferred_leave)
         if self._current_ask is not None and self.app.screen is self:
             self.call_after_refresh(self._focus_mounted_ask)
+        self._on_host_resume(event)
 
     def _focus_mounted_ask(self) -> None:
         if self._current_ask is not None and self.is_attached and self.app.screen is self:
@@ -330,6 +345,10 @@ class AskHost(Screen):
         self.refresh_after_settings()
 
     def on_unmount(self) -> None:
+        self._on_host_unmount()
+        signal = getattr(self.app, "theme_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
         self.controller.detach(self)
         self.release()
 
@@ -578,6 +597,16 @@ class AskHost(Screen):
         if not log:
             return
         widget = log.first(SelectableLog)
+        if self._log_state == "collapsed" or widget.scrollable_content_region.width <= 0:
+            # A hidden or zero-width SelectableLog renders Table rows into empty
+            # strips. Defer drawing until the pane expands or finishes layout.
+            self._log_dirty = True
+            self._last_line = renderable
+            self._log_lines += 1
+            self._reveal_log()
+            self._sync_pulse()
+            self.call_after_refresh(self._reflow_log)
+            return
         # The line that was newest is not any more, so whatever it was doing has
         # been overtaken: settle it before the new one goes under it.
         self._settle_last(widget)
@@ -600,6 +629,7 @@ class AskHost(Screen):
         if self._reflow_timer is not None:
             self._reflow_timer.stop()
         self._reflow_timer = self.set_timer(REFLOW_SECONDS, self._refit)
+        self._on_host_resize()
 
     def _refit(self) -> None:
         """The log's wrapping, and the two rows that drop segments to fit.
@@ -629,7 +659,7 @@ class AskHost(Screen):
             return
         widget = log.first(SelectableLog)
         width = widget.scrollable_content_region.width
-        if width <= 0 or width == self._drawn_width:
+        if width <= 0 or (width == self._drawn_width and not self._log_dirty):
             return
         snapshot = getattr(self.controller, "log_snapshot", None)
         lines = snapshot() if callable(snapshot) else list(getattr(self.controller, "log_lines", None) or ())
@@ -640,6 +670,7 @@ class AskHost(Screen):
         if widget.has_selection:
             return
         self._drawn_width = width
+        self._log_dirty = False
         if not lines:
             return
         widget.clear()
@@ -739,11 +770,15 @@ class AskHost(Screen):
         target = pane.first()
         if target.has_class("empty"):
             return
+        was_collapsed = self._log_state == "collapsed"
         self._log_state = LOG_STATES[(LOG_STATES.index(self._log_state) + 1) % len(LOG_STATES)]
         target.set_class(self._log_state == "tall", "tall")
         target.set_class(self._log_state == "collapsed", "collapsed")
         self._render_log_header()
         self.refresh_keys()
+        if was_collapsed and self._log_state != "collapsed":
+            self._drawn_width = 0
+            self.call_after_refresh(self._reflow_log)
 
     def action_share_log(self) -> None:
         """Put the whole log on the clipboard, with the secrets taken out.
@@ -878,6 +913,11 @@ class AskHost(Screen):
             "batch_busy",
             controller.job_running or controller._retry_pending,
         )
+        batch_paused = bool(getattr(controller, "batch_paused", False))
+        if batch_paused:
+            if getattr(controller, "can_retry_stopped", False):
+                hints.append(("^r", "run it again"))
+            return hints
         rescuable = sum(1 for job in controller.jobs if job.retryable)
         if rescuable and not busy:
             hints.append(

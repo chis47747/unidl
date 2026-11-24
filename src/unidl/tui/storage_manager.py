@@ -27,7 +27,7 @@ from ..core.output_paths import finished_download_root, render_episode_folder, v
 from ..core.settings import Settings
 from ..core.terminal_cells import fit_middle
 from .bidi import escape_markup, visual_markup
-from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
+from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .settings_layout import SettingRow, label_width, setting_row
 
@@ -149,11 +149,14 @@ class _StorageEditor(ModalScreen[str | None]):
         row: StorageRow,
         value: str,
         preview: Callable[[str], str],
+        validator: Callable[[str], list[str]] | None = None,
     ) -> None:
         super().__init__()
         self.row = row
         self.value = value
         self.preview = preview
+        self.validator = validator
+        self._discard_armed = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-card"):
@@ -180,20 +183,47 @@ class _StorageEditor(ModalScreen[str | None]):
         field = self.query_one("#storage-editor-input", Input)
         field.focus()
         self._show_preview(field.value)
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, "#modal-card")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
+        self._discard_armed = False
         self._show_preview(event.value)
+        self.call_after_refresh(self._fit_modal)
 
     def _show_preview(self, value: str) -> None:
         self.query_one("#storage-editor-preview", Static).update(self.preview(value))
 
+    def _submit(self, value: str) -> None:
+        if self.validator is not None:
+            problems = self.validator(value)
+            if problems:
+                self.notify(
+                    "  ·  ".join(problems),
+                    title=tr(
+                        "storage.notify.not_saved",
+                        label=tr(f"storage.row.{self.row.key}", default=self.row.label),
+                    ),
+                    severity="warning",
+                    timeout=8,
+                )
+                return
+        self.dismiss(value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.dismiss(event.value)
+        self._submit(event.value)
 
     def action_save(self) -> None:
-        self.dismiss(self.query_one("#storage-editor-input", Input).value)
+        self._submit(self.query_one("#storage-editor-input", Input).value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -203,10 +233,20 @@ class _StorageEditor(ModalScreen[str | None]):
             self.action_cancel()
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        field = self.query_one("#storage-editor-input", Input)
+        if field.value != self.value and not self._discard_armed:
+            self._discard_armed = True
+            self.notify(
+                tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                severity="warning",
+                timeout=4,
+            )
+            return
+        if self.app.screen is self:
+            self.dismiss(None)
 
     def go_back(self) -> bool:
-        self.dismiss(None)
+        self.action_cancel()
         return True
 
 
@@ -246,6 +286,7 @@ class StorageManagerScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.rebuild()
+        self.call_after_refresh(self.rebuild)
         self.query_one("#storage-list", OptionList).focus()
 
     def on_resize(self) -> None:
@@ -311,6 +352,7 @@ class StorageManagerScreen(Screen[None]):
         )
 
     def _row_markup(self, row: StorageRow) -> SettingRow:
+        option_list = self.query_one("#storage-list", OptionList)
         value, source = self._display_value(row)
         compact = self.app.has_class("short") or self.size.width < 96
         state_text = tr("storage.read_only") if not row.editable else source
@@ -320,18 +362,25 @@ class StorageManagerScreen(Screen[None]):
         show_state = not (compact and row.editable)
         state = f"  [$dim]{state_text}[/]" if show_state else ""
         label = tr(f"storage.row.{row.key}", default=row.label)
-        available = max(
-            18,
-            (self.size.width or 80)
-            - cell_width(label)
-            - (cell_width(state_text) if show_state else 0)
-            - 12,
+        longest = label_width(
+            tr(f"storage.row.{item.key}", default=item.label) for item in self._rows
         )
+        # Mirror SettingRow._columns() exactly so shortened editable paths fit on
+        # a single row alongside the source badge without wrapping onto line 2.
+        list_width = option_list.content_region.width or max(40, (self.size.width or 80) - 6)
+        usable_width = max(1, (list_width - 2) - option_list.styles.scrollbar_size_vertical)
+        indent = min(4, max(0, usable_width - 5))
+        usable = usable_width - indent - 2
+        label_col = max(1, min(longest, usable // 2))
+        value_col = max(1, usable - label_col)
+        state_cost = (2 + cell_width(state_text)) if show_state else 0
+        available = max(12, value_col - state_cost)
         shown_value = self._short(value, available) if row.editable else value
         return setting_row(
-            self.query_one("#storage-list", OptionList), label,
+            option_list,
+            label,
             f"[$accent]{escape_markup(shown_value)}[/]{state}",
-            label_width(tr(f"storage.row.{item.key}", default=item.label) for item in self._rows),
+            longest,
             indent=4,
         )
 
@@ -431,9 +480,27 @@ class StorageManagerScreen(Screen[None]):
             self.app.push_screen(_ChoiceEditor(spec, self.globals.get(row.key)), finished)
             return
         self.app.push_screen(
-            _StorageEditor(row, self._editor_value(row), lambda value: self._edit_preview(row, value)),
+            _StorageEditor(
+                row,
+                self._editor_value(row),
+                lambda value: self._edit_preview(row, value),
+                validator=lambda value: self._validate_value(row, value),
+            ),
             finished,
         )
+
+    def _validate_value(self, row: StorageRow, value: str) -> list[str]:
+        text = str(value or "").strip()
+        if row.kind == "template":
+            return template.validate(text, _TEMPLATE_FIELDS[row.key])
+        if row.kind == "folder-template":
+            return validate_episode_folder_template(text)
+        if row.kind in {"setting-path", "config-path"} and text:
+            try:
+                self._normalise_path(text)
+            except ValueError as exc:
+                return [str(exc)]
+        return []
 
     def action_reset(self) -> None:
         row = self._selected()

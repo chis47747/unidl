@@ -503,11 +503,8 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         Binding("tab", "app.focus_next", show=False),
         Binding("shift+tab", "app.focus_previous", show=False),
         Binding("ctrl+c,super+c", "screen.copy_text", show=False),
-        Binding("b", "app.global_back", show=False),
         Binding("ctrl+b", "app.global_back", show=False),
-        Binding("s", "app.global_settings", show=False),
         Binding("ctrl+s", "app.global_settings", show=False),
-        Binding("d", "cycle_mode", show=False),
         Binding("ctrl+f", "app.global_search", show=False),
         Binding("escape", "app.global_quit", show=False),
         Binding("up", "move_result(-1)", show=False),
@@ -612,6 +609,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self.refresh_banner()
         self._fit_statusline()
         self._fit_beta()
+        self._render_setup_note()
 
     def _fit_beta(self) -> None:
         self.set_class(self.size.width < 80, "narrow")
@@ -1122,7 +1120,10 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 options.clear_options()
                 options.add_options(Option(prompt) for prompt in prompts)
             self._results, self._result_prompts = visible, prompts
+            was_focused = options.has_focus
             options.display = bool(visible)
+            if not visible and was_focused:
+                self.focus_search()
             empty = self.query_one("#beta-empty", Static)
             empty.display = bool(not visible and (mode == "exports" or query and query != "/"))
             if empty.display:

@@ -72,6 +72,7 @@ class CdmScreen(Screen[str | None]):
         Binding("ctrl+o", "reveal", "Open the folder", show=True),
         Binding("ctrl+e", "edit_remote", "Manage CDMs", show=True),
         Binding("ctrl+r", "reload", "Reload devices", show=True),
+        Binding("tab", "cycle_source", "Local / remote", show=False, priority=True),
         # the filter has the focus, so list movement is forwarded from here
         Binding("up", "cursor(-1)", "Up", show=False),
         Binding("down", "cursor(1)", "Down", show=False),
@@ -224,7 +225,11 @@ class CdmScreen(Screen[str | None]):
             detail = tr("cdm.hint.remote") if self._source == "remote" else tr("cdm.hint.local")
             # "all" is the name of a tab, not a kind of device: on that tab this
             # said "no all devices found", which reads as a bug in the sentence.
-            kind = "" if self._source == "all" else f"{self._source} "
+            if self._source == "all":
+                kind = ""
+            else:
+                word = tr(f"cdm.tab.{self._source}", default=self._source)
+                kind = f"{word.lower()} " if word.isascii() else word
             if self.only:
                 missing = tr(
                     "cdm.no_system_devices",
@@ -363,6 +368,11 @@ class CdmScreen(Screen[str | None]):
         event.stop()
         self._source = str(event.tab.id or "source-all").removeprefix("source-")
         self.rebuild(self._needle)
+
+    def action_cycle_source(self) -> None:
+        order = ("all", "local", "remote")
+        nxt = order[(order.index(self._source) + 1) % len(order)] if self._source in order else "all"
+        self.query_one("#cdm-source", Tabs).active = f"source-{nxt}"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()

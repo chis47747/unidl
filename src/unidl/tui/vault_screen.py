@@ -111,6 +111,7 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
         self._descriptors: list[vaults.VaultDescriptor] = []
         self._write_targets: tuple[str, ...] = ()
         self._confirm_signature: tuple[str, str, str, tuple[str, ...]] | None = None
+        self._discard_armed = False
         self._busy = False
         self._service_rows: list[tuple[str, str, str]] = []
         self._visible_services: list[str] = []
@@ -435,10 +436,12 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
         badge.update(f"[$ok]✓ {len(pairs)}[/]" if pairs else "")
 
     def on_text_area_changed(self, _event: TextArea.Changed) -> None:
+        self._discard_armed = False
         self._update_pair_count()
         self._reset_confirmation()
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        self._discard_armed = False
         if event.input.id == "vault-service-query":
             if event.value.strip().casefold() != self._selected_service.casefold():
                 self._selected_service = ""
@@ -751,11 +754,27 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
         elif event.button.id == "vault-cancel":
             self.action_cancel()
 
+    def _has_unsaved_input(self) -> bool:
+        pairs = self.query("#vault-pairs")
+        title = self.query("#vault-title")
+        pair_text = pairs.first(TextArea).text.strip() if pairs else ""
+        title_text = title.first(Input).value.strip() if title else ""
+        return bool((pair_text and pair_text != self.initial.strip()) or title_text)
+
     def action_cancel(self) -> None:
         if self._busy:
             self.notify(tr("vault.busy"), timeout=3)
             return
-        self.dismiss(None)
+        if self._has_unsaved_input() and not self._discard_armed:
+            self._discard_armed = True
+            self.notify(
+                tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                severity="warning",
+                timeout=4,
+            )
+            return
+        if self.app.screen is self:
+            self.dismiss(None)
 
     def go_back(self) -> bool:
         self.action_cancel()

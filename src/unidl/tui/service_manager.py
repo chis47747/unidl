@@ -71,6 +71,7 @@ class _ChapterPolicyScreen(ModalScreen[None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".service-policy-card", "#service-chapters-list")
@@ -139,6 +140,7 @@ class _AttachmentPolicyScreen(ModalScreen[None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".service-policy-card", "#service-attachments-list")
@@ -217,6 +219,7 @@ class _BitratePolicyScreen(ModalScreen[None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".service-policy-card", "#service-bitrate-list")
@@ -308,6 +311,7 @@ class _RegistrationEditor(ModalScreen[str | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".service-policy-card", "#service-registration-list")
@@ -363,6 +367,7 @@ class _ExportManifestEditor(ModalScreen[None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".service-policy-card", "#service-export-list")

@@ -109,7 +109,16 @@ class _RouteEditor(ModalScreen[str | None]):
                 yield Button(phrase("Cancel"), id="proxy-editor-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one("#proxy-route-input", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
@@ -187,6 +196,7 @@ class _NamedProxyEditor(ModalScreen[dict[str, Any] | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
@@ -291,6 +301,7 @@ class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
@@ -402,6 +413,7 @@ class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
@@ -590,6 +602,7 @@ class _ProviderTypeEditor(ModalScreen[str | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, ".proxy-editor-card", "#proxy-provider-types")
@@ -883,6 +896,38 @@ class ProxyManagerScreen(Screen[None]):
             actions["authorize"].disabled = not (is_provider and row.name == "expressvpn")
         actions["test"].display = True
         actions["test"].disabled = not bool(self.globals.get("proxy") or "")
+        bar = self.query(KeyBar)
+        if bar:
+            if self._tab == "routing":
+                pairs = (
+                    ("enter", "edit"),
+                    ("space", "toggle"),
+                    ("t", "test"),
+                    ("^b", "back"),
+                    ("esc", "quit"),
+                )
+            elif self._tab == "endpoints":
+                pairs = (
+                    ("enter", "edit"),
+                    ("a", "add"),
+                    ("d", "delete"),
+                    ("space", "toggle"),
+                    ("t", "test"),
+                    ("^b", "back"),
+                    ("esc", "quit"),
+                )
+            else:
+                pairs = (
+                    ("enter", "edit"),
+                    ("a", "add"),
+                    ("l", "authorize"),
+                    ("d", "delete"),
+                    ("space", "toggle"),
+                    ("t", "test"),
+                    ("^b", "back"),
+                    ("esc", "quit"),
+                )
+            bar.first(KeyBar).render_pairs(*pairs)
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         event.stop()

@@ -799,7 +799,8 @@ class ResourceManagerScreen(Screen[None]):
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Use / edit", show=True),
         Binding("ctrl+n", "add", "Add remote", show=True),
-        Binding("ctrl+i", "add_local", "Import local DBs", show=True),
+        Binding("i", "add_local", "Import local DBs", show=True),
+        Binding("ctrl+o", "add_local", "Import local DBs", show=False),
         Binding("ctrl+e", "edit", "Edit", show=True),
         Binding("ctrl+d", "toggle", "Enable / disable", show=True),
         Binding("ctrl+x", "delete", "Delete", show=True),
@@ -835,7 +836,7 @@ class ResourceManagerScreen(Screen[None]):
         yield KeyBar(
             ("enter", "use / edit"),
             ("^n", "add remote"),
-            ("^i", "import local DBs"),
+            ("i", "import local DBs"),
             ("^e", "edit"),
             ("^d", "enable / disable"),
             ("^x", "delete"),
@@ -1068,6 +1069,30 @@ class ResourceManagerScreen(Screen[None]):
         self.query_one("#resource-edit", Button).disabled = selected is None or selected.kind in {"drm-system", "cdm-rules", "cdm-choice", "cdm-local", "vault-local", "vault-discovered"}
         self.query_one("#resource-toggle", Button).disabled = selected is None or selected.kind in {"drm-system", "cdm-rules", "cdm-choice", "cdm-local"}
         self.query_one("#resource-delete", Button).disabled = selected is None or selected.kind not in {"cdm-remote", "vault-remote"}
+        bar = self.query(KeyBar)
+        if bar:
+            if vault_tab:
+                pairs = (
+                    ("enter", "enable / disable"),
+                    ("^n", "add remote"),
+                    ("i", "import local DBs"),
+                    ("^e", "edit"),
+                    ("^x", "delete"),
+                    ("p", "vault policy"),
+                    ("^b", "back"),
+                    ("esc", "quit"),
+                )
+            else:
+                pairs = (
+                    ("enter", "use / edit"),
+                    ("^n", "add remote"),
+                    ("^e", "edit"),
+                    ("^d", "enable / disable"),
+                    ("^x", "delete"),
+                    ("^b", "back"),
+                    ("esc", "quit"),
+                )
+            bar.first(KeyBar).render_pairs(*pairs)
 
     # ---------------------------------------------------------------- events
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:

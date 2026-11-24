@@ -53,10 +53,19 @@ class ClipboardInput(TextualInput):
         else:
             raise SkipAction()
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape" and self.value and not self.disabled:
+            from textual.screen import ModalScreen
+
+            if not isinstance(self.screen, ModalScreen):
+                event.stop()
+                event.prevent_default()
+                self.value = ""
+
     def action_cut(self) -> None:
         selected_text = self.selected_text
-        self.app.copy_to_clipboard(selected_text)
         if selected_text:
+            self.app.copy_to_clipboard(selected_text)
             write_system_clipboard(selected_text)
         self.delete_selection()
 

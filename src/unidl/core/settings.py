@@ -1909,6 +1909,7 @@ class Settings:
     def set(self, key: str, value: Any, *, persist: bool = True) -> bool:
         """Store a value. Returns True when the change should reset the session."""
         spec = self.spec_by_key.get(key)
+        previous = self.get(key)
         if key == "license_action":
             self.clear(key, persist=False)
         coerced = spec.coerce(value) if spec else value
@@ -1920,12 +1921,12 @@ class Settings:
             and coerced == ""
         ):
             self.clear(key, persist=persist)
-            return bool(spec.resets_session)
+            return bool(spec.resets_session and self.get(key) != previous)
         self._overrides.pop(key, None)
         self._store.put(self.service_id, key, coerced)
         if persist:
             self._store.save()
-        return bool(spec and spec.resets_session)
+        return bool(spec and spec.resets_session and coerced != previous)
 
     def clear(self, key: str, *, persist: bool = True) -> None:
         """Remove a service override so an inheriting setting uses its parent."""

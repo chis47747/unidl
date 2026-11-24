@@ -80,6 +80,7 @@ class ReadinessScreen(Screen[None]):
         super().__init__()
         self._report: readiness.Report | None = None
         self._survey_generation = 0
+        self._checking = False
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True)
@@ -116,13 +117,16 @@ class ReadinessScreen(Screen[None]):
     def action_reload(self) -> None:
         # the one thing that really goes and looks again: everything else is
         # answered from what the last survey found
+        if self._checking:
+            return
         self.build(fresh=True, notify=True)
 
     def build(self, *, fresh: bool = False, notify: bool = False) -> None:
         """Survey tools off the UI thread, then paint."""
         self._survey_generation += 1
         generation = self._survey_generation
-        if self._report is None:
+        self._checking = True
+        if self._report is None or fresh:
             palette = self.app.palette
             head = Text()
             head.append(tr("ready.head"), style=f"bold {palette.accent}")
@@ -133,13 +137,17 @@ class ReadinessScreen(Screen[None]):
 
     @work(exclusive=True, group="readiness-survey")
     async def _run_survey(self, *, fresh: bool, notify: bool, generation: int) -> None:
-        report = await asyncio.to_thread(
-            readiness.survey,
-            self.app.config,
-            self.app.registry,
-            fresh=fresh,
-            settings=self.app.globals,
-        )
+        try:
+            report = await asyncio.to_thread(
+                readiness.survey,
+                self.app.config,
+                self.app.registry,
+                fresh=fresh,
+                settings=self.app.globals,
+            )
+        finally:
+            if generation == self._survey_generation:
+                self._checking = False
         if not self.is_attached or generation != self._survey_generation:
             return
         self._report = report
@@ -163,6 +171,7 @@ class ReadinessScreen(Screen[None]):
         self.query_one("#ready-head", Static).update(head)
 
         body = self.query_one("#ready-body", VerticalScroll)
+        saved_scroll_y = body.scroll_y
         body.remove_children()
         rows: list[Static] = []
         for group in readiness.GROUPS:
@@ -178,6 +187,8 @@ class ReadinessScreen(Screen[None]):
             rows.append(Static(heading, classes="ready-group"))
             rows += [Static(self._row(item), classes="ready-row") for item in items]
         body.mount_all(rows)
+        if saved_scroll_y > 0:
+            self.call_after_refresh(lambda: body.scroll_to(y=saved_scroll_y, animate=False))
 
     def _row(self, item: readiness.Item) -> Text:
         """One item: what it is, what was found, and what to do if it was not."""

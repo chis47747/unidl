@@ -3600,6 +3600,12 @@ def _live_pipe_default_audio_args(streams, preference: str = "auto") -> list[str
 def _live_pipe_map_specs(stream, input_index: int) -> list[str]:
     if _stream_has_muxed_audio(stream):
         return [f"{input_index}:v?", f"{input_index}:a?"]
+    # HLS video variants may still contain audio, with audio first in the TS.
+    if getattr(stream, "manifest_type", None) == "hls":
+        if stream.media_type == "video":
+            return [f"{input_index}:v:0"]
+        if stream.media_type == "audio":
+            return [f"{input_index}:a:0"]
     return [f"{input_index}:0"]
 
 

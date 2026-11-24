@@ -27,8 +27,7 @@ class FlowScreen(AskHost):
     WAITING_TEXT = "working - the next prompt will appear here"
     WAITING_TEXT_ID = "ask.waiting.flow"
 
-    def on_screen_resume(self, event) -> None:
-        super().on_screen_resume(event)
+    def _on_host_resume(self, _event) -> None:
         if (
             getattr(self.controller, "_close_flow_on_delivery_dismiss", False)
             and self.controller.delivery is None

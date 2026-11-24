@@ -115,7 +115,6 @@ class SearchRegionScreen(Screen[str]):
     """
 
     BINDINGS = [
-        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "reset", "Default region", show=False),
@@ -235,7 +234,6 @@ class RegionScreen(Screen[list]):
     """
 
     BINDINGS = [
-        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "confirm", "Confirm", show=False),
@@ -354,7 +352,6 @@ class JustWatchScreen(Screen):
     """Search results from JustWatch, for one term."""
 
     BINDINGS = [
-        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("ctrl+f", "app.global_search", "Search", show=False),
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
@@ -372,6 +369,8 @@ class JustWatchScreen(Screen):
         self._titles: list[jw.Title] = []
         self._error = ""
         self._generation = 0
+        self._last_search_region = ""
+        self._last_regions: tuple[str, ...] = ()
 
     def compose(self) -> ComposeResult:
         yield Chrome()
@@ -386,12 +385,35 @@ class JustWatchScreen(Screen):
         yield KeyBar(("enter", "open"), ("^r", "regions"), ("^b", "back"), ("esc", "quit"))
 
     def on_mount(self) -> None:
+        self._last_search_region = self.search_region
+        self._last_regions = tuple(self.regions)
         self._render_chips()
         self.query_one("#result-list", OptionList).add_option(
             Option(f"  [$dim]{tr('justwatch.searching')}[/]", disabled=True)
         )
         self.query_one(FilterBox).display = False
         self.search()
+
+    def on_screen_resume(self, _event) -> None:
+        current_search = self.search_region
+        current_regions = tuple(self.regions)
+        if current_search != self._last_search_region:
+            self._last_search_region = current_search
+            self._last_regions = current_regions
+            self._render_chips()
+            option_list = self.query_one("#result-list", OptionList)
+            option_list.clear_options()
+            option_list.add_option(
+                Option(f"  [$dim]{tr('justwatch.searching')}[/]", disabled=True)
+            )
+            self.search()
+        elif current_regions != self._last_regions:
+            self._last_regions = current_regions
+            self._render_chips()
+            if self._titles or self._error:
+                filter_box = self.query(FilterBox)
+                needle = filter_box.first(FilterBox).value if filter_box else ""
+                self._render_rows(needle)
 
     # ------------------------------------------------------------------ status
     @property
@@ -489,10 +511,16 @@ class JustWatchScreen(Screen):
 
         if self._error:
             option_list.add_option(Option(f"  [$bad]{_safe(self._error)}[/]", disabled=True))
+            self.query_one("#subhead", Static).update(
+                f"[$bad]{tr('justwatch.fetch_failed')}[/]"
+            )
             return
         if not self._titles:
             option_list.add_option(
                 Option(f"  [$dim]{tr('justwatch.nothing', query=_safe(self._query))}[/]", disabled=True)
+            )
+            self.query_one("#subhead", Static).update(
+                f"[$dim]{tr('justwatch.results', count=0, region=self.search_region, count2=len(self.regions))}[/]"
             )
             return
 
@@ -578,6 +606,8 @@ class JustWatchScreen(Screen):
             if not code or code == self.search_region:
                 return
             self.app.globals.set("justwatch_search_region", code)
+            self._last_search_region = self.search_region
+            self._last_regions = tuple(self.regions)
             self._render_chips()
             self.query_one("#result-list", OptionList).clear_options()
             self.query_one("#result-list", OptionList).add_option(
@@ -595,7 +625,6 @@ class AvailabilityScreen(Screen):
     """Who carries one title, region by region."""
 
     BINDINGS = [
-        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("ctrl+f", "app.global_search", "Search", show=False),
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
@@ -612,6 +641,7 @@ class AvailabilityScreen(Screen):
         self._rows: list[tuple[jw.Offer, str | None] | None] = []
         self._error = ""
         self._generation = 0
+        self._last_regions: tuple[str, ...] = ()
 
     def compose(self) -> ComposeResult:
         yield Chrome()
@@ -632,11 +662,24 @@ class AvailabilityScreen(Screen):
         if title.year:
             head += f"  [$gutter]{title.year}[/]"
         self.query_one("#masthead", Static).update(f"{head}  [$dim]{title.kind_label}[/]")
+        self._last_regions = tuple(self.regions)
         self._render_chips()
         self.query_one("#offer-list", OptionList).add_option(
             Option(f"  [$dim]{tr('justwatch.asking')}[/]", disabled=True)
         )
         self.fetch()
+
+    def on_screen_resume(self, _event) -> None:
+        current_regions = tuple(self.regions)
+        if current_regions != self._last_regions:
+            self._last_regions = current_regions
+            self._render_chips()
+            option_list = self.query_one("#offer-list", OptionList)
+            option_list.clear_options()
+            option_list.add_option(
+                Option(f"  [$dim]{tr('justwatch.asking')}[/]", disabled=True)
+            )
+            self.fetch()
 
     @property
     def regions(self) -> list[str]:
@@ -882,6 +925,7 @@ class AvailabilityScreen(Screen):
         def _chosen(codes: list | None) -> None:
             if codes:
                 self.app.globals.set("justwatch_regions", ",".join(codes))
+                self._last_regions = tuple(self.regions)
                 self._render_chips()
                 self.query_one("#offer-list", OptionList).clear_options()
                 self.query_one("#offer-list", OptionList).add_option(
@@ -896,7 +940,7 @@ class AvailabilityScreen(Screen):
 
 
 def _is_home(screen) -> bool:
-    return type(screen).__name__ == "HomeScreen"
+    return type(screen).__name__ in {"HomeScreen", "BetaHomeScreen"}
 
 
 def _fit(text: str, width: int) -> str:

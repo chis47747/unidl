@@ -176,6 +176,7 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, "#vault-target-card", "#vault-target-list")
@@ -221,13 +222,25 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
         return True
 
     def action_apply(self) -> None:
+        enabled_descriptors = [descriptor for descriptor in self.descriptors if descriptor.enabled]
+        if not enabled_descriptors:
+            # No enabled targets to toggle: preserve the existing configuration
+            # instead of overwriting "All" (None) with an explicit empty tuple.
+            self.dismiss(VaultTargetResult(self.current))
+            return
         if self._all is not None and self._all.value:
             self.dismiss(VaultTargetResult(None))
             return
+        initial_keys = (
+            {name.casefold() for name in self.current}
+            if self.current is not None
+            else set()
+        )
         selected = tuple(
             descriptor.name
             for descriptor, box in zip(self.descriptors, self._boxes, strict=True)
-            if descriptor.enabled and box.value
+            if (descriptor.enabled and box.value)
+            or (not descriptor.enabled and descriptor.name.casefold() in initial_keys)
         )
         self.dismiss(VaultTargetResult(selected))
 
@@ -281,6 +294,7 @@ class VaultSearchPicker(ModalScreen[str | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, "#vault-target-card", "#vault-target-list")
@@ -359,6 +373,7 @@ class VaultServicePicker(ModalScreen[str | None]):
 
     def on_resize(self) -> None:
         self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
 
     def _fit_modal(self) -> None:
         fit_modal_card(self, "#vault-target-card", "#vault-target-list")

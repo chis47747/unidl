@@ -20,6 +20,7 @@ flag, the worker itself - lives on the controller.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import threading
 import time
@@ -804,6 +805,14 @@ class SessionController:
         #: the cancellation now in flight is for this one title, not the queue, so
         #: the event is replaced once it has taken effect
         self._skip_one = False
+        #: Esc pauses the queue, either during an active title or its countdown.
+        #: Resume and retry requests are consumed only by the queue's worker.
+        self._batch_paused = False
+        self._batch_condition = threading.Condition()
+        self._batch_resume_requested = False
+        self._batch_retry_job: Job | None = None
+        self._remaining_retries = 0
+        self._last_stopped_job: Job | None = None
 
         #: Open except while a command card is waiting to be read. A command is
         #: the whole result of a command-only run, and the flow carries on the
@@ -944,11 +953,10 @@ class SessionController:
         service, or quitting, leaves a download running with nowhere to report
         and the process waiting on it at shutdown.
         """
-        self.aborted = True
-        self.leaving = True
-        self.batch_cancelled = True
-        self.cancel_event.set()
-        self.pause_event.clear()
+        with self._batch_condition:
+            self.aborted = True
+            self.leaving = True
+            self._cancel_batch_locked()
         self._interrupt_network(include_service=True)
         # The event is the cooperative path; the engine owns the hard-stop path
         # for sockets and external downloader processes.  Keep this call
@@ -1388,6 +1396,80 @@ class SessionController:
     def title_delay_active(self) -> bool:
         return self._title_delay_active
 
+    @property
+    def batch_paused(self) -> bool:
+        return self._batch_paused
+
+    @property
+    def can_resume_batch(self) -> bool:
+        return (
+            self._batch_paused and not self.job_running
+            and not self._batch_resume_requested and self._batch_retry_job is None
+        )
+
+    @property
+    def can_retry_stopped(self) -> bool:
+        job = self._last_stopped_job
+        return self.can_resume_batch and job is not None and job.retryable
+
+    def has_remaining_batch(self) -> bool:
+        """True when unstarted titles remain behind the current download."""
+        if self._remaining_retries:
+            return True
+        if any(job.state == QUEUED for job in self.pending_jobs):
+            return True
+        if self.batch_total is not None and self.batch_total > len(self.jobs):
+            return True
+        return False
+
+    def request_stop_and_pause_batch(self) -> bool:
+        """Pause the queue, interrupting only a title already in flight.
+
+        Unstarted queue rows stay queued instead of becoming unretryable
+        CANCELLED entries. A second Esc, Back, or Abort cancels the batch;
+        Resume continues to the remaining titles; Retry re-runs the stopped row.
+        """
+        with self._batch_condition:
+            if self._batch_stopping() or self.cancel_event.is_set():
+                return False
+            stop_job = self.job_running
+            if not stop_job and (not self._title_delay_active or self._batch_paused):
+                return False
+            self._batch_paused = True
+            self._batch_resume_requested = False
+            self._last_stopped_job = None
+            if stop_job:
+                self.cancel_event.set()
+            self.pause_event.clear()
+            self._batch_condition.notify_all()
+        if not stop_job:
+            self.post_status(tr("delivery.status.title_delay_paused"))
+            self._on_ui(self._refresh_delivery_keys)
+            return True
+        self._interrupt_network()
+        self._shutdown_active_download()
+        self._on_ui(self._cancel_delivery_asks)
+        self.post_log(
+            tr("delivery.cancel.transfer") if getattr(self, "_transfer_active", False)
+            else tr("delivery.cancel.preparing"),
+            "warning",
+        )
+        if self.job_running or self._title_delay_active:
+            self.post_status(
+                tr("delivery.status.stopping_pause", default="Stopping current title and pausing queue…")
+            )
+        self._on_ui(self._refresh_delivery_keys)
+        return True
+
+    def request_resume_batch(self) -> bool:
+        """Wake the queue owner; it resets cancellation after the job ends."""
+        with self._batch_condition:
+            if not self.can_resume_batch or self._batch_stopping():
+                return False
+            self._batch_resume_requested = True
+            self._batch_condition.notify_all()
+        return True
+
     def _refresh_delivery_keys(self) -> None:
         delivery = self.delivery
         if delivery is not None and getattr(delivery, "is_attached", True):
@@ -1403,6 +1485,8 @@ class SessionController:
         ):
             return False
         self.pause_event.set()
+        with self._batch_condition:
+            self._batch_condition.notify_all()
         self.post_log("paused; Resume continues from this point", "warning")
         self.post_status(tr("delivery.status.paused"))
         self._on_ui(self._refresh_delivery_keys)
@@ -1413,6 +1497,8 @@ class SessionController:
         if not self.pause_event.is_set() or self.cancel_event.is_set():
             return False
         self.pause_event.clear()
+        with self._batch_condition:
+            self._batch_condition.notify_all()
         self.post_log("resumed", "ok")
         if self.job_running:
             self.post_status(tr("delivery.status.downloading"))
@@ -1453,15 +1539,14 @@ class SessionController:
         from the per-job event. To stop only what is in flight, see
         :meth:`request_skip`.
         """
-        if self.cancel_event.is_set():
-            return False
-        self.cancel_event.set()
-        self.pause_event.clear()
-        self.batch_cancelled = True
+        with self._batch_condition:
+            if self.cancel_event.is_set() and self.batch_cancelled:
+                return False
+            self._cancel_batch_locked()
+            self.batch_total = None
         self._interrupt_network()
         # Do not authorize/emit the rest of a cancelled batch just to fill its
         # counter. Once this job finishes, delivery can return to its parent.
-        self.batch_total = None
         self._settle_pending(CANCELLED)
         self._shutdown_active_download()
         self.post_log(
@@ -1477,6 +1562,16 @@ class SessionController:
         self._on_ui(self._refresh_delivery_keys)
         return True
 
+    def _cancel_batch_locked(self) -> None:
+        self.batch_cancelled = True
+        self._batch_paused = False
+        self._batch_resume_requested = False
+        self._batch_retry_job = None
+        self._last_stopped_job = None
+        self.cancel_event.set()
+        self.pause_event.clear()
+        self._batch_condition.notify_all()
+
     def _cancel_delivery_asks(self) -> None:
         """Release only download questions, never a service/login prompt."""
         for host in list(self.hosts):
@@ -1491,11 +1586,12 @@ class SessionController:
         stopped has ended - otherwise the next title in the batch would start with
         a cancellation already asked for and end before it began.
         """
-        if not self.job_running or self.cancel_event.is_set():
-            return False
-        self.cancel_event.set()
-        self.pause_event.clear()
-        self._skip_one = True
+        with self._batch_condition:
+            if not self.job_running or self.cancel_event.is_set():
+                return False
+            self.cancel_event.set()
+            self.pause_event.clear()
+            self._skip_one = True
         self._interrupt_network()
         self._shutdown_active_download()
         self._on_ui(self._cancel_delivery_asks)
@@ -1506,11 +1602,22 @@ class SessionController:
 
     def clear_cancel(self) -> None:
         """Forget a cancellation, so the next thing you start is not born dead."""
+        with self._batch_condition:
+            if self.aborted or self.leaving:
+                return
+            self._reset_job_controls()
+            self.batch_cancelled = False
+            self._batch_paused = False
+            self._batch_resume_requested = False
+            self._batch_retry_job = None
+            self._last_stopped_job = None
+
+    def _reset_job_controls(self) -> None:
+        """Prepare fresh job events without altering queue-level intent."""
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
         self.stop_recording_event = threading.Event()
         self._recording_back_requested = False
-        self.batch_cancelled = False
 
     def _release_playback(self, playback: Playback) -> None:
         """Release service-owned playback state on every exit path."""
@@ -2410,8 +2517,50 @@ class SessionController:
         Back always means the page that launched this title.
         """
         self.process(playback, presenter, ctx)
+        if self._batch_paused:
+            self._wait_for_batch_action(presenter, ctx)
         if self.queue_complete:
             raise Back()
+
+    def _batch_stopping(self) -> bool:
+        return self.aborted or self.batch_cancelled or self.leaving
+
+    def _wait_for_batch_action(self, presenter: TextualPresenter, ctx: FlowContext) -> None:
+        """Keep the delay or queue cursor with its worker while paused."""
+        while self._batch_paused and not self._batch_stopping():
+            self.post_status(
+                tr("delivery.status.title_delay_paused")
+                if self._title_delay_active
+                else tr(
+                    "delivery.status.stopped_paused",
+                    default="Paused — ^r retry stopped title · p resume queue · Esc again to cancel batch & quit",
+                )
+            )
+            self._on_ui(self._refresh_delivery_keys)
+            with self._batch_condition:
+                self._batch_condition.wait_for(
+                    lambda: self._batch_stopping() or not self._batch_paused
+                    or self._batch_resume_requested or self._batch_retry_job is not None
+                )
+                if self._batch_stopping() or not self._batch_paused:
+                    return
+                target = self._batch_retry_job
+                self._reset_job_controls()
+                if target is None:
+                    self._batch_paused = False
+                    self._batch_resume_requested = False
+                    self._last_stopped_job = None
+            if target is None:
+                self.post_status("")
+                self.post_log("resumed batch queue", "ok")
+                self._on_ui(self._refresh_delivery_keys)
+                return
+            try:
+                if not self._batch_stopping() and target.retryable:
+                    self._run_retry(target, presenter, ctx)
+            finally:
+                with self._batch_condition:
+                    self._batch_retry_job = None
 
     def process(self, playback: Playback, presenter: TextualPresenter, ctx: FlowContext) -> str:
         """Resolve keys, choose tracks, then download or export. Worker thread."""
@@ -2441,7 +2590,7 @@ class SessionController:
             # The delay belongs to the batch scheduler, before the next title's
             # service preparation/manifest/license work. It is intentionally not
             # part of Engine.run or any per-track worker.
-            self._wait_for_title_delay(playback)
+            self._wait_for_title_delay(playback, presenter, ctx)
         self.run_boundary = False
 
         try:
@@ -2473,32 +2622,51 @@ class SessionController:
             return False
         return parse_title_delay(self.settings.get("title_delay")) is not None
 
-    def _wait_for_title_delay(self, playback: Playback) -> None:
+    def _wait_for_title_delay(
+        self, playback: Playback, presenter: TextualPresenter, ctx: FlowContext,
+    ) -> None:
         """Wait between batch titles while keeping pause/stop responsive."""
         delay = sample_title_delay(self.settings.get("title_delay"))
         if delay is None:
             return
-        self._title_delay_active = True
+        with self._batch_condition:
+            self._title_delay_active = True
         self._on_ui(self._refresh_delivery_keys)
         self.post_log(f"waiting {delay}s before next title: {playback.save_name}")
         try:
-            remaining = delay
-            while remaining > 0:
-                if self.aborted or self.cancel_requested:
-                    return
+            remaining = float(delay)
+            while True:
+                with self._batch_condition:
+                    if self._batch_stopping() or self.cancel_requested or (
+                        remaining <= 0 and not self._batch_paused
+                    ):
+                        # Stop accepting countdown pauses before handing off to the next job.
+                        self._title_delay_active = False
+                        return
+                if self._batch_paused:
+                    self._wait_for_batch_action(presenter, ctx)
+                    continue
                 if self.pause_requested:
                     self.post_status(tr("delivery.status.title_delay_paused"))
-                    while self.pause_requested and not self.cancel_requested and not self.aborted:
-                        self.cancel_event.wait(0.25)
+                    with self._batch_condition:
+                        self._batch_condition.wait_for(
+                            lambda: not self.pause_requested or self.cancel_requested or self.aborted
+                        )
                     continue
                 self.post_status(
-                    tr("delivery.status.title_delay", seconds=remaining)
+                    tr("delivery.status.title_delay", seconds=math.ceil(remaining))
                 )
-                if self.cancel_event.wait(1.0):
-                    return
-                remaining -= 1
+                tick = min(1.0, max(0.0, remaining))
+                with self._batch_condition:
+                    started = time.monotonic()
+                    interrupted = self._batch_condition.wait_for(
+                        lambda: self.cancel_requested or self.pause_requested or self._batch_paused,
+                        timeout=tick,
+                    )
+                    remaining -= min(tick, time.monotonic() - started) if interrupted else tick
         finally:
-            self._title_delay_active = False
+            with self._batch_condition:
+                self._title_delay_active = False
             self.post_status("")
             self._on_ui(self._refresh_delivery_keys)
 
@@ -2508,8 +2676,9 @@ class SessionController:
         Shared by the first attempt and by a retry, so a retried row goes through
         exactly the path it did the first time rather than a second copy of it.
         """
-        network = self._job_network = NetworkCancellation()
-        self.job_running = True
+        with self._batch_condition:
+            network = self._job_network = NetworkCancellation()
+            self.job_running = True
         self._transfer_active = False
         job.started_at = time.monotonic()
         job.finished_at = job.download_started_at = job.download_finished_at = None
@@ -2531,8 +2700,6 @@ class SessionController:
                     network.cancel()
                 network_checkpoint()
                 state, note = self._process(playback, presenter, ctx)
-            if self.cancel_requested and state in (FAILED, SKIPPED):
-                state, note = CANCELLED, "cancelled"
         except (Back, Quit):
             raise
         except Exception as exc:
@@ -2548,9 +2715,18 @@ class SessionController:
             self._snapshot_job(playback)
             with network.activate():
                 self._release_playback(playback)
-            self.job_running = False
-            self._job_network = None
-            self._recording_active = False
+            with self._batch_condition:
+                if self.cancel_requested and state in (FAILED, SKIPPED):
+                    state, note = CANCELLED, "cancelled"
+                if state == CANCELLED and self._batch_paused:
+                    self._last_stopped_job = job
+                self.job_running = False
+                self._job_network = None
+                self._recording_active = False
+                if self._skip_one:
+                    self._skip_one = False
+                    if not self._batch_stopping():
+                        self._reset_job_controls()
             # Whatever happened, nothing is happening now. The status line says
             # what a job is *doing*, and it used to be cleared at each of the
             # places a job can end well - which left every other exit stating a
@@ -2559,11 +2735,6 @@ class SessionController:
             # session. One line here covers all of them, including the ones added
             # later and the ones that raise.
             self.post_status("")
-            if self._skip_one:
-                # the cancellation belonged to this job only; the next one in the
-                # batch has to start from a clean event
-                self._skip_one = False
-                self.clear_cancel()
             self._finish_job(job, state, note)
             if state == CANCELLED:
                 self.post_log(tr("delivery.cancelled_title", name=job.name), "warning")
@@ -2572,13 +2743,25 @@ class SessionController:
 
     # -------------------------------------------------------------- retrying
     def retry(self, wanted: list[Job] | None = None) -> int:
-        """Run failed or cancelled rows again. Returns how many were started.
+        """Run failed or cancelled rows again. Returns how many were accepted.
 
-        Only while nothing is in flight, which is when a person is looking at a
-        finished queue deciding what to rescue. Allowing it mid-batch would put two
-        workers through one engine, and the second would inherit the first's
-        cancellation event and its screens.
+        A paused queue takes one request on its own worker. Otherwise only
+        start a retry worker when nothing else owns the engine.
         """
+        with self._batch_condition:
+            if self._batch_paused:
+                if not self.can_resume_batch or self._batch_stopping():
+                    return 0
+                target = (
+                    next((job for job in wanted if job.retryable), None)
+                    if wanted is not None
+                    else self._last_stopped_job
+                )
+                if target is None or not target.retryable:
+                    return 0
+                self._batch_retry_job = target
+                self._batch_condition.notify_all()
+                return 1
         if self.batch_busy or self.aborted:
             return 0
         jobs = [job for job in (wanted if wanted is not None else self.jobs) if job.retryable]
@@ -2617,20 +2800,37 @@ class SessionController:
                     self.app.call_from_thread(self.delivery_screen)
                 except RuntimeError:
                     return
+            self._remaining_retries = len(jobs)
             for job in jobs:
-                if self.aborted or self.leaving or self.batch_cancelled:
+                if self._batch_paused:
+                    self._wait_for_batch_action(presenter, ctx)
+                if self._batch_stopping():
                     return
-                if job.playback is None:
-                    continue
-                job.state = RUNNING
-                job.note = f"attempt {job.attempts + 1}"
-                job.attempts += 1
-                self.render_queue()  # marshals itself
-                self.post_log(f"retrying {job.name} (attempt {job.attempts})", "warning")
-                self._run_job(job, job.playback, presenter, ctx)
+                self._remaining_retries -= 1
+                if job.retryable:
+                    self._run_retry(job, presenter, ctx)
+            if self._batch_paused:
+                self._wait_for_batch_action(presenter, ctx)
         finally:
+            self._remaining_retries = 0
             self._retry_pending = False
             self._worker_finished()
+            # The final queued row might already have been retried while paused.
+            # Paint completion even if resuming did not run another transfer.
+            if jobs and not self.aborted and not self.leaving:
+                self._on_ui(self._after_job)
+            self._on_ui(self._refresh_delivery_keys)
+
+    def _run_retry(self, job: Job, presenter: TextualPresenter, ctx: FlowContext) -> None:
+        playback = job.playback
+        if playback is None:
+            return
+        job.state = RUNNING
+        job.attempts += 1
+        job.note = f"attempt {job.attempts}"
+        self.render_queue()
+        self.post_log(f"retrying {job.name} (attempt {job.attempts})", "warning")
+        self._run_job(job, playback, presenter, ctx)
 
     def _after_job(self) -> None:
         """Only call the screen finished when the whole queue is."""
@@ -2644,7 +2844,7 @@ class SessionController:
                         self.app.run_worker(self._close(self.delivery), exit_on_error=False)
                     return
                 # A failed final mux must remain visible for inspection/retry.
-        if not self.queue_complete:
+        if self._batch_paused or not self.queue_complete:
             return
         if self.delivery is not None:
             self.delivery.mark_done()

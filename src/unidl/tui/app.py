@@ -56,7 +56,7 @@ from .bidi import (
     EXPLICIT_BIDI_ENTER,
     EXPLICIT_BIDI_EXIT,
     install_textual_rtl_shaping,
-    rtl_shaping_disabled,
+    rtl_terminal_mode,
 )
 from .clipboard import write_system_clipboard
 from .home import HomeScreen
@@ -358,17 +358,22 @@ class UnidlApp(App):
         BiDi-capable terminals (iTerm2 3.5+, VTE/GNOME Terminal, Konsole,
         WezTerm) otherwise run row-wide UAX #9 reordering over full-screen TUI
         rows, double-reversing pre-shaped Arabic and scrambling text across box
-        borders. Headless test drivers and ``UNIDL_DISABLE_RTL_SHAPING=1`` skip
-        entering explicit mode.
+        borders. macOS Terminal.app ignores these escapes and instead freezes
+        rows via zero-width ``U+1160`` LTR anchors at compositor emission time.
+        Headless test drivers and ``UNIDL_DISABLE_RTL_SHAPING=1`` /
+        ``UNIDL_RTL_MODE=off`` skip entering explicit mode.
         """
         if getattr(self, "is_headless", False):
             return
         driver = getattr(self, "_driver", None)
         if driver is None or not hasattr(driver, "write"):
             return
+        mode = rtl_terminal_mode()
+        if mode == "apple_terminal":
+            return
         sequence = (
             EXPLICIT_BIDI_ENTER
-            if (enable_explicit and not rtl_shaping_disabled())
+            if (enable_explicit and mode == "explicit")
             else EXPLICIT_BIDI_EXIT
         )
         try:
@@ -583,7 +588,9 @@ class UnidlApp(App):
         service_cls: type[Service],
         target: str | None = None,
         search: str | None = None,
-    ) -> None:
+        *,
+        replace_screen: object | None = None,
+    ) -> bool:
         from .session import SessionController
 
         if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
@@ -592,7 +599,7 @@ class UnidlApp(App):
                 severity="warning",
                 timeout=4,
             )
-            return
+            return False
 
         service = self.registry.build(
             service_cls, self.config, self.settings_store, globals_scope=self.globals
@@ -601,7 +608,7 @@ class UnidlApp(App):
         if not report.ready:
             self.notify(report.blocking_message(), title=tr("notify.needs_setup", name=service_cls.NAME),
                         severity="error", timeout=10)
-            return
+            return False
         if target:
             service.ctx.extras["initial_target"] = target
         if search:
@@ -616,7 +623,10 @@ class UnidlApp(App):
             ),
         )
         self.register_session(controller)
+        if replace_screen is not None and self.screen is replace_screen:
+            self.pop_screen()
         self.push_screen(controller.start_screen())
+        return True
 
     def open_import(self, document) -> bool:
         """Finish what an export file already resolved. Returns whether it started.
@@ -761,9 +771,28 @@ class UnidlApp(App):
         opened has to be readable instead - over SSH the browser that answers is
         not on the screen you are looking at.
         """
+        try:
+            parsed = urlsplit(url)
+            host = parsed.hostname
+            valid = parsed.scheme in {"http", "https"} and host and not any(c.isspace() for c in host)
+            if valid:
+                # Accessing port catches invalid port values left lazy by urlsplit.
+                _ = parsed.port
+        except ValueError:
+            valid = False
+        if not valid:
+            self.notify(
+                tr("notify.invalid_url", default="Expected a valid HTTP or HTTPS link."),
+                title=tr("notify.open_this"), severity="warning", timeout=6,
+            )
+            return
+        in_ssh = bool(
+            os.environ.get("SSH_CONNECTION")
+            or os.environ.get("SSH_CLIENT")
+            or os.environ.get("SSH_TTY")
+        )
         if sys.platform == "win32":
-            scheme = urlsplit(url).scheme.lower()
-            if scheme not in {"http", "https"}:
+            if in_ssh:
                 self.notify(url, title=tr("notify.open_this"), timeout=12)
                 return
             try:
@@ -775,6 +804,12 @@ class UnidlApp(App):
                 self.notify(tr("notify.opened_browser"), timeout=3)
             else:
                 self.notify(url, title=tr("notify.open_this"), timeout=12)
+            return
+        headless_linux = sys.platform != "darwin" and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        )
+        if in_ssh or headless_linux:
+            self.notify(url, title=tr("notify.open_this"), timeout=12)
             return
         opener_name = "open" if sys.platform == "darwin" else "xdg-open"
         opener = shutil.which(opener_name)
@@ -1090,19 +1125,40 @@ class UnidlApp(App):
         """Quit, but only on a second press inside the confirm window.
 
         Escape is bound globally, so a single stray press must not end a
-        session that has work in flight. On the delivery screen it *does* stop
-        that work immediately; the second press only decides whether to close the
-        application after the native resume parts have been left on disk.
+        session that has work in flight. On the delivery screen a first press
+        stops the stalled title (and pauses any remaining batch); the second
+        press cancels the batch and exits the application.
         """
-        prepare = getattr(self.screen, "prepare_quit", None)
-        if callable(prepare):
-            prepare()
         now = time.monotonic()
-        if self._quit_armed_at is not None and now - self._quit_armed_at <= QUIT_CONFIRM_WINDOW:
+        confirming = (
+            self._quit_armed_at is not None
+            and now - self._quit_armed_at <= QUIT_CONFIRM_WINDOW
+        )
+        prepare = getattr(self.screen, "prepare_quit", None)
+        custom_notice = False
+        if callable(prepare):
+            try:
+                custom_notice = bool(prepare(second_press=confirming))
+            except TypeError:
+                prepare()
+        if confirming:
             self.exit()
             return
         self._quit_armed_at = now
-        self.notify(tr("notify.quit_again"), timeout=QUIT_CONFIRM_WINDOW)
+        if not custom_notice:
+            from textual.screen import ModalScreen
+
+            if isinstance(self.screen, ModalScreen):
+                self.notify(
+                    tr("notify.quit_again_modal", default="Press ^q again to quit"),
+                    timeout=QUIT_CONFIRM_WINDOW,
+                )
+            else:
+                self.notify(tr("notify.quit_again"), timeout=QUIT_CONFIRM_WINDOW)
+
+    def disarm_quit(self) -> None:
+        """A resumed queue must not confirm an earlier Escape."""
+        self._quit_armed_at = None
 
     def abort_sessions(self) -> None:
         """Tell every live session to stop before the app goes away.

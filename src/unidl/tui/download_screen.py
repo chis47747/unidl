@@ -159,6 +159,8 @@ class QueueRow(Static):
     in whatever is being asked. A row that can be acted on says so on the row.
     """
 
+    ALLOW_SELECT = False
+
     def __init__(self, line, *, job, index: int) -> None:
         super().__init__(line, classes="queue-row" + (" retryable" if job.retryable else ""))
         self.job = job
@@ -287,19 +289,27 @@ class DownloadScreen(AskHost):
         skipping while nothing runs, or retrying with nothing failed, would be keys
         that answer nothing.
         """
-        back = "stopping..." if self.controller.cancel_requested else "back"
+        batch_paused = getattr(self.controller, "batch_paused", False)
+        stopping = self.controller.cancel_requested and (not batch_paused or self.controller.job_running)
+        back = "stopping..." if stopping else "back"
         log_action = {
             "normal": "expand the log",
             "tall": "collapse the log",
             "collapsed": "show the log",
         }.get(self._log_state, "toggle the log")
         pause_hint: list[tuple[str, str]] = []
-        if (
-            getattr(self, "_current_ask", None) is None
-            and (self.controller.job_running or getattr(self.controller, "title_delay_active", False))
-            and not (self.controller.cancel_requested or getattr(self.controller, "recording_stop_requested", False))
-        ):
-            pause_hint = [("p", "resume" if self.controller.pause_requested else "pause")]
+        if getattr(self, "_current_ask", None) is None:
+            if batch_paused and not self.controller.job_running:
+                if getattr(self.controller, "can_resume_batch", False):
+                    pause_hint = [("p", "resume")]
+            elif (
+                self.controller.job_running
+                or getattr(self.controller, "title_delay_active", False)
+            ) and not (
+                self.controller.cancel_requested
+                or getattr(self.controller, "recording_stop_requested", False)
+            ):
+                pause_hint = [("p", "resume" if self.controller.pause_requested else "pause")]
         return [
             ("^b", back),
             *pause_hint,
@@ -318,6 +328,11 @@ class DownloadScreen(AskHost):
         if not found:
             return
         button = found.first(ChromeButton)
+        if getattr(self.controller, "batch_paused", False) and not self.controller.job_running:
+            ready = getattr(self.controller, "can_resume_batch", False)
+            button.set_label("▶" if ready else "…", "Resume" if ready else "Starting")
+            button.set_enabled(ready)
+            return
         if self.controller.job_running or getattr(self.controller, "title_delay_active", False):
             if self.controller.cancel_requested or getattr(self.controller, "recording_stop_requested", False):
                 button.set_label("…", "Stopping")
@@ -345,6 +360,12 @@ class DownloadScreen(AskHost):
 
     def action_stop_resume(self) -> None:
         """Pause the active job in place, resume it, or retry a finished row."""
+        if getattr(self.controller, "batch_paused", False) and not self.controller.job_running:
+            if self.controller.request_resume_batch():
+                self.app.disarm_quit()
+                self.notify(tr("delivery.notify.resumed"), timeout=4)
+            self.refresh_keys()
+            return
         if self.controller.job_running or getattr(self.controller, "title_delay_active", False):
             if self.controller.pause_requested:
                 if self.controller.request_resume_pause():
@@ -372,18 +393,63 @@ class DownloadScreen(AskHost):
             self.notify(tr("delivery.notify.wait_job"), timeout=3)
         self.refresh_keys()
 
-    def prepare_quit(self) -> None:
-        """A Quit click/escape is also an explicit stop signal for delivery."""
-        if (
+    def prepare_quit(self, *, second_press: bool = False) -> bool:
+        """Stop the stalled title on first Esc; cancel batch and exit on second.
+
+        Returns True when this screen already displayed a unified quit/stop
+        notification so the app does not stack a second toast on top of it.
+        """
+        active = bool(
             self.controller.job_running
             or getattr(self.controller, "title_delay_active", False)
-        ) and not self.controller.cancel_requested:
-            self.controller.request_cancel()
-            self.notify(tr("delivery.notify.stopping_quit"), timeout=5)
+        )
+        batch_paused = bool(getattr(self.controller, "batch_paused", False))
+        if second_press:
+            if active or batch_paused:
+                self.controller.request_cancel()
+                self.refresh_keys()
+            return False
+        if active and not self.controller.cancel_requested and (not batch_paused or self.controller.job_running):
+            has_more = getattr(self.controller, "has_remaining_batch", None)
+            stop_pause = getattr(self.controller, "request_stop_and_pause_batch", None)
+            delay_only = not self.controller.job_running
+            if (delay_only or batch_paused or (callable(has_more) and has_more())) and callable(stop_pause):
+                if not stop_pause():
+                    return False
+                if delay_only:
+                    self.notify(tr("delivery.notify.paused_quit_again"), timeout=5)
+                    self.refresh_keys()
+                    return True
+                self.notify(
+                    tr(
+                        "delivery.notify.stopped_batch_paused",
+                        default="Stopped current title and paused queue — ^r retry · p resume · Esc again to cancel batch & quit",
+                    ),
+                    timeout=5,
+                )
+            else:
+                self.controller.request_cancel()
+                self.notify(
+                    tr(
+                        "delivery.notify.stopped_single_quit",
+                        default="Stopping current download — ^r to retry · press Esc again to quit",
+                    ),
+                    timeout=5,
+                )
             self.refresh_keys()
+            return True
+        if batch_paused:
+            self.notify(
+                tr(
+                    "delivery.notify.paused_quit_again",
+                    default="Queue is paused — p to resume · press Esc again to cancel batch & quit",
+                ),
+                timeout=5,
+            )
+            return True
+        return False
 
-    def on_mount(self) -> None:
-        super().on_mount()
+    def _on_host_mount(self) -> None:
         chapters_found = self.query("#delivery-chapters")
         if chapters_found:
             chapters_found.first(StatusChip).display = False
@@ -706,12 +772,15 @@ class DownloadScreen(AskHost):
             for value in (chapter_text, lyrics_text, attachment_text)
             if value
         )
-        # content_size is already inside the padding; the fallback is not, so it
-        # has to give the 2+2 columns back
-        room = widget.content_size.width or max(0, self.size.width - 4)
+        # widget.content_size.width already excludes sibling chip columns in
+        # #delivery-head-row; only deduct chip_room when using screen fallback.
+        if widget.content_size.width > 0:
+            room = widget.content_size.width
+        else:
+            room = max(0, self.size.width - 4 - chip_room)
         name = fit(
             visual_text(playback.save_name),
-            room - cell_width(lead) - cell_width(separator) - chip_room,
+            room - cell_width(lead) - cell_width(separator),
         )
         head = Text(no_wrap=True, overflow="ellipsis")
         head.append(lead, style=f"bold {palette.ok}")
@@ -838,7 +907,10 @@ class DownloadScreen(AskHost):
                         palette.accent,
                     )
             if playback.lyrics is not None:
-                timing = tr(f"lyrics.timing.{playback.lyrics.timing}")
+                timing = tr(
+                    f"lyrics.timing.{playback.lyrics.timing}",
+                    default=str(playback.lyrics.timing),
+                )
                 field(
                     tr("lyrics.title"),
                     tr(
@@ -936,9 +1008,8 @@ class DownloadScreen(AskHost):
             return max(40, self.size.width - side_w)
         return self.size.width
 
-    def on_resize(self) -> None:
+    def _on_host_resize(self) -> None:
         """Re-shorten the name for the width the window now has."""
-        super().on_resize()
         # Repaint the latest picture at the new width even if a transfer happens
         # to be stalled between segment callbacks.
         self._shown_frame_version = -1
@@ -965,7 +1036,11 @@ class DownloadScreen(AskHost):
         stop_recording = getattr(self.controller, "request_recording_back", None)
         if callable(stop_recording) and stop_recording():
             return True
-        if self.controller.job_running or getattr(self.controller, "title_delay_active", False):
+        if (
+            self.controller.job_running
+            or getattr(self.controller, "title_delay_active", False)
+            or getattr(self.controller, "batch_paused", False)
+        ):
             if self.controller.request_cancel():
                 self.notify(tr("delivery.notify.stopping"), timeout=4)
             else:
