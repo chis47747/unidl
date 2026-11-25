@@ -54,9 +54,10 @@ from ..core.secureio import (
 )
 from . import api
 from .captions import CAPTION, is_caption
-from .embedding import DownloaderThreadPoolExecutor, DownloadRuntime, proxy_scope
+from .embedding import DownloaderThreadPoolExecutor, DownloadRuntime, LiveRecordingStopped, proxy_scope
 from .models import SegmentInfo, StreamInfo
 from .utils import looks_like_h266
+from .vod_renewal import run_renewable_vod
 
 
 class NativeManifestError(ValueError):
@@ -723,39 +724,52 @@ class NativeDownloaderBackend:
             )
             segment = request.segment
             segment_index = getattr(segment, "index", None) if segment else None
-            return hooks.request_live_key(
-                LiveKeyRequest(
+            track = tracks_by_id.get(track_id)
+            if track is not None and request.media_playlist and hooks.renew_live_source is not None:
+                track = replace(track, url=request.media_playlist, original_url=request.manifest_url or track.original_url)
+
+            def describe(value, *, include_init_data=False):
+                if value is None:
+                    return None
+                data = getattr(value, "data", None)
+                return LiveSegmentDescriptor(
+                    url=str(getattr(value, "url", "") or ""),
+                    index=getattr(value, "index", None),
+                    duration=getattr(value, "duration", None),
+                    byte_range=getattr(value, "byte_range", None),
+                    encrypted=bool(getattr(value, "encrypted", False)),
+                    encryption_scheme=str(getattr(value, "encryption_scheme", "") or ""),
+                    key_id=getattr(value, "key_id", None),
+                    key_uri=getattr(value, "key_uri", None),
+                    program_date_time=getattr(value, "program_date_time", None),
+                    init_data=bytes(data) if include_init_data and data and len(data) <= 131_072 else None,
+                )
+
+            def supply() -> str | None:
+                return hooks.request_live_key(LiveKeyRequest(
                     kid=request.kid,
                     track_id=track_id,
                     reason=request.reason,
                     segment_index=segment_index,
-                    track=tracks_by_id.get(track_id),
-                    segment=(
-                        LiveSegmentDescriptor(
-                            url=str(getattr(segment, "url", "") or ""),
-                            index=segment_index,
-                            duration=getattr(segment, "duration", None),
-                            byte_range=getattr(segment, "byte_range", None),
-                            encrypted=bool(getattr(segment, "encrypted", False)),
-                            encryption_scheme=str(
-                                getattr(segment, "encryption_scheme", "") or ""
-                            ),
-                            key_id=getattr(segment, "key_id", None),
-                            key_uri=getattr(segment, "key_uri", None),
-                            program_date_time=getattr(
-                                segment,
-                                "program_date_time",
-                                None,
-                            ),
-                        )
-                        if segment is not None
-                        else None
-                    ),
+                    track=track,
+                    segment=describe(segment),
                     require_kid=request.require_kid,
                     force=request.force,
                     replace_existing=request.replace_existing,
-                )
-            )
+                    manifest_url=request.manifest_url,
+                    initialization=describe(request.initialization, include_init_data=True),
+                ))
+
+            if hooks.renew_live_source is None:
+                return supply()
+            try:
+                # Key exchanges in a pipe writer must still stop with capture.
+                with runtime.live_authorization.activate():
+                    return supply()
+            except Exception:
+                if hooks.stop_recording_requested and hooks.stop_recording_requested():
+                    raise LiveRecordingStopped() from None
+                raise
 
         artifacts: list[OutputArtifact] = []
 
@@ -816,6 +830,10 @@ class NativeDownloaderBackend:
             runtime.register_closer(decryptor_close)
         download_hooks = api.DownloadHooks(
             live_key_provider=(request_live_key if plan.policy.live.enabled else None),
+            renew_live_source=(
+                hooks.renew_live_source
+                if plan.policy.live.enabled and not plan.policy.live.perform_as_vod else None
+            ),
             artifact_created=artifact_created,
             progress=progress,
             message=message,
@@ -833,12 +851,20 @@ class NativeDownloaderBackend:
         )
         try:
             with runtime.activate():
-                exit_code = api.download(
-                    options,
-                    streams,
-                    selected,
-                    hooks=download_hooks,
-                )
+                if (
+                    hooks.renew_vod_source is not None and hooks.vod_asset_id
+                    and not plan.policy.live.enabled and not plan.policy.live.perform_as_vod
+                ):
+                    exit_code = run_renewable_vod(
+                        self, plan, hooks, runtime, download_hooks, options, streams, selected, track_ids, lambda: bool(artifacts),
+                    )
+                else:
+                    exit_code = api.download(
+                        options,
+                        streams,
+                        selected,
+                        hooks=download_hooks,
+                    )
         except (api.DownloadCancelled, KeyboardInterrupt):
             return DeliveryResult(DeliveryStatus.CANCELLED, tuple(artifacts), exit_code=130)
         except SystemExit as exc:

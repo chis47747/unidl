@@ -36,10 +36,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import OptionList, SelectionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from ..core import exports
 from ..core.i18n import tr
+from ..core.terminal_cells import cell_width, crop
 from .askhost import join_fitted
 from .asks import _ConfirmingSelectionList
 from .bidi import visual_text
@@ -56,8 +57,25 @@ def _esc(text: object) -> str:
 
 
 def _fit(text: str, limit: int = NAME_LIMIT) -> str:
+    if limit <= 0:
+        return ""
     shown = visual_text(text)
-    return shown if len(shown) <= limit else f"{shown[: limit - 1]}…"
+    return shown if cell_width(shown) <= limit else crop(shown, limit - 1) + "…"
+
+
+def replace_file_options(listing: OptionList, options: list[Option]) -> None:
+    """Preserve the selected file across rescans even when its row number changes."""
+    previous = listing.highlighted
+    identity = listing.get_option_at_index(previous).id if previous is not None else None
+    listing.clear_options().add_options(options)
+    if identity is not None:
+        try:
+            listing.highlighted = listing.get_option_index(identity)
+            return
+        except OptionDoesNotExist:
+            pass
+    if options:
+        listing.highlighted = min(previous or 0, len(options) - 1)
 
 
 def _age(path: Path) -> str:
@@ -177,8 +195,6 @@ class ImportScreen(Screen[None]):
 
     def _render_rows(self) -> None:
         option_list = self.query_one("#import-list", OptionList)
-        previous = option_list.highlighted
-        option_list.clear_options()
         palette = self.app.palette
 
         head = Text()
@@ -204,23 +220,22 @@ class ImportScreen(Screen[None]):
         )
         self.query_one("#import-note", Static).update(note)
 
-        option_list.add_option(Option(
+        options = [Option(
             f"    [bold $accent]{_esc(tr('import.queue.title'))}[/]",
             id="mixed-import",
-        ))
+        )]
         for path, document, problem in self._rows:
-            option_list.add_option(Option(self._row_markup(path, document, problem)))
+            options.append(Option(self._row_markup(path, document, problem), id=str(path)))
         if not self._rows:
-            option_list.add_option(
+            options.append(
                 Option(
                     f"    [$dim]{tr('import.how')}[/]",
                     disabled=True,
                 )
             )
 
-        if previous is not None:
-            option_list.highlighted = min(previous, len(self._rows))
-        else:
+        replace_file_options(option_list, options)
+        if not self._rows:
             option_list.highlighted = 0
 
     def _row_markup(
@@ -244,13 +259,6 @@ class ImportScreen(Screen[None]):
             f"  [$dim]{_esc('  ·  '.join(fact for fact in facts if fact))}[/]"
         )
 
-    def _selected(self) -> tuple[Path, exports.Document | None, str] | None:
-        option_list = self.query_one("#import-list", OptionList)
-        index = option_list.highlighted
-        if index is None or index < 1 or index > len(self._rows):
-            return None
-        return self._rows[index - 1]
-
     # --------------------------------------------------------------------- doing
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
@@ -259,7 +267,7 @@ class ImportScreen(Screen[None]):
 
             self.app.push_screen(ImportQueueScreen())
             return
-        chosen = self._selected()
+        chosen = next((row for row in self._rows if str(row[0]) == event.option.id), None)
         if chosen is None:
             return
         path, document, problem = chosen

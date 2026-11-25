@@ -203,17 +203,12 @@ class ImportQueueScreen(Screen[None]):
         self._render_files()
 
     def _render_files(self) -> None:
+        from .import_screen import replace_file_options
+
         listing = self.query_one("#import-queue-files", OptionList)
-        previous = listing.highlighted
-        listing.clear_options()
-        for path, document, problem in self._rows:
-            listing.add_option(Option(self._file_prompt(path, document, problem)))
-        if not self._rows:
-            listing.add_option(Option(tr("import.put"), disabled=True))
-        elif previous is not None:
-            listing.highlighted = min(previous, len(self._rows) - 1)
-        else:
-            listing.highlighted = 0
+        options = [Option(self._file_prompt(path, document, problem), id=str(path))
+                   for path, document, problem in self._rows]
+        replace_file_options(listing, options or [Option(tr("import.put"), disabled=True)])
         self._render_head()
 
     @staticmethod
@@ -324,10 +319,10 @@ class ImportQueueScreen(Screen[None]):
         event.stop()
         if event.option_list.id != "import-queue-files":
             return
-        index = event.option_index
-        if not 0 <= index < len(self._rows):
+        chosen_row = next((row for row in self._rows if str(row[0]) == event.option.id), None)
+        if chosen_row is None:
             return
-        path, document, problem = self._rows[index]
+        path, document, problem = chosen_row
         if document is None:
             self.notify(f"{path.name}: {problem}", title=tr("import.cannot"), severity="error")
             return

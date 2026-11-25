@@ -24,7 +24,9 @@ except Exception:  # pragma: no cover - exercised in minimal dependency envs.
 
 
 class HttpClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
 
 
 def _encoded_http_url(url: str) -> str:
@@ -312,7 +314,7 @@ class NativeHttpClient:
                     if response.status == 420 and (response.get_header("X-Netflix-Geo-Check") or "").lower() == "failed":
                         detail = "HTTP Error 420: Netflix geo check failed"
                     response.close()
-                    raise HttpClientError(detail)
+                    raise HttpClientError(detail, http_status=response.status)
                 response.crossed_origin = crossed_origin
                 return response
             location = response.get_header("Location")
@@ -677,7 +679,7 @@ def http2_download_to_file(
                 break
         status = status or _status_from_headers(response_headers)
         if status >= 400 or not status:
-            raise HttpClientError(f"HTTP/2 Error {status or 'unknown'}")
+            raise HttpClientError(f"HTTP/2 Error {status or 'unknown'}", http_status=status)
         return total, Http2DownloadResponse(status=status, reason=str(status), headers=response_headers, url=url)
     finally:
         if runtime:

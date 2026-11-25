@@ -814,6 +814,11 @@ GLOBAL_SETTINGS: list[Setting] = [
         [
             ("dark", "Dark"),
             ("light", "Light"),
+            ("tokyo_night", "Tokyo Night"),
+            ("catppuccin", "Catppuccin Mocha"),
+            ("nord", "Nord"),
+            ("gruvbox", "Gruvbox"),
+            ("high_contrast", "High Contrast"),
         ],
         "dark",
         "Takes effect immediately and repaints the current screen.",
@@ -860,6 +865,44 @@ GLOBAL_SETTINGS: list[Setting] = [
         "accent",
         "Sets the color or gradient used for the unidl wordmark and service banners. "
         "Previews live as you browse options.",
+        visible=False,
+    ),
+    _choice(
+        "layout_density",
+        "Layout density",
+        [
+            ("auto", "Auto (follow window height)"),
+            ("comfortable", "Comfortable"),
+            ("compact", "Compact"),
+        ],
+        "auto",
+        "Controls vertical spacing, banner height, and compact padding across screens. "
+        "Auto switches to compact layout in short terminal windows.",
+        visible=False,
+    ),
+    _choice(
+        "semantic_colors",
+        "Status colors",
+        [
+            ("default", "Default"),
+            ("colorblind", "Colorblind-friendly (Okabe-Ito)"),
+        ],
+        "default",
+        "Controls success, warning, and error colors across screens and logs. "
+        "Colorblind-friendly replaces red/green cues with high-contrast teal, amber, and magenta.",
+        visible=False,
+    ),
+    _choice(
+        "completion_alert",
+        "Completion notification",
+        [
+            ("off", "Off"),
+            ("auto", "Desktop notification (auto)"),
+            ("bell", "Terminal bell"),
+        ],
+        "off",
+        "Notify through your terminal when a download batch finishes or stops with errors. "
+        "Auto uses OSC notifications in supported terminals and falls back to the terminal bell.",
         visible=False,
     ),
     _choice(

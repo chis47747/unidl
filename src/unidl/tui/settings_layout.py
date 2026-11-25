@@ -148,3 +148,86 @@ class SettingRow(Visual):
 
     def get_optimal_width(self, rules, container_width):
         return container_width
+
+
+@dataclass
+class StableHelp(Visual):
+    """Help text Visual whose height matches the tallest sibling tab's help.
+
+    Prevents ``Tabs`` bars, status lines, and list bodies from jumping
+    vertically when switching between tabs whose descriptions wrap to
+    different line counts at the current terminal width or locale.
+    """
+
+    active: Content
+    peers: tuple[Content, ...]
+
+    def __str__(self) -> str:
+        return str(self.active)
+
+    def render_strips(self, width, height, style, options):
+        return self.active.render_strips(width, height, style, options)
+
+    def get_height(self, rules, width):
+        return max(
+            (
+                self.active.get_height(rules, width),
+                *(peer.get_height(rules, width) for peer in self.peers),
+            )
+        )
+
+    def get_optimal_width(self, rules, container_width):
+        return container_width
+
+
+def stable_help(active_markup: str, peer_markups: Iterable[str]) -> StableHelp:
+    """Build a tab help Visual with uniform wrapped height across sibling tabs."""
+    active = Content.from_markup(active_markup)
+    peers = tuple(Content.from_markup(item) for item in peer_markups)
+    return StableHelp(active, peers)
+
+
+_MANAGER_GROUP_KEYS: dict[str, tuple[str, ...]] = {
+    "storage": (
+        "download_dir",
+        "subtitle_output",
+        "filename_template",
+        "movie_template",
+        "episode_folder_template",
+    ),
+    "proxy_manager": ("proxy", "proxy_downloads"),
+    "justwatch": ("justwatch_country", "justwatch_language"),
+}
+
+
+def is_setting_modified(spec, scope) -> bool:
+    """Return True when ``spec`` differs from its default/inherited baseline."""
+    picker = getattr(spec, "picker", "") or ""
+    if picker in {"download_behavior", "interface"}:
+        from .settings_group import SETTINGS_GROUPS
+
+        group = SETTINGS_GROUPS.get(picker)
+        if group is None:
+            return False
+        return any(
+            is_setting_modified(scope.spec_by_key[key], scope)
+            for key in group[2]
+            if key in scope.spec_by_key
+        )
+    if picker in _MANAGER_GROUP_KEYS:
+        return any(
+            is_setting_modified(scope.spec_by_key[key], scope)
+            for key in _MANAGER_GROUP_KEYS[picker]
+            if key in scope.spec_by_key
+        )
+    if picker in {"resources", "services_manager"} or getattr(spec, "kind", "") == "action":
+        return False
+
+    current = scope.get(spec.key)
+    if getattr(spec, "inherit_global", False) and getattr(scope, "parent", None) is not None:
+        if not scope.has_override(spec.key):
+            return False
+        if spec.key == "license_action" and spec.default == "custom" and not scope.parent.has_override(spec.key):
+            return current != spec.coerce(spec.default)
+        return current != scope.parent.get(spec.key)
+    return current != spec.coerce(spec.default)

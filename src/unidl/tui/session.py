@@ -58,7 +58,7 @@ from ..core.flow import (
     run_flow,
 )
 from ..core.i18n import tr
-from ..core.network import NetworkCancellation, network_checkpoint
+from ..core.network import NetworkCancellation, network_checkpoint, playback_cleanup_scope
 from ..core.partner import (
     PartnerAuthorization,
     PartnerAuthorizationError,
@@ -553,6 +553,8 @@ class Job:
     finished_at: float | None = None
     download_started_at: float | None = None
     download_finished_at: float | None = None
+    #: User explicitly skipped this queued row before the batch reached it.
+    user_skipped: bool = False
 
     @property
     def retryable(self) -> bool:
@@ -634,6 +636,7 @@ class TextualPresenter:
         if isinstance(ask, PartnerHandoff):
             return controller.route_partner_authorization(ask.authorization)
 
+        controller._hinted_batch = None
         while True:
             event = threading.Event()
             box: dict[str, Any] = {}
@@ -765,6 +768,7 @@ class SessionController:
         self.jobs: list[Job] = []
         # Unstarted rows are presentation only, not jobs already authorized.
         self.pending_jobs: list[Job] = []
+        self._hinted_batch: int | None = None
         #: ``(save name, command)`` for every command-only job of the current run,
         #: so the card can show a whole batch rather than only its last title.
         #: Cleared with the queue, because that is what a run is.
@@ -1299,6 +1303,9 @@ class SessionController:
         wherever the selection was made. The service is mid-loop at this point,
         so declining has to travel the same way backing out of a list does.
         """
+        hinted, self._hinted_batch = getattr(self, "_hinted_batch", None), None
+        if hinted is not None and hinted == total:
+            return
         self._open_queue(total)
         self._confirm_batch()
 
@@ -1317,8 +1324,10 @@ class SessionController:
                     job.identity = self._title_identity(choice.value)
             self.render_queue()
         self._confirm_batch()
+        self._hinted_batch = total
 
     def _open_queue(self, total: int) -> None:
+        self._hinted_batch = None
         wanted = max(0, int(total))
         if self.queue_complete:
             # the last batch is over and has been reported: start clean
@@ -1622,10 +1631,11 @@ class SessionController:
     def _release_playback(self, playback: Playback) -> None:
         """Release service-owned playback state on every exit path."""
         release = getattr(self.service, "release_playback", None)
-        if not callable(release):
+        if not callable(release) or getattr(release, "__func__", None) is Service.release_playback:
             return
         try:
-            release(playback, self.post_log)
+            with playback_cleanup_scope():
+                release(playback, self.post_log)
         except Exception as exc:  # noqa: BLE001 - cleanup must not strand a job
             self.post_log(f"could not release playback transport: {exc}", "warning")
 
@@ -1638,19 +1648,91 @@ class SessionController:
         except Exception as exc:  # noqa: BLE001 - cleanup must not strand a job
             self.post_log(f"could not release playback session after license: {exc}", "warning")
 
+    def _match_pending_job(self, pending: list[Job], identity: tuple | None, save_name: str) -> Job | None:
+        job = next(
+            (
+                item
+                for item in pending
+                if (item.state == QUEUED or item.user_skipped)
+                and (
+                    (identity is not None and item.identity == identity)
+                    or (item.details.save_name and item.details.save_name == save_name)
+                )
+            ),
+            None,
+        )
+        if job is None:
+            job = next((item for item in pending if item.state == QUEUED or item.user_skipped), None)
+        return job
+
+    def _is_pending_skipped(self, playback: Playback) -> bool:
+        identity = self._title_identity(getattr(playback, "title", None))
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                item = self._match_pending_job(self.pending_jobs, identity, playback.save_name)
+                return bool(item is not None and item.user_skipped)
+        item = self._match_pending_job(self.pending_jobs, identity, playback.save_name)
+        return bool(item is not None and item.user_skipped)
+
+    def is_pending_skippable(self, job: Job) -> bool:
+        """Whether ``job`` is a not-yet-started queue entry the user can skip or restore."""
+        if getattr(self, "aborted", False) or getattr(self, "leaving", False):
+            return False
+        lock = getattr(self, "_state_lock", None)
+        if lock is not None:
+            with lock:
+                return any(
+                    item is job and (item.state == QUEUED or item.user_skipped)
+                    for item in getattr(self, "pending_jobs", ())
+                )
+        return any(
+            item is job and (item.state == QUEUED or item.user_skipped)
+            for item in getattr(self, "pending_jobs", ())
+        )
+
+    def toggle_skip_queued(self, job: Job) -> bool | None:
+        """Mark a queued (not-yet-started) job as skipped, or restore it to queued.
+
+        Returns ``True`` when newly skipped, ``False`` when restored to queued,
+        or ``None`` if the job has already started or left the pending queue.
+        """
+        lock = getattr(self, "_state_lock", None)
+
+        def _toggle() -> bool | None:
+            if not any(item is job for item in getattr(self, "pending_jobs", ())):
+                return None
+            if job.state == QUEUED and not job.user_skipped:
+                job.user_skipped = True
+                job.state = SKIPPED
+                job.note = tr("job.skipped_by_user")
+                return True
+            if job.user_skipped and job.state == SKIPPED:
+                job.user_skipped = False
+                job.state = QUEUED
+                job.note = ""
+                return False
+            return None
+
+        if lock is not None:
+            with lock:
+                result = _toggle()
+        else:
+            result = _toggle()
+        if result is not None:
+            self.render_queue()
+            self._on_ui(self._refresh_delivery_keys)
+        return result
+
     def _start_job(self, playback: Playback) -> Job:
+        self._hinted_batch = None
         identity = self._title_identity(getattr(playback, "title", None))
         lock = getattr(self, "_state_lock", None)
         abandoned = bool(self.batch_cancelled or self.batch_declined or self.leaving)
 
         def _claim() -> Job:
             pending = self.pending_jobs
-            job = next((item for item in pending if item.state == QUEUED and (
-                (identity is not None and item.identity == identity)
-                or (item.details.save_name and item.details.save_name == playback.save_name)
-            )), None)
-            if job is None:
-                job = next((item for item in pending if item.state == QUEUED), None)
+            job = self._match_pending_job(pending, identity, playback.save_name)
             if job is None and abandoned and pending:
                 # Pending rows were already settled as CANCELLED/SKIPPED before
                 # the generator finished unwinding; reuse the slot instead of
@@ -1661,7 +1743,13 @@ class SessionController:
                 )), pending[0])
             if job is not None:
                 pending.remove(job)
-                job.name, job.state, job.playback, job.attempts = playback.save_name, RUNNING, playback, 1
+                if job.user_skipped:
+                    job.name = playback.save_name
+                    job.state = SKIPPED
+                    job.playback = None
+                    job.attempts = 0
+                else:
+                    job.name, job.state, job.playback, job.attempts = playback.save_name, RUNNING, playback, 1
             else:
                 job = Job(name=playback.save_name, state=RUNNING, playback=playback,
                           details=JobDetails(save_name=playback.save_name), identity=identity)
@@ -2586,7 +2674,7 @@ class SessionController:
             self.batch_total = None
             self.batch_declined = False
             self.clear_cancel()
-        elif self._should_delay_title(playback):
+        elif not self._is_pending_skipped(playback) and self._should_delay_title(playback):
             # The delay belongs to the batch scheduler, before the next title's
             # service preparation/manifest/license work. It is intentionally not
             # part of Engine.run or any per-track worker.
@@ -2600,6 +2688,13 @@ class SessionController:
             # queue row cannot be mounted, it still owns a service-side lease.
             self._release_playback(playback)
             raise
+        if job.user_skipped:
+            note = tr("job.skipped_by_user")
+            self._release_playback(playback)
+            self._finish_job(job, SKIPPED, note)
+            self.post_log(f"{note}: {playback.save_name}", "warning")
+            self._on_ui(self._after_job)
+            return SKIPPED
         if self.batch_declined or self.batch_cancelled or self.leaving:
             # The rest of an abandoned batch. Recorded and said out loud: a job
             # that disappears without a screen, a log line or a queue row is
@@ -2713,8 +2808,7 @@ class SessionController:
         finally:
             self._transfer_active = False
             self._snapshot_job(playback)
-            with network.activate():
-                self._release_playback(playback)
+            self._release_playback(playback)
             with self._batch_condition:
                 if self.cancel_requested and state in (FAILED, SKIPPED):
                     state, note = CANCELLED, "cancelled"

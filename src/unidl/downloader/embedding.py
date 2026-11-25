@@ -18,9 +18,12 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
+from urllib.error import HTTPError
 
+from ..core.delivery import LiveSourceExpired, LiveSourceRenewal
 from ..core.network import NetworkCancellation
 
 if TYPE_CHECKING:
@@ -44,6 +47,9 @@ class LiveKeyRequest:
     require_kid: bool = False
     force: bool = False
     replace_existing: bool = False
+    media_playlist: str = ""
+    manifest_url: str = ""
+    initialization: SegmentInfo | None = None
 
 
 LiveKeyProvider = Callable[[LiveKeyRequest], str | None]
@@ -51,6 +57,25 @@ LiveKeyProvider = Callable[[LiveKeyRequest], str | None]
 
 class DownloadCancelled(RuntimeError):
     """The embedding application requested an orderly download stop."""
+
+
+class VodTransferAttempt:
+    """State shared only by the native workers using one source generation."""
+
+    def __init__(self, cache_id: str) -> None:
+        self.cache_id = cache_id
+        self.lock = threading.Lock()
+        self.failure: tuple[int, str] | None = None
+        self.completed: set[tuple[object, ...]] = set()
+
+    def note_failure(self, status: int, phase: str) -> None:
+        with self.lock:
+            if self.failure is None:
+                self.failure = (status, phase)
+
+    def note_completed(self, position: tuple[object, ...]) -> None:
+        with self.lock:
+            self.completed.add(position)
 
 
 class DownloadRuntime:
@@ -70,6 +95,8 @@ class DownloadRuntime:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._network = NetworkCancellation()
+        self.live_authorization = NetworkCancellation()
+        self.vod_transfer: VodTransferAttempt | None = None
         self._lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._shutdown_thread: threading.Thread | None = None
@@ -138,6 +165,7 @@ class DownloadRuntime:
             self.unregister_closer(token)
 
     def interrupt_live_capture(self) -> bool:
+        self.live_authorization.cancel()
         with self._lock:
             child = self._capture
             started = self._capture_started
@@ -308,6 +336,44 @@ def current_download_runtime() -> DownloadRuntime | None:
     return DownloadRuntime.current()
 
 
+def transfer_auth_status(error: BaseException) -> int | None:
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        status = error.code if isinstance(error, HTTPError) else getattr(error, "http_status", None)
+        if status in (401, 403):
+            return status
+        if error.__cause__ is None:
+            break
+        error = error.__cause__
+    return None
+
+
+def abort_expired_vod_transfer(error: BaseException, *, phase: str = "segment") -> None:
+    runtime = current_download_runtime()
+    if runtime is None or runtime.vod_transfer is None:
+        return
+    status = transfer_auth_status(error)
+    if status is not None:
+        # Keep the typed root cause even when a cancelled sibling reaches the
+        # owner first. Shut down this attempt, not the enclosing delivery.
+        runtime.vod_transfer.note_failure(status, phase)
+        runtime.request_shutdown()
+        raise DownloadCancelled("VOD playback authorization expired") from error
+
+
+def with_download_runtime(function):
+    """A direct downloader call needs the same transfer-local resources as the CLI."""
+    @wraps(function)
+    def run(*args, **kwargs):
+        if current_download_runtime() is not None:
+            return function(*args, **kwargs)
+        with DownloadRuntime().activate():
+            return function(*args, **kwargs)
+
+    return run
+
+
 _proxy_environment: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "unidl_downloader_proxy_environment", default=None,
 )
@@ -461,6 +527,7 @@ class DownloadHooks:
     console_progress: bool = True
     console_output: bool = True
     stop_recording_requested: Callable[[], bool] | None = None
+    renew_live_source: Callable[[LiveSourceExpired], LiveSourceRenewal | None] | None = None
 
 
 __all__ = [

@@ -15,7 +15,7 @@ from ..core.i18n import setting_help, setting_label, setting_value, tr
 from ..core.settings import Setting, Settings
 from .bidi import escape_markup
 from .chrome import Chrome, KeyBar
-from .settings_layout import SettingRow, label_width, setting_row
+from .settings_layout import SettingRow, is_setting_modified, label_width, setting_row
 
 SETTINGS_GROUPS = {
     "download_behavior": (
@@ -34,6 +34,9 @@ SETTINGS_GROUPS = {
             "theme",
             "accent_color",
             "title_color",
+            "layout_density",
+            "semantic_colors",
+            "completion_alert",
             "interface_locale",
             "beta_interface",
             "beta_auto_results",
@@ -51,6 +54,7 @@ class SettingsGroupScreen(Screen[None]):
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Change", show=True),
         Binding("r", "reset", "Reset", show=True),
+        Binding("m", "toggle_modified", "Modified only", show=True),
     ]
 
     def __init__(
@@ -65,6 +69,8 @@ class SettingsGroupScreen(Screen[None]):
         self.title = title
         self.description = description
         self.specs = [scope.spec_by_key[key] for key in keys if key in scope.spec_by_key]
+        self._visible_specs: list[Setting] = list(self.specs)
+        self._modified_only = False
         self._label_width = 30
 
     def compose(self) -> ComposeResult:
@@ -73,16 +79,23 @@ class SettingsGroupScreen(Screen[None]):
         yield Static(tr(self.description, default=self.description), id="settings-group-help")
         with Vertical(id="body"):
             yield OptionList(id="settings-group-list")
-        yield KeyBar(("enter", "change"), ("r", "reset"), ("^b", "back"), ("esc", "quit"))
+        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", "modified only"), ("^b", "back"), ("esc", "quit"))
 
     def on_mount(self) -> None:
         self.rebuild()
         self._fit_help()
         self.query_one("#settings-group-list", OptionList).focus()
 
+    def action_toggle_modified(self) -> None:
+        self._modified_only = not self._modified_only
+        self.rebuild()
+
     def focus_setting(self, key: str) -> None:
+        if self._modified_only and all(spec.key != key for spec in self._visible_specs):
+            self._modified_only = False
+            self.rebuild()
         options = self.query_one("#settings-group-list", OptionList)
-        index = next((index for index, spec in enumerate(self.specs) if spec.key == key), None)
+        index = next((index for index, spec in enumerate(self._visible_specs) if spec.key == key), None)
         if index is not None:
             options.highlighted = index
             options.scroll_to_highlight()
@@ -113,21 +126,58 @@ class SettingsGroupScreen(Screen[None]):
 
     def rebuild(self) -> None:
         options = self.query_one("#settings-group-list", OptionList)
-        previous = options.highlighted
+        previous_spec = self._selected()
+        wanted_key = previous_spec.key if previous_spec is not None else ""
         options.clear_options()
+        modified_count = sum(1 for spec in self.specs if is_setting_modified(spec, self.scope))
+        self._visible_specs = (
+            [spec for spec in self.specs if is_setting_modified(spec, self.scope)]
+            if self._modified_only
+            else list(self.specs)
+        )
         self._label_width = label_width(setting_label(spec) for spec in self.specs)
-        for spec in self.specs:
+        for spec in self._visible_specs:
             options.add_option(Option(self._row_markup(spec)))
-        if self.specs:
-            options.highlighted = min(previous or 0, len(self.specs) - 1)
-            self._show_help(self.specs[options.highlighted or 0])
+        if self._visible_specs:
+            target = next(
+                (i for i, spec in enumerate(self._visible_specs) if spec.key == wanted_key),
+                0,
+            )
+            options.highlighted = target
+            self._show_help(self._visible_specs[target])
         else:
-            options.add_option(
-                Option(f"  [$dim]{tr('settings.group.empty', default='No settings in this group')}[/]", disabled=True)
+            empty_msg = (
+                tr("settings.modified_empty")
+                if self._modified_only
+                else tr("settings.group.empty", default="No settings in this group")
+            )
+            options.add_option(Option(f"  [$dim]{empty_msg}[/]", disabled=True))
+            self.query_one("#settings-group-help", Static).update(
+                f"[$muted]{escape_markup(tr(self.description, default=self.description))}[/]"
             )
         masthead = self.query("#masthead")
         if masthead:
-            masthead.first(Static).update(tr(self.title, default=self.title))
+            title = tr(self.title, default=self.title)
+            if self._modified_only:
+                title += f"  [$accent]{tr('settings.modified_filter_on', count=modified_count)}[/]"
+            masthead.first(Static).update(title)
+        for bar in self.query(KeyBar):
+            mod_label = (
+                tr("settings.show_all")
+                if self._modified_only
+                else (
+                    tr("settings.modified_count", count=modified_count)
+                    if modified_count > 0
+                    else tr("settings.modified_only")
+                )
+            )
+            bar.render_pairs(
+                ("enter", "change"),
+                ("r", "reset"),
+                ("m", mod_label),
+                ("^b", "back"),
+                ("esc", "quit"),
+            )
 
     def _row_markup(self, spec: Setting) -> SettingRow:
         from .settings_screen import APPEARANCE_SETTING_KEYS, appearance_swatch_markup
@@ -154,7 +204,7 @@ class SettingsGroupScreen(Screen[None]):
 
     def _selected(self) -> Setting | None:
         index = self.query_one("#settings-group-list", OptionList).highlighted
-        return self.specs[index] if index is not None and index < len(self.specs) else None
+        return self._visible_specs[index] if index is not None and index < len(self._visible_specs) else None
 
     def _show_help(self, spec: Setting | None) -> None:
         if spec is not None:
@@ -243,6 +293,9 @@ class SettingsGroupScreen(Screen[None]):
             if callable(clear_fn):
                 clear_fn(apply=False)
             self.app.apply_theme()
+            density_fn = getattr(self.app, "apply_layout_density", None)
+            if callable(density_fn):
+                density_fn()
         if spec.key == "interface_locale":
             self.app.apply_locale()
         self.rebuild()

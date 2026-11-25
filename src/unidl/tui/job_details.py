@@ -95,6 +95,7 @@ class JobDetailsScreen(ModalScreen[None]):
         Binding("escape,x,ctrl+b,b", "close", "Close", show=False),
         Binding("left", "previous", "Previous", show=False),
         Binding("right", "next", "Next", show=False),
+        Binding("s", "toggle_skip", "Skip / Restore", show=False),
         Binding("up", "scroll(-2)", "Up", show=False),
         Binding("down", "scroll(2)", "Down", show=False),
         Binding("pageup", "scroll(-12)", "Page up", show=False),
@@ -118,6 +119,7 @@ class JobDetailsScreen(ModalScreen[None]):
             with Horizontal(id="job-modal-nav"):
                 yield Button(f"‹ {tr('modal.previous')}", id="job-previous")
                 yield Button(f"{tr('modal.next')} ›", id="job-next")
+                yield Button(tr("job.skip_queued"), id="job-skip")
                 yield Button(tr("job.retry"), id="job-retry")
             yield Static(tr("job.close_hint"), id="job-modal-hint", markup=False)
 
@@ -125,6 +127,7 @@ class JobDetailsScreen(ModalScreen[None]):
         signal = getattr(self.app, "theme_changed_signal", None)
         if signal is not None:
             signal.subscribe(self, self._on_theme_changed)
+        self._fit_navigation(self.app.size.width)
         self.refresh_details()
         self.query_one("#job-modal-scroll", VerticalScroll).focus()
         self.set_interval(0.5, self.refresh_details)
@@ -142,11 +145,28 @@ class JobDetailsScreen(ModalScreen[None]):
     def relocalize(self) -> None:
         self._last_title = None
         self._last_body = None
-        self.query_one("#job-previous", Button).label = f"‹ {tr('modal.previous')}"
-        self.query_one("#job-next", Button).label = f"{tr('modal.next')} ›"
+        self._fit_navigation(self.app.size.width)
+        self.query_one("#job-skip", Button).label = (
+            tr("job.restore_queued") if getattr(self.job, "user_skipped", False) else tr("job.skip_queued")
+        )
         self.query_one("#job-retry", Button).label = tr("job.retry")
         self.query_one("#job-modal-hint", Static).update(tr("job.close_hint"))
         self.refresh_details()
+
+    def on_resize(self, event) -> None:
+        if self.is_mounted:
+            self._fit_navigation(event.size.width)
+
+    def _fit_navigation(self, width: int) -> None:
+        for selector, arrow, word in (
+            ("#job-previous", "‹", tr("modal.previous")),
+            ("#job-next", "›", tr("modal.next")),
+        ):
+            button = self.query_one(selector, Button)
+            button.label = arrow if width < 76 else (
+                f"{arrow} {word}" if arrow == "‹" else f"{word} {arrow}"
+            )
+            button.tooltip = word
 
     def _jobs(self) -> list:
         queue = getattr(self.controller, "queue_jobs", None)
@@ -210,6 +230,15 @@ class JobDetailsScreen(ModalScreen[None]):
         next_btn = self.query_one("#job-next", Button)
         prev_btn.disabled = index <= 0
         next_btn.disabled = index < 0 or index >= len(jobs) - 1
+        skip_btn = self.query_one("#job-skip", Button)
+        can_skip_fn = getattr(self.controller, "is_pending_skippable", None)
+        can_skip = bool(callable(can_skip_fn) and can_skip_fn(job))
+        skip_btn.display = can_skip
+        skip_btn.disabled = not can_skip
+        if can_skip:
+            skip_btn.label = (
+                tr("job.restore_queued") if getattr(job, "user_skipped", False) else tr("job.skip_queued")
+            )
         retry = self.query_one("#job-retry", Button)
         retry.display = bool(getattr(job, "retryable", False))
         retry.disabled = bool(
@@ -221,7 +250,7 @@ class JobDetailsScreen(ModalScreen[None]):
         if was_focused is not None and (
             getattr(was_focused, "disabled", False) or not getattr(was_focused, "display", True)
         ):
-            for candidate in (next_btn, prev_btn, retry, self.query_one("#job-modal-scroll", VerticalScroll)):
+            for candidate in (next_btn, prev_btn, skip_btn, retry, self.query_one("#job-modal-scroll", VerticalScroll)):
                 if getattr(candidate, "display", True) and not getattr(candidate, "disabled", False):
                     candidate.focus()
                     break
@@ -244,12 +273,28 @@ class JobDetailsScreen(ModalScreen[None]):
     def action_next(self) -> None:
         self._move(1)
 
+    def action_toggle_skip(self) -> None:
+        toggle = getattr(self.controller, "toggle_skip_queued", None)
+        if not callable(toggle):
+            return
+        result = toggle(self.job)
+        if result is True:
+            self.app.notify(tr("job.notify_skipped_queued", name=self.job.name), timeout=3)
+        elif result is False:
+            self.app.notify(tr("job.notify_restored_queued", name=self.job.name), timeout=3)
+        else:
+            return
+        self._last_body = None
+        self.refresh_details()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         if event.button.id == "job-previous":
             self.action_previous()
         elif event.button.id == "job-next":
             self.action_next()
+        elif event.button.id == "job-skip":
+            self.action_toggle_skip()
         elif event.button.id == "job-retry" and getattr(self.job, "retryable", False):
             if not self.query_one("#job-retry", Button).disabled:
                 job = self.job

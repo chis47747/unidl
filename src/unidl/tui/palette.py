@@ -19,9 +19,8 @@ class UnidlCommands(Provider):
 
     def _entry_specs(self) -> list[tuple[str, str, object, tuple[str, ...]]]:
         app = self.app
-        order = ["dark", "light"]
         current = app.theme_preference
-        nxt = order[(order.index(current) + 1) % len(order)]
+        nxt = app.next_toggle_theme()
         entries: list[tuple[str, str, object, tuple[str, ...]]] = [
             (tr("palette.search"), tr("palette.search_help"), app.action_global_search, ()),
             (
@@ -31,6 +30,12 @@ class UnidlCommands(Provider):
                 (),
             ),
             (tr("palette.settings"), tr("palette.settings_help"), app.action_global_settings, ()),
+            (
+                tr("palette.shortcuts"),
+                tr("palette.shortcuts_help"),
+                app.action_show_shortcuts,
+                ("?", "keys", "help", "hotkeys"),
+            ),
             (
                 tr("palette.theme"),
                 tr(

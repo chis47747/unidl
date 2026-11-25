@@ -39,6 +39,11 @@ class SegmentInfo:
     dash_subtitle_period: DashSubtitlePeriod | None = None
     # Opt-in window of a zero-origin, independently playable AAC section.
     dash_audio_period_duration: float | None = None
+    # Runtime-only markers keep pipe synchronization separate from native
+    # sequence numbers (which HLS may use to derive its IV).
+    live_generation: int = 0
+    live_clock: tuple[str, float] | None = None
+    vod_key_fingerprint: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +93,9 @@ class StreamInfo:
     extra: dict[str, Any] = field(default_factory=dict)
     #: Explicit stereoscopic video metadata, independent of HDR/Dolby Vision.
     is_3d: bool = False
+    # Internal VOD authorization identity; never read from manifest JSON.
+    vod_resume_id: str = ""
+    vod_resume_generation: str = ""
 
     @property
     def segments_count(self) -> int:

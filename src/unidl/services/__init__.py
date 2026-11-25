@@ -15,7 +15,7 @@ from types import ModuleType
 
 from ..core.compiled_service import register_compiled_services
 from ..core.diagnostics import safe_log_text
-from ..core.service import Service, registry
+from ..core.service import RegistrationChecks, Service, registry
 from ..core.service_catalog import COMPILED_ONLY_IMPLEMENTATION, ServiceSource, discover_sources, service_roots
 
 __all__ = ["compiled_service_errors", "service_load_errors"]
@@ -70,6 +70,7 @@ def load_all(config=None) -> int:
     _COMPILED_SERVICE_ERRORS.clear()
     for source in discover_sources(home=home):
         packages[source.package].append(source)
+    checks = RegistrationChecks()
     for package, sources in packages.items():
         declared = next((source for source in sources if source.manifest is not None), sources[0])
         if declared.error:
@@ -81,7 +82,7 @@ def load_all(config=None) -> int:
         prefix = fullname + "."
         existing = {name for name in sys.modules.copy() if name == fullname or name.startswith(prefix)}
         try:
-            with registry.registration_scope():
+            with registry.registration_scope(checks=checks):
                 if compiled:
                     register_compiled_services(fullname, manifest_path=declared.manifest or declared.path)
                 else:

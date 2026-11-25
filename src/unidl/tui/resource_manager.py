@@ -46,7 +46,7 @@ from .bidi import visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .input import ClipboardTextArea as TextArea
-from .settings_layout import SettingRow, label_width, setting_row
+from .settings_layout import SettingRow, label_width, setting_row, stable_help
 from .vault_targets import VaultCheckbox, VaultTargetResult, VaultTargetScreen
 
 _NAME_RE = re.compile(r"^[^\s][^\n\r]*$")
@@ -815,12 +815,12 @@ class ResourceManagerScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
         yield Static(tr("resource.title"), id="masthead")
-        yield Static("", id="resource-manager-help")
         yield Tabs(
             Tab(tr("resource.tab.cdm"), id="resource-tab-cdm"),
             Tab(tr("resource.tab.vault"), id="resource-tab-vault"),
             id="resource-tabs",
         )
+        yield Static("", id="resource-manager-help")
         with Horizontal(id="statusline"):
             yield Static("", id="crumbs-pill", classes="pill")
         with Vertical(id="resource-manager-body"):
@@ -997,8 +997,11 @@ class ResourceManagerScreen(Screen[None]):
         option_list.clear_options()
         self._rows = self._cdm_rows() if self._tab == "cdm" else self._vault_rows()
         section = tr("resource.section.cdm") if self._tab == "cdm" else tr("resource.section.vault")
-        help_text = tr("resource.help.cdm") if self._tab == "cdm" else tr("resource.help.vault")
-        self.query_one("#resource-manager-help", Static).update(f"[$muted]{help_text}[/]")
+        cdm_help = f"[$muted]{tr('resource.help.cdm')}[/]"
+        vault_help = f"[$muted]{tr('resource.help.vault')}[/]"
+        self.query_one("#resource-manager-help", Static).update(
+            stable_help(cdm_help if self._tab == "cdm" else vault_help, (cdm_help, vault_help))
+        )
         self.query_one("#crumbs-pill", Static).update(
             f"[$dim]{tr('resource.entries', section=section, count=sum(row is not None for row in self._rows))}[/]"
         )

@@ -28,7 +28,7 @@ from ..core.settings import Settings
 from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card, refresh_locale_widgets
 from .input import ClipboardInput as Input
-from .settings_layout import SettingRow, label_width, setting_row
+from .settings_layout import SettingRow, label_width, setting_row, stable_help
 from .vault_targets import VaultCheckbox
 
 PROXY_ROUTING_ROWS = (
@@ -697,13 +697,13 @@ class ProxyManagerScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
         yield Static(tr("proxy.title"), id="masthead")
-        yield Static("", id="proxy-manager-help")
         yield Tabs(
             Tab(tr("proxy.tab.routing"), id="proxy-tab-routing"),
             Tab(tr("proxy.tab.endpoints"), id="proxy-tab-endpoints"),
             Tab(tr("proxy.tab.providers"), id="proxy-tab-providers"),
             id="proxy-tabs",
         )
+        yield Static("", id="proxy-manager-help")
         with Vertical(id="proxy-manager-body"):
             yield Static("", id="proxy-preview")
             yield OptionList(id="proxy-list")
@@ -770,13 +770,14 @@ class ProxyManagerScreen(Screen[None]):
         selected = option_list.highlighted
         self._rows = self._tab_rows()
         option_list.clear_options()
-        if self._tab == "routing":
-            help_text = tr("proxy.help.routing")
-        elif self._tab == "endpoints":
-            help_text = tr("proxy.help.endpoints")
-        else:
-            help_text = tr("proxy.help.providers")
-        self.query_one("#proxy-manager-help", Static).update(f"[$muted]{help_text}[/]")
+        help_by_tab = {
+            "routing": f"[$muted]{tr('proxy.help.routing')}[/]",
+            "endpoints": f"[$muted]{tr('proxy.help.endpoints')}[/]",
+            "providers": f"[$muted]{tr('proxy.help.providers')}[/]",
+        }
+        self.query_one("#proxy-manager-help", Static).update(
+            stable_help(help_by_tab.get(self._tab, help_by_tab["providers"]), help_by_tab.values())
+        )
         for row in self._rows:
             option_list.add_option(Option(self._row_markup(row)))
         option_list.highlighted = min(selected or 0, max(0, len(self._rows) - 1)) if self._rows else None

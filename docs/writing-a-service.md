@@ -666,6 +666,93 @@ example: manifest authorization returns the ladder, shared output settings choos
 what unidl downloads, and `pssh_video_profile` independently chooses the video
 media playlist used as the Widevine licence seed.
 
+## Reauthorizing an active live recording
+
+Set `LIVE_REAUTHORIZATION = True` on the service class in `__init__.py` and
+implement `reauthorize_live(playback, request, log)`. Omit the flag or leave it
+false to keep the current behavior. This is a service capability, not a
+`unidl.yaml` setting. It is not invoked for VOD, live-as-VOD, or portable export
+imports. It does not change the initial license workflow or the legacy
+`live_key_pssh` hook on services that already use it.
+
+- `LiveKeyRequest`: Core checks the configured vaults first unless replacing
+  a failed key. Use the active playback session and the request's exact track,
+  segment and KID. When available, `manifest_url` and `initialization` describe
+  the current source and init range, and small in-memory init data is supplied
+  in `initialization.init_data`. Return a list of `kid:key` pairs; Core requires
+  the requested KID and does not infer Widevine, PlayReady or another system.
+  If the KID is not known, the service cannot renew, or the answer does not
+  match, the manual key prompt remains the fallback.
+- `LiveSourceExpired`: The live manifest or a segment returned HTTP 401/403.
+  Renew the same channel and playback profile with the existing authenticated
+  client. Return `LiveSourceRenewal(manifest_urls=(...))` for network HLS,
+  DASH or ISM manifests. These URLs are alternatives, not tracks to merge.
+  For a provider API that returns manifest contents, pass
+  `source=DeliverySource.from_hls(...)`, `from_dash(...)` or `from_json(...)`
+  and `base_url` with the HTTP(S) origin for relative URLs. JSON can describe
+  a collection of authorized manifests. Its parsed tracks must still expose
+  an ongoing refreshable source for later windows. Supply `headers` only when
+  replacing the complete media-header set; omit it to retain active headers.
+  Keep the new session available for subsequent key requests and release it
+  on normal playback teardown.
+
+Core never restarts the service menu, changes selected tracks, or jumps to the
+live edge as part of renewal. It checks rendition identity and a continuous
+cursor per selected track. HLS program date-time, DASH presentation timing
+and normalized ISM time can prove continuity even if segment numbering changes.
+Without comparable timing, Core requires an unambiguous overlap and a matching
+sequence. Do not assume that two renditions' sequence numbers advance
+together, or that a fresh URL by itself proves a match. If a synchronized
+batch cannot be found, Core stops and saves what was already recorded.
+Source renewal is bounded to one attempt until recording advances. An ordinary
+timeout, 404 or 503 is not treated as expired authorization. Custom transports
+that do not expose these authorization failures or a refreshable native
+inventory need their own transport integration.
+
+The hook is runtime-only: it must not serialize an account, session or
+callback into an export, assume a standalone download holds an authorized
+session, or log authorization data. Return `None` when the active session
+cannot answer, use cancellable network I/O, and keep existing Back/Stop
+behavior. See [the delivery contract](downloader-integration.md#live-reauthorization)
+for the recorder's validation and fallback behavior.
+
+## Reauthorizing a VOD download
+
+VOD is a separate capability: set `VOD_REAUTHORIZATION = True` on the service
+class in `__init__.py`, and set `Playback.vod_asset_id` when authorizing the
+initial stream. Use a stable provider identifier for the actual asset and
+edition, not a display title, manifest URL, or session token. Two cuts of the
+same title must have different identifiers. Leave the flag unset if the
+service cannot renew the same edition with an active account.
+
+Override `reauthorize_playback(playback, request, log)` to handle
+`VodSourceExpired`. The request includes the HTTP status, failure phase, asset
+identity, and the selected track descriptors. Use the existing authenticated
+client and the same authorized asset/profile. Do not restart the service's
+menu, change renditions, or log signed URLs or keys from this callback.
+Return `None` if access is denied or renewal is unavailable.
+
+A successful callback returns `PlaybackSourceRenewal` with the verified
+`asset_id` of the actual response and either `manifest_urls=(...)` or a
+typed `source` with its `base_url`. URLs are alternatives for one inventory.
+Optional `headers` replace the media request headers. If omitted, active
+headers are inherited only on the same origin; a cross-origin source
+receives portable headers only. If the renewed selection introduces new KIDs, include the
+corresponding authorized `keys` as `kid:key` pairs when they are not already
+available. Core does not guess a license exchange. The original
+`LiveSourceRenewal` result name remains an alias; live-only implementations can
+continue to use `reauthorize_live`.
+
+The native runner validates the new inventory before resuming. It keeps
+the initial picker selection and output settings, and reuses only completed
+parts whose source, byte range, timing, initialization and encryption
+fingerprints still match. A changed or unverified dependency invalidates the
+affected cache, not the whole selection by default. Custom transports need
+to expose a typed HTTP authorization error and a compatible native inventory
+to use this automatic path. See
+[VOD source renewal](downloader-integration.md#vod-source-renewal) for runtime
+limits and fallback behavior.
+
 ## Credentials
 
 Declare the logins you need; `unidl.yaml` fills them.

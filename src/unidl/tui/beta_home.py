@@ -573,6 +573,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                         )
                         yield from ordered
                     yield Static(tr("beta.hint"), id="beta-hint")
+                    yield Horizontal(id="recent-bar")
                     yield Static("", id="beta-summary")
                     yield Static("", id="beta-empty")
                     yield OptionList(id="beta-results")
@@ -613,7 +614,14 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
 
     def _fit_beta(self) -> None:
         self.set_class(self.size.width < 80, "narrow")
-        self.set_class(self.size.height < 32, "compact")
+        density = getattr(self.app, "density_mode", "auto")
+        if density == "compact":
+            compact = True
+        elif density == "comfortable":
+            compact = False
+        else:
+            compact = self.size.height < 32
+        self.set_class(compact, "compact")
 
     def _fit_statusline(self) -> None:
         super()._fit_statusline()
@@ -976,19 +984,18 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         failed = False
         worker = get_current_worker()
         try:
-            for path, document, _problem in exports.scan(folder):
+            for path, info in exports.scan_index(folder):
                 if worker.is_cancelled:
                     return
                 relative = str(path.relative_to(folder))
-                service = (document.service_name or document.service) if document else ""
-                labels = [entry.label() for entry in document.entries] if document else []
-                titles = [entry.title.full_label() for entry in document.entries if entry.title] if document else []
+                service = info.service if info else ""
                 # Keep only display/search metadata here, never keys, headers,
                 # cookies or manifest URLs. Selection re-reads the source file.
                 hits.append(_ExportHit(
-                    path, labels[0] if labels else path.stem, relative, service,
-                    len(labels), " ".join([relative, service, document.service if document else "",
-                                          *labels, *titles]), document is not None,
+                    path, info.label if info and info.label else path.stem, relative, service,
+                    info.count if info else 0,
+                    " ".join((relative, service, info.terms if info else "")),
+                    info is not None,
                 ))
         except Exception:  # noqa: BLE001 - a failed folder scan must not take down the TUI
             failed = True
@@ -1044,6 +1051,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         scroll_y = options.scroll_y if preserve_selection else 0
         query = self._query()
         mode = self.search_mode
+        self._refresh_recent_bar(visible=not query and mode == "auto")
         rows = []
         if mode == "add_keys":
             rows = [_Result("add_keys", tr("beta.action.add_keys"))]

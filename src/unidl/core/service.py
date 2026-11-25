@@ -11,6 +11,7 @@ capability to ``self`` and implements a coarser interface instead - because
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -28,6 +29,7 @@ from .cdm import WIDEVINE, CdmError, DeviceFile, system_of
 from .config import Config
 from .cookies import CookieError, CookieStore, as_header
 from .credentials import Credential, CredentialSlot, mask_account
+from .delivery import LiveKeyRequest, LiveSourceExpired, LiveSourceRenewal, PlaybackSourceRenewal, VodSourceExpired
 from .flow import SCOPE_ROOT, Ask, Back, Choice, Field, FlowContext
 from .helpers import Helper, HelperReport, HelperResolver, HelperRunner, load_module
 from .naming import save_name_for
@@ -345,6 +347,10 @@ class Service:
     LEGACY_IDS: tuple[str, ...] = ()
     #: Explicit opt-in: expose Custom license and keep service-owned planning.
     CUSTOM_LICENSE: bool = False
+    #: Opt in to service-managed authorization renewal during live capture.
+    LIVE_REAUTHORIZATION: bool = False
+    #: Opt in independently for finite media with an active provider session.
+    VOD_REAUTHORIZATION: bool = False
     #: The short uppercase service tag unshackle uses - PMPT, DSNP, AMZN. Left
     #: empty means "derive one", so a service does not have to invent a tag, but
     #: setting it explicitly is how the real one gets recorded.
@@ -1410,6 +1416,32 @@ class Service:
         del playback, stream, segment, kid, log
         return None
 
+    def reauthorize_playback(
+        self,
+        playback: Playback,
+        request: LiveKeyRequest | LiveSourceExpired | VodSourceExpired,
+        log: Callable[[str], None],
+    ) -> list[str] | PlaybackSourceRenewal | None:
+        """Renew an active playback, without changing the programme or selection."""
+        if isinstance(request, VodSourceExpired):
+            return None
+        return self.reauthorize_live(playback, request, log)
+
+    def reauthorize_live(
+        self,
+        playback: Playback,
+        request: LiveKeyRequest | LiveSourceExpired,
+        log: Callable[[str], None],
+    ) -> list[str] | LiveSourceRenewal | None:
+        """Resolve only the requested live event using the active service session.
+
+        Return key pairs for LiveKeyRequest, or fresh sources for
+        LiveSourceExpired. Do not invoke a UI flow or log authorization data.
+        Return None if renewal is unavailable. Use bounded, cancellable I/O.
+        """
+        del playback, request, log
+        return None
+
     def format_keys(self, playback: Playback, keys: list[str]) -> list[str]:
         """Format resolved keys for the downloader's manifest representation.
 
@@ -1562,6 +1594,58 @@ class Service:
 # --------------------------------------------------------------------- registry
 
 
+class RegistrationChecks:
+    """Alias and identity owners accepted during *one* package discovery pass."""
+
+    def __init__(self) -> None:
+        self._accepted: set[type[Service]] = set()
+        self._identities: dict[str, set[type[Service]]] = {}
+        self._aliases: dict[str, set[type[Service]]] = {}
+
+    def validate(self, services: Iterable[type[Service]], config: Config | None = None) -> None:
+        current = set(services)
+        # Normal discovery only adds classes. A replacement can *remove* the
+        # one exact identity that used to disambiguate two unchanged aliases.
+        # In that rare case rebuild separately and only publish on success.
+        index = self if self._accepted <= current else RegistrationChecks()
+        added = sorted(current - index._accepted, key=lambda s: (s.NAME.lower(), s.ID))
+        index._validate_new(added, config)
+        if index is not self:
+            self._accepted, self._identities, self._aliases = index._accepted, index._identities, index._aliases
+
+    def _validate_new(self, added: list[type[Service]], config: Config | None) -> None:
+        identities: dict[str, set[type[Service]]] = {}
+        aliases: dict[str, set[type[Service]]] = {}
+        problems: list[str] = []
+        for service in added:
+            for identity in (service.ID, service.NAME):
+                identities.setdefault(str(identity).strip().lower(), set()).add(service)
+            for alias in service.ALIASES:
+                aliases.setdefault(str(alias).strip().lower(), set()).add(service)
+            counts = Counter(spec.key for spec in service.setting_specs(config))
+            repeated = sorted(key for key, count in counts.items() if count > 1)
+            if repeated:
+                problems.append(f"{service.ID}: duplicate setting key(s) {', '.join(repeated)}")
+
+        # Check both sorts of changes: a new exact name can break a previously
+        # unambiguous alias even when the new service declares no aliases.
+        for name in sorted(identities.keys() | aliases.keys()):
+            owners = aliases.get(name, set()).union(self._aliases.get(name, ()))
+            if len(owners) < 2:
+                continue
+            exact = identities.get(name, set()).union(self._identities.get(name, ()))
+            if len(exact) != 1:
+                ordered = sorted(owners, key=lambda s: (s.NAME.lower(), s.ID))
+                problems.append(f"alias {name!r} is ambiguous between " + ", ".join(s.ID for s in ordered))
+        if problems:
+            raise ValueError("invalid service declarations: " + "; ".join(problems))
+
+        for pending, accepted in ((aliases, self._aliases), (identities, self._identities)):
+            for name, owners in pending.items():
+                accepted.setdefault(name, set()).update(owners)
+        self._accepted.update(added)
+
+
 class ServiceRegistry:
     def __init__(self) -> None:
         self._services: dict[str, type[Service]] = {}
@@ -1603,14 +1687,17 @@ class ServiceRegistry:
         return service
 
     @contextmanager
-    def registration_scope(self):
+    def registration_scope(self, *, checks: RegistrationChecks | None = None):
         """Commit a whole package's registrations only after validation."""
         with self._lock:
             previous = self._services.copy()
             try:
                 yield
                 if self._services != previous:
-                    self.validate()
+                    if checks is None:
+                        self.validate()
+                    else:
+                        checks.validate(self._services.values())
             except BaseException:
                 self._services = previous
                 raise
@@ -1628,33 +1715,7 @@ class ServiceRegistry:
 
     def validate(self, config: Config | None = None) -> None:
         """Reject declarations whose meaning depends on import or list order."""
-        services = self.all()
-        problems: list[str] = []
-        identities: dict[str, list[type[Service]]] = {}
-        aliases: dict[str, list[type[Service]]] = {}
-        for service in services:
-            for identity in (service.ID, service.NAME):
-                identities.setdefault(str(identity).strip().lower(), []).append(service)
-            for alias in service.ALIASES:
-                aliases.setdefault(str(alias).strip().lower(), []).append(service)
-            specs = service.setting_specs(config)
-            keys = [spec.key for spec in specs]
-            repeated = sorted({key for key in keys if keys.count(key) > 1})
-            if repeated:
-                problems.append(f"{service.ID}: duplicate setting key(s) {', '.join(repeated)}")
-
-        for alias, owners in aliases.items():
-            unique = list(dict.fromkeys(owners))
-            if len(unique) < 2:
-                continue
-            exact = list(dict.fromkeys(identities.get(alias, [])))
-            if len(exact) != 1:
-                problems.append(
-                    f"alias {alias!r} is ambiguous between "
-                    + ", ".join(service.ID for service in unique)
-                )
-        if problems:
-            raise ValueError("invalid service declarations: " + "; ".join(problems))
+        RegistrationChecks().validate(self.all(), config)
 
     def all(self) -> list[type[Service]]:
         with self._lock:

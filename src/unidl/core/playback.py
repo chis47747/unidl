@@ -358,6 +358,10 @@ class Playback:
     #: Service opt-in only. Expose finite muxed A/V sources as independently
     #: selectable, losslessly separated video/audio. No probing before the picker.
     split_muxed_audio: bool = False
+    #: Runtime only: an export never supplies an active provider session.
+    from_export: bool = field(default=False, repr=False, compare=False)
+    #: Runtime edition/asset identity for opt-in VOD source renewal.
+    vod_asset_id: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.save_name = safe_filename(self.save_name, label="Playback.save_name")

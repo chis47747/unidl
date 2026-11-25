@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.7.5] - 2026-11-25
+
+### Startup and interface
+
+- Improved startup validation when discovering and registering services.
+- Fixed track selection in narrow windows and reduced unnecessary refreshes in large lists.
+- Added a contextual shortcut guide and progress indicators for compatible terminals.
+- Added more themes, compact layout controls, and colorblind-friendly status colors.
+
+### Imports and batch queues
+
+- Fixed multilingual titles and kept the selected import tied to the correct export file.
+- Fixed reordering in long download queues and removed duplicate batch confirmation prompts.
+
+### Authorization and downloads
+
+- Added in-download reauthorization for live recordings and on-demand downloads in services that opt in, without returning to the service menu.
+- Verified the selected tracks and media continuity before switching to a renewed source. Reused completed parts only when they still matched.
+- Fixed resume validation for changed initialization segments and prevented muxing from overwriting a file created by another job.
+
 ## [2.7.4] - 2026-11-24
 
 ### Interface

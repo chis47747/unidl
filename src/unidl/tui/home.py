@@ -32,6 +32,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Static
 from textual.worker import get_current_worker
@@ -90,6 +91,26 @@ def _is_number(value: str) -> bool:
     return value.isascii() and value.isdigit() and int(value) > 0
 
 
+class RecentServiceChip(Static):
+    """Clickable shortcut chip for one recently opened service."""
+
+    ALLOW_SELECT = False
+
+    class Chosen(Message):
+        def __init__(self, service: type[Service]) -> None:
+            super().__init__()
+            self.service = service
+
+    def __init__(self, service: type[Service]) -> None:
+        super().__init__(visual_markup(service.NAME), classes="recent-chip")
+        self.service = service
+        self.tooltip = f"{service.NAME} ({service.tag()})"
+
+    def on_click(self, event) -> None:
+        event.stop()
+        self.post_message(self.Chosen(self.service))
+
+
 class HomeScreen(Screen):
     USES_SERVICE_GRID = True
     BINDINGS = [
@@ -130,6 +151,7 @@ class HomeScreen(Screen):
         self._update_info = None
         self._rendered_locale = ""
         self._skip_resume_refresh = False
+        self._recent_signature: tuple[str, tuple[str, ...]] | None = None
 
     # -------------------------------------------------------------- composition
     def compose_header(self) -> ComposeResult:
@@ -163,6 +185,7 @@ class HomeScreen(Screen):
                 yield StatusChip("open_download_location", id="download-setup-note")
                 yield StatusChip("pick_cdm", id="setup-note")
                 yield StatusChip("app.global_settings", id="service-setup-note")
+            yield Horizontal(id="recent-bar")
             with Horizontal(id="service-list-head", classes="section-head"):
                 yield Static("", id="service-list-summary")
                 yield StatusChip(
@@ -229,6 +252,29 @@ class HomeScreen(Screen):
         self._render_services_heading(len(self.app.home_services))
         self.refresh_env()
         self._render_setup_note()
+        found = self.query("#filter")
+        needle = found.first(Input).value.strip() if found else ""
+        self._refresh_recent_bar(visible=not needle)
+
+    def _refresh_recent_bar(self, *, visible: bool = True) -> None:
+        bars = self.query("#recent-bar")
+        if not bars:
+            return
+        bar = bars.first(Horizontal)
+        recent = self.app.recent_services() if visible else []
+        if not recent:
+            bar.display = False
+            return
+        signature = (get_translator().locale, tuple(service.ID for service in recent))
+        bar.display = True
+        if signature == self._recent_signature:
+            return
+        self._recent_signature = signature
+        bar.remove_children()
+        bar.mount(
+            Static(f"[$muted]{tr('home.recent')}[/]", classes="recent-label"),
+            *(RecentServiceChip(service) for service in recent),
+        )
 
     def refresh_banner(self) -> None:
         found = self.query("#banner")
@@ -236,6 +282,11 @@ class HomeScreen(Screen):
             return
         width = self.size.width or self.app.size.width
         height = self.size.height or self.app.size.height or None
+        density = getattr(self.app, "density_mode", "auto")
+        if density == "compact":
+            height = 20
+        elif density == "comfortable":
+            height = max(height or 0, 34)
         colour_fn = getattr(self.app, "title_banner_colour", None)
         colour = colour_fn() if callable(colour_fn) else "$accent"
         found.first(Static).update(
@@ -371,7 +422,7 @@ class HomeScreen(Screen):
         from ..core import exports
 
         try:
-            found = exports.scan(folder)
+            found = exports.scan_index(folder)
         except Exception:  # noqa: BLE001 - an unreadable folder is not fatal
             found = []
         readable = [row for row in found if row[1] is not None]
@@ -1004,6 +1055,7 @@ class HomeScreen(Screen):
         Existing widgets do not get destroyed and recreated on every keystroke.
         """
         needle = needle.strip().lower()
+        self._refresh_recent_bar(visible=not needle)
         by_url = self.app.registry.for_url(needle) if needle else None
         visible = 0
 
@@ -1309,6 +1361,10 @@ class HomeScreen(Screen):
     def on_service_cell_chosen(self, event: ServiceCell.Chosen) -> None:
         event.stop()
         self._open(event.service)
+
+    def on_recent_service_chip_chosen(self, event: RecentServiceChip.Chosen) -> None:
+        event.stop()
+        self.app.open_service(event.service)
 
     def on_service_cell_focused(self, event: ServiceCell.Focused) -> None:
         event.stop()

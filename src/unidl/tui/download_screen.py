@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 import time
+from bisect import bisect_left
+from collections import Counter, deque
 from typing import TYPE_CHECKING
 
 from rich.text import Text
@@ -45,6 +47,17 @@ from .session import (
     RUNNING,
     SKIPPED,
     _track_highlights,
+)
+from .terminal_progress import (
+    PROGRESS_ERROR,
+    PROGRESS_HIDDEN,
+    PROGRESS_INDETERMINATE,
+    PROGRESS_NORMAL,
+    PROGRESS_PAUSED,
+    format_speed,
+    format_terminal_title,
+    parse_frame_metrics,
+    render_sparkline,
 )
 
 if TYPE_CHECKING:
@@ -165,13 +178,43 @@ class QueueRow(Static):
         super().__init__(line, classes="queue-row" + (" retryable" if job.retryable else ""))
         self.job = job
         self.index = index
-        self._queue_line = line
+        self.render_key = None
 
     def on_click(self, event) -> None:
         event.stop()
         inspect = getattr(self.screen, "show_job_details", None)
         if callable(inspect):
             inspect(self.job)
+
+
+def _order_queue_rows(target: VerticalScroll, current: list[QueueRow], wanted: list[QueueRow]) -> None:
+    if current == wanted:
+        return
+    # Leave the longest already-ordered subsequence mounted in place. A
+    # swap at opposite ends of a long queue should move just two DOM nodes.
+    rank = {row: i for i, row in enumerate(current)}
+    tails: list[int] = []
+    ends: list[int] = []
+    previous = [-1] * len(wanted)
+    for i, row in enumerate(wanted):
+        value = rank[row]
+        slot = bisect_left(tails, value)
+        if slot:
+            previous[i] = ends[slot - 1]
+        if slot == len(tails):
+            tails.append(value)
+            ends.append(i)
+        else:
+            tails[slot], ends[slot] = value, i
+    stable = ends[-1]
+    for i in range(len(wanted) - 1, -1, -1):
+        if i == stable:
+            stable = previous[i]
+        elif i + 1 < len(wanted):
+            target.move_child(wanted[i], before=wanted[i + 1])
+        else:
+            target.move_child(wanted[i], after=-1)
+
 
 #: How much of a shortened name is worth keeping at the front. The rest of the
 #: room goes to the tail, because that is where the release half lives - the
@@ -206,6 +249,7 @@ class DownloadScreen(AskHost):
     BINDINGS = [
         *AskHost.BINDINGS,
         Binding("p", "pause_shortcut", "Pause / Resume", show=False),
+        Binding("R", "retry_all_shortcut", "Retry failed", show=False),
     ]
 
     #: the log is visible here, but its compact default still leaves progress
@@ -236,6 +280,11 @@ class DownloadScreen(AskHost):
         self._pause_started_at: float | None = None
         self._shown_elapsed = ""
         self._animation_frame = 0
+        self._speed_samples: deque[float] = deque(maxlen=16)
+        self._peak_speed_bps = 0.0
+        self._last_speed_bps: float | None = None
+        self._last_percent: int | None = None
+        self._last_spinning = False
 
     def compose_identity(self) -> ComposeResult:
         yield Static("", id="ident-line")
@@ -252,7 +301,11 @@ class DownloadScreen(AskHost):
                 "show_attachments", id="delivery-attachments", classes="chapter-chip"
             )
         yield Static("", id="delivery-elapsed")
-        yield Static("", id="queue-summary")
+        with Horizontal(id="queue-summary-row"):
+            yield Static("", id="queue-summary")
+            yield StatusChip(
+                "retry_failed", id="queue-retry-all", classes="chapter-chip"
+            )
         yield Static("", id="status-line")
 
     def chrome_widget(self) -> Chrome:
@@ -324,6 +377,7 @@ class DownloadScreen(AskHost):
 
     def refresh_keys(self) -> None:
         super().refresh_keys()
+        self._refresh_queue_retry_chip()
         found = self.query("#chrome-stop")
         if not found:
             return
@@ -357,6 +411,35 @@ class DownloadScreen(AskHost):
         if self._current_ask is not None:
             return
         self.action_stop_resume()
+
+    def action_retry_all_shortcut(self) -> None:
+        """One-key retry of all failed/stopped rows when no prompt owns the keyboard."""
+        if self._current_ask is not None:
+            return
+        self.action_retry_failed()
+
+    def _refresh_queue_retry_chip(self) -> None:
+        found = self.query("#queue-retry-all")
+        if not found:
+            return
+        chip = found.first(StatusChip)
+        controller = self.controller
+        busy = bool(
+            getattr(
+                controller,
+                "batch_busy",
+                getattr(controller, "job_running", False)
+                or getattr(controller, "_retry_pending", False),
+            )
+        )
+        batch_paused = bool(getattr(controller, "batch_paused", False))
+        rescuable = sum(1 for job in getattr(controller, "jobs", ()) if getattr(job, "retryable", False))
+        if rescuable > 0 and not busy and not batch_paused:
+            chip.update(f"↻ {tr('delivery.retry_failed_btn', count=rescuable)}")
+            chip.display = True
+        else:
+            chip.update("")
+            chip.display = False
 
     def action_stop_resume(self) -> None:
         """Pause the active job in place, resume it, or retry a finished row."""
@@ -459,16 +542,26 @@ class DownloadScreen(AskHost):
         attachments_found = self.query("#delivery-attachments")
         if attachments_found:
             attachments_found.first(StatusChip).display = False
+        retry_found = self.query("#queue-retry-all")
+        if retry_found:
+            retry_found.first(StatusChip).display = False
         self.refresh_keys()
         queue = getattr(self.controller, "queue_jobs", None)
         self.render_queue(queue() if callable(queue) else self.controller.jobs, self.controller.batch_total)
         # a screen that appears while something is already downloading shows it
         version, rows = self.controller.frame_snapshot()
+        self._record_frame_metrics(rows)
         self.show_frame(rows)
         self._shown_frame_version = version
         self._frame_rows = len(rows)
         self._render_elapsed()
+        self._sync_terminal_progress()
         self.set_interval(FRAME_SECONDS, self._flush_frame)
+
+    def _on_host_unmount(self) -> None:
+        clear = getattr(getattr(self, "app", None), "clear_terminal_progress", None)
+        if callable(clear):
+            clear()
 
     def relocalize(self) -> None:
         """Redraw delivery header, details, queue, elapsed clock, and progress card."""
@@ -519,13 +612,133 @@ class DownloadScreen(AskHost):
         self._render_elapsed()
 
     # ------------------------------------------------------------- UniDL's own
+    def _record_frame_metrics(self, rows: list[str]) -> None:
+        """Extract live percent and aggregate speed samples from Core's frame."""
+        percent, speed_bps, spinning = parse_frame_metrics(rows, spinner_chars=SPINNER_FRAMES)
+        self._last_percent = percent
+        self._last_spinning = spinning
+        paused = bool(
+            getattr(self.controller, "job_running", False)
+            and getattr(self.controller, "pause_requested", False)
+        )
+        if speed_bps is not None and not paused:
+            samples = getattr(self, "_speed_samples", None)
+            if samples is None:
+                samples = deque(maxlen=16)
+                self._speed_samples = samples
+            samples.append(speed_bps)
+            self._last_speed_bps = speed_bps
+            self._peak_speed_bps = max(float(getattr(self, "_peak_speed_bps", 0.0) or 0.0), speed_bps)
+
+    def _sync_terminal_progress(
+        self,
+        *,
+        finished: bool = False,
+        failed_count: int = 0,
+        stopped_count: int = 0,
+        total_jobs: int = 0,
+    ) -> None:
+        """Mirror live download state into OSC 9;4 progress and OSC 0 window title."""
+        app = getattr(self, "app", None)
+        setter = getattr(app, "set_terminal_progress", None)
+        clearer = getattr(app, "clear_terminal_progress", None)
+        if not callable(setter) or not callable(clearer):
+            return
+        controller = getattr(self, "controller", None)
+        if finished:
+            if failed_count > 0:
+                setter(
+                    PROGRESS_ERROR,
+                    100,
+                    title=format_terminal_title(
+                        status_tag=tr("delivery.failed_n", failed=failed_count, total=total_jobs),
+                    ),
+                )
+            elif stopped_count > 0:
+                setter(
+                    PROGRESS_HIDDEN,
+                    0,
+                    title=format_terminal_title(status_tag=tr("delivery.stopped")),
+                )
+            else:
+                setter(
+                    PROGRESS_HIDDEN,
+                    0,
+                    title=format_terminal_title(status_tag=tr("delivery.finished")),
+                )
+            return
+
+        running = bool(
+            getattr(controller, "job_running", False)
+            or getattr(controller, "title_delay_active", False)
+        )
+        paused = bool(
+            getattr(controller, "pause_requested", False)
+            or getattr(controller, "batch_paused", False)
+        )
+        if not running and not paused:
+            clearer()
+            return
+
+        described = getattr(self, "_described", None)
+        name = str(getattr(described, "save_name", "") or "")
+        queue = getattr(controller, "queue_jobs", None)
+        jobs = queue() if callable(queue) else list(getattr(controller, "jobs", ()))
+        expected = getattr(controller, "batch_total", None) or len(jobs)
+        batch_pos: tuple[int, int] | None = None
+        if expected > 1:
+            done_count = sum(
+                1 for job in jobs if getattr(job, "state", "") in (DONE, FAILED, SKIPPED, CANCELLED)
+            )
+            current_num = min(expected, done_count + (1 if running else 0))
+            batch_pos = (max(1, current_num), expected)
+
+        pct = getattr(self, "_last_percent", None)
+        speed_bps = getattr(self, "_last_speed_bps", None)
+        if paused:
+            setter(
+                PROGRESS_PAUSED,
+                pct if pct is not None else 0,
+                title=format_terminal_title(
+                    percent=pct,
+                    paused=True,
+                    batch_pos=batch_pos,
+                    name=name,
+                ),
+            )
+        elif pct is not None:
+            setter(
+                PROGRESS_NORMAL,
+                pct,
+                title=format_terminal_title(
+                    percent=pct,
+                    speed_bps=speed_bps,
+                    batch_pos=batch_pos,
+                    name=name,
+                ),
+            )
+        else:
+            setter(
+                PROGRESS_INDETERMINATE,
+                0,
+                title=format_terminal_title(
+                    speed_bps=speed_bps,
+                    batch_pos=batch_pos,
+                    name=name,
+                ),
+            )
+
     def _flush_frame(self) -> None:
         """Paint progress, post-processing animation and elapsed time; UI thread."""
         self._sync_pause_clock()
         version, rows = self.controller.frame_snapshot()
+        changed = version != self._shown_frame_version
+        if changed:
+            self._record_frame_metrics(rows)
         self._render_elapsed()
+        self._sync_terminal_progress()
         animated = bool(rows) and any(character in SPINNER_FRAMES for row in rows for character in row)
-        if version == self._shown_frame_version and not animated:
+        if not changed and not animated:
             return
         # Width is fixed by the panel. With the same row count the live counter
         # text cannot change this widget's geometry, so skip Textual's full layout
@@ -621,16 +834,41 @@ class DownloadScreen(AskHost):
             getattr(self.controller, "job_running", False)
             and getattr(self.controller, "pause_requested", False)
         )
-        shown = f"{'paused' if paused else 'elapsed'}:{value}"
+        samples = list(getattr(self, "_speed_samples", ()))
+        last_speed = getattr(self, "_last_speed_bps", None)
+        peak_speed = float(getattr(self, "_peak_speed_bps", 0.0) or 0.0)
+        wide = getattr(getattr(self, "size", None), "width", 100) >= 96
+        spark = render_sparkline(samples, width=14 if wide else 10) if samples else ""
+        finished = getattr(self, "_download_finished_at", None) is not None
+        speed_label = format_speed(peak_speed if finished else last_speed) if spark else ""
+        peak_label = (
+            tr("delivery.peak_speed", speed=format_speed(peak_speed))
+            if (spark and wide and not finished and peak_speed > 0)
+            else ""
+        )
+        shown = f"{'paused' if paused else 'elapsed'}:{value}:{spark}:{speed_label}:{peak_label}"
         if shown == getattr(self, "_shown_elapsed", ""):
             return
         self._shown_elapsed = shown
-        line = Text()
+        palette = self.app.palette
+        line = Text(no_wrap=True, overflow="ellipsis")
         line.append(
             f"{tr('delivery.paused')}   " if paused else f"{tr('delivery.elapsed')}  ",
-            style=self.app.palette.warn if paused else self.app.palette.dim,
+            style=palette.warn if paused else palette.dim,
         )
-        line.append(value, style=self.app.palette.fg2)
+        line.append(value, style=palette.fg2)
+        if spark:
+            line.append("  ·  ", style=palette.dim)
+            spark_style = palette.warn if paused else (palette.ok if finished else palette.manifest)
+            line.append(spark, style=spark_style)
+            if speed_label:
+                line.append("  ", style=palette.dim)
+                if finished:
+                    line.append(tr("delivery.peak_speed", speed=speed_label), style=palette.dim)
+                else:
+                    line.append(speed_label, style=palette.fg2)
+            if peak_label:
+                line.append(f"  ({peak_label})", style=palette.dim)
         widget.update(line)
         widget.display = True
 
@@ -654,19 +892,36 @@ class DownloadScreen(AskHost):
         restating the header. It appears once there is more than one thing to
         keep track of, which is exactly when you stop being able to.
         """
+        summary_row = self.query("#queue-summary-row")
         summary = self.query("#queue-summary")
         listing = self.query("#queue-list")
         if not summary or not listing:
             return
 
         show = len(jobs) > 1 or (total or 0) > 1
+        if summary_row:
+            summary_row.first().display = show
         summary.first().display = show
         listing.first().display = show
+        self._refresh_queue_retry_chip()
+        target = listing.first(VerticalScroll)
+        # remove() is scheduled by Textual. Hide retired rows immediately so
+        # a second refresh in this event-loop turn cannot reclaim a dying row.
+        existing = [row for row in target.children if isinstance(row, QueueRow) and row.display]
+        wanted = {id(job) for job in jobs} if show else set()
+        kept = []
+        for row in existing:
+            if id(row.job) in wanted:
+                kept.append(row)
+            else:
+                row.display = False
+                row.remove()
         if not show:
+            self._queue_anchor = None
             return
 
         palette = self.app.palette
-        counts = {state: sum(1 for job in jobs if job.state == state) for state in STATE_MARK}
+        counts = Counter(job.state for job in jobs)
         finished = counts[DONE] + counts[FAILED] + counts[SKIPPED] + counts[CANCELLED]
         expected = total if total else len(jobs)
 
@@ -687,16 +942,16 @@ class DownloadScreen(AskHost):
                 head.append(tr(ident, count=counts[state]), style=getattr(palette, role))
         summary.first(Static).update(head)
 
-        target = listing.first(VerticalScroll)
-        existing = list(target.query(QueueRow))
-        reuse = len(existing) == len(jobs) and all(
-            row.job is job for row, job in zip(existing, jobs, strict=True)
-        )
-        if not reuse:
-            for row in existing:
-                row.remove()
+        by_job = {id(row.job): row for row in kept}
+        added = []
         rows = []
+        hint = tr("job.open_hint")
         for index, job in enumerate(jobs, start=1):
+            row = by_job.get(id(job))
+            key = (index, job.name, job.state, job.note, bool(job.retryable), palette, hint)
+            if row is not None and row.render_key == key:
+                rows.append(row)
+                continue
             mark, role = STATE_MARK[job.state]
             line = Text()
             line.append(f"{index:>3} ", style=palette.gutter)
@@ -707,19 +962,20 @@ class DownloadScreen(AskHost):
             )
             if job.note:
                 line.append(f"  {visual_text(job.note)}", style=palette.dim)
-            if reuse:
-                row = existing[index - 1]
-                if row._queue_line != line:
-                    row._queue_line = line
-                    row.update(line)
+            if row is not None:
+                row.index = index
+                row.update(line)
                 row.set_class(bool(job.retryable), "retryable")
             else:
                 row = QueueRow(line, job=job, index=index)
-                row.tooltip = tr("job.open_hint")
+                added.append(row)
+            row.tooltip = hint
+            row.render_key = key
             rows.append(row)
+        if added:
+            target.mount_all(added)
+        _order_queue_rows(target, kept + added, rows)
         if rows:
-            if not reuse:
-                target.mount_all(rows)
             active = next((row for row in rows if row.job.state == RUNNING), None)
             anchor = active or next((row for row in reversed(rows) if row.job.state != QUEUED), rows[0])
             identity = id(anchor.job)
@@ -934,7 +1190,13 @@ class DownloadScreen(AskHost):
             self._pause_started_at = None
             self._shown_elapsed = ""
             self._animation_frame = 0
+            self._speed_samples.clear()
+            self._peak_speed_bps = 0.0
+            self._last_speed_bps = None
+            self._last_percent = None
+            self._last_spinning = False
         self._render_elapsed()
+        self._sync_terminal_progress()
         self.refresh_keys()
 
     def _sync_delivery_context_visibility(self) -> None:
@@ -996,6 +1258,28 @@ class DownloadScreen(AskHost):
         # the header is no longer about one title, so a resize must leave it alone
         self._described = None
         self._described_tracks = None
+        self._sync_terminal_progress(
+            finished=True,
+            failed_count=failed,
+            stopped_count=stopped,
+            total_jobs=len(jobs),
+        )
+        emit_alert = getattr(self.app, "emit_completion_alert", None)
+        if callable(emit_alert):
+            if failed:
+                alert_title = tr("delivery.finished_errors")
+                alert_body = tr("delivery.failed_n", failed=failed, total=len(jobs))
+            elif stopped:
+                alert_title = tr("delivery.stopped")
+                alert_body = tr("delivery.cancelled_n", stopped=stopped, total=len(jobs))
+            else:
+                alert_title = tr("delivery.finished")
+                alert_body = (
+                    tr("delivery.titles_n", count=len(jobs))
+                    if len(jobs) > 1
+                    else (jobs[0].name if jobs else tr("delivery.finished"))
+                )
+            emit_alert(alert_title, alert_body)
         self.refresh_keys()
 
     def _effective_frame_width(self) -> int:

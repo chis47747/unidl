@@ -304,6 +304,7 @@ class LiveSegmentDescriptor:
     key_id: str | None = None
     key_uri: str | None = None
     program_date_time: str | None = None
+    init_data: bytes | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +318,48 @@ class LiveKeyRequest:
     require_kid: bool = False
     force: bool = False
     replace_existing: bool = False
+    manifest_url: str = ""
+    initialization: LiveSegmentDescriptor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LiveSourceExpired:
+    """The active live manifest or media returned an authorization error."""
+
+    status: int
+    phase: str  # "manifest" or "segment"
+
+
+@dataclass(frozen=True, slots=True)
+class VodSourceExpired:
+    """Authorization failure during a finite, already-selected delivery."""
+
+    status: int
+    phase: str
+    asset_id: str
+    tracks: tuple[TrackDescriptor, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackSourceRenewal:
+    """Fresh source inventory and complete replacement request headers, if any.
+
+    ``manifest_urls`` are alternatives for the same inventory. An API-owned
+    inline or JSON manifest can be supplied as ``source`` with its network base.
+    """
+
+    manifest_urls: tuple[str, ...] = ()
+    headers: Mapping[str, str] | None = None
+    source: DeliverySource | None = None
+    base_url: str | None = None
+    #: Required for VOD: the provider's actual asset/edition, not its display title.
+    asset_id: str = ""
+    #: Optional refreshed KID:key pairs, used only by the VOD delivery path.
+    keys: tuple[str, ...] = field(default=(), repr=False)
+
+
+# Retain the original live service API and its result identity.
+LiveSourceRenewal = PlaybackSourceRenewal
 
 
 class DeliveryStatus(str, Enum):
@@ -426,6 +469,11 @@ class DeliveryHooks:
     display_width: Callable[[], int | None] = _no_width
     # End live capture normally without cancelling its final mux/commit.
     stop_recording_requested: Callable[[], bool] | None = None
+    renew_live_source: Callable[[LiveSourceExpired], LiveSourceRenewal | None] | None = None
+    vod_asset_id: str = ""
+    vod_service_id: str = ""
+    vod_drm_system: str = ""
+    renew_vod_source: Callable[[VodSourceExpired], PlaybackSourceRenewal | None] | None = None
 
 
 @runtime_checkable
@@ -461,8 +509,10 @@ __all__ = [
     "ParseRequest",
     "ParsedManifest",
     "PauseToken",
+    "PlaybackSourceRenewal",
     "SourceKind",
     "StageEvent",
     "TrackDescriptor",
     "TrackProgressEvent",
+    "VodSourceExpired",
 ]

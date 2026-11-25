@@ -54,6 +54,7 @@ class _ConfirmingSelectionList(SelectionList[int]):
         Binding("enter", "confirm", "Confirm", show=False),
         Binding("a", "toggle_all", "Toggle all", show=False),
         Binding("n", "clear_all", "Clear", show=False),
+        Binding("i", "invert_selection", "Invert", show=False),
     ]
 
     class Confirmed(Message):
@@ -75,6 +76,17 @@ class _ConfirmingSelectionList(SelectionList[int]):
 
     def action_clear_all(self) -> None:
         self.deselect_all()
+
+    def action_invert_selection(self) -> None:
+        selected = set(self.selected)
+        for index in range(self.option_count):
+            item = self.get_option_at_index(index)
+            if item.disabled:
+                continue
+            if item.value in selected:
+                self.deselect(item.value)
+            else:
+                self.select(item.value)
 
 
 class AskWidget(Vertical):
@@ -449,10 +461,12 @@ class MultiPickWidget(_Filterable, _NumberJump):
                     yield ScrollTail(
                         _ConfirmingSelectionList(*self._selections(self._visible))
                     )
+                    yield Static("", id="multi-summary")
                     yield from self.compose_filter()
             return
         yield Label("", id="multi-hint", classes="ask-hint")
         yield ScrollTail(_ConfirmingSelectionList(*self._selections(self._visible)))
+        yield Static("", id="multi-summary")
         yield from self.compose_filter()
 
     def _selections(self, indexes: list[int]) -> list[Selection[int]]:
@@ -524,13 +538,95 @@ class MultiPickWidget(_Filterable, _NumberJump):
             )
             return
         enter = tr("ask.multi.enter_open") if not picked else tr("ask.multi.enter_confirm")
-        keys = tr("ask.multi.keys", enter=enter)
+        keys = tr("ask.multi.keys", enter=enter) + tr("ask.multi.invert_hint")
         if self.filterable:
             keys += tr("ask.multi.tab_filter")
         counted = f"[$accent]{tr('ask.multi.selected', picked=picked, total=total)}[/]"
         if self._filtered and (self._chosen - set(self._visible)):
             counted += f"[$dim]{tr('ask.multi.hidden')}[/]"
         self.query_one("#multi-hint", Label).update(f"[$dim]{keys}[/]   {counted}")
+        self._render_summary()
+
+    @staticmethod
+    def _format_spans(indexes: list[int]) -> str:
+        """Compress 0-based row indexes into concise 1-based spans (e.g. #1–5, #8)."""
+        if not indexes:
+            return ""
+        spans: list[str] = []
+        start = prev = indexes[0] + 1
+        for raw in indexes[1:]:
+            num = raw + 1
+            if num == prev + 1:
+                prev = num
+            else:
+                spans.append(f"#{start}" if start == prev else f"#{start}–{prev}")
+                start = prev = num
+        spans.append(f"#{start}" if start == prev else f"#{start}–{prev}")
+        if len(spans) > 6:
+            return ", ".join(spans[:5]) + f" … (+{len(spans) - 5})"
+        return ", ".join(spans)
+
+    def _selection_summary(self) -> str:
+        if not self._chosen:
+            return ""
+        chosen = sorted(index for index in self._chosen if 0 <= index < len(self.ask.choices))
+        if not chosen:
+            return ""
+        values = [self.ask.choices[index].value for index in chosen]
+        media_items = [val for val in values if getattr(val, "media_type", "")]
+        if media_items:
+            videos: list[object] = []
+            audios: list[object] = []
+            subs: list[object] = []
+            others = 0
+            for item in values:
+                kind = str(getattr(item, "media_type", "") or "").lower()
+                if kind == "video":
+                    videos.append(item)
+                elif kind == "audio":
+                    audios.append(item)
+                elif kind in {"subtitle", "subtitles", "text"}:
+                    subs.append(item)
+                else:
+                    others += 1
+            parts: list[str] = []
+            if videos:
+                res = next(
+                    (
+                        str(getattr(v, "resolution", "") or "").rsplit("x", 1)[-1]
+                        for v in videos
+                        if getattr(v, "resolution", None)
+                    ),
+                    "",
+                )
+                suffix = f" ({res}p)" if res.isdigit() else ""
+                parts.append(f"{tr('ask.multi.summary_video', count=len(videos))}{suffix}")
+            if audios:
+                langs = list(dict.fromkeys(str(getattr(a, "language", "") or "") for a in audios if getattr(a, "language", None)))
+                suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
+                parts.append(f"{tr('ask.multi.summary_audio', count=len(audios))}{suffix}")
+            if subs:
+                langs = list(dict.fromkeys(str(getattr(s, "language", "") or "") for s in subs if getattr(s, "language", None)))
+                suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
+                parts.append(f"{tr('ask.multi.summary_sub', count=len(subs))}{suffix}")
+            if others:
+                parts.append(tr("ask.multi.summary_other", count=others))
+            return f"[$dim]{tr('ask.multi.summary_prefix')}[/]  [$foreground]{visual_markup(' · '.join(parts))}[/]"
+        spans = self._format_spans(chosen)
+        return (
+            f"[$dim]{tr('ask.multi.summary_prefix')}[/]  "
+            f"[$accent]{tr('ask.multi.selected', picked=len(chosen), total=len(self.ask.choices))}[/]  "
+            f"[$muted]{spans}[/]"
+        )
+
+    def _render_summary(self) -> None:
+        found = self.query("#multi-summary")
+        if not found:
+            return
+        widget = found.first(Static)
+        text = self._selection_summary()
+        widget.display = bool(text)
+        widget.update(text)
 
     # ------------------------------------------------------------------ filter
     def apply_filter(self, needle: str) -> None:

@@ -5,12 +5,15 @@ import hashlib
 import http.client
 import json
 import math
+import os
+import re
 import shutil
 import ssl
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, replace
@@ -20,13 +23,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urljoin, urlparse, urlunparse
 
 from ..core.manifest_sources import source_request_headers
+from ..core.secureio import atomic_write_text, atomic_write_via
 from .bbts import bbts_part_is_complete
 from .embedding import (
     DownloadCancelled,
     DownloaderThreadPoolExecutor,
+    abort_expired_vod_transfer,
     current_download_runtime,
     managed_popen,
     managed_run,
+    with_download_runtime,
 )
 from .http_client import (
     HttpClientError,
@@ -211,9 +217,10 @@ _STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class DownloadError(RuntimeError):
-    def __init__(self, message: str, url: str | None = None):
+    def __init__(self, message: str, url: str | None = None, *, http_status: int | None = None):
         super().__init__(message)
         self.url = url
+        self.http_status = http_status
 
 
 def set_allow_insecure_localhost_hls_keys(enabled: bool) -> None:
@@ -413,6 +420,7 @@ def _json_dvr_group_probe_stream(streams: list[StreamInfo]) -> StreamInfo:
     )[0]
 
 
+@with_download_runtime
 def download_stream(
     stream: StreamInfo,
     output_dir: str | Path,
@@ -491,10 +499,22 @@ def download_stream(
     def part(*args, **kwargs):
         if gate is not None:
             gate()
-        return _download_part(*args, **kwargs)
+        size = _download_part(*args, **kwargs)
+        runtime = current_download_runtime()
+        if runtime is not None and runtime.vod_transfer is not None:
+            segment = args[0]
+            if size > 0 and segment.index != -1 and segment.data is None and is_url(segment.url):
+                runtime.vod_transfer.note_completed((
+                    stream.vod_resume_id, segment.index, segment.byte_range,
+                    segment.timeline_presentation_time, segment.timeline_time,
+                ))
+        return size
 
     urls = _segment_urls(stream)
     _validate_striped_blowfish_input(stream, hls_crypto)
+    if resume and not stream.vod_resume_id and not stream.is_live:
+        prepare_resume_init(stream, headers or {}, request_timeout)
+        urls = [_verified_init(stream, segment) if segment.index == -1 else segment for segment in urls]
     urls = _apply_json_live_base_fallback(stream, urls, headers=headers, request_timeout=request_timeout)
     urls = _split_single_large_remote_segment(stream, urls, headers=headers, hls_crypto=hls_crypto, request_timeout=request_timeout)
     start = time.monotonic()
@@ -521,7 +541,7 @@ def download_stream(
         sections: list[Path] = []
         try:
             temp_root.mkdir(parents=True, exist_ok=True)
-            _write_resume_manifest(temp_root, stream, output_path, len(urls))
+            _prepare_resume_parts(temp_root, stream, output_path, urls, resume=resume)
             _download_with_aria2c(
                 urls,
                 output_path,
@@ -573,7 +593,7 @@ def download_stream(
         preserve_parts = keep_temp or not assemble_output
         try:
             temp_root.mkdir(parents=True, exist_ok=True)
-            _write_resume_manifest(temp_root, stream, output_path, len(urls))
+            _prepare_resume_parts(temp_root, stream, output_path, urls, resume=resume)
             progress_bytes = _part_progress_callback(progress, stream, len(urls), total_bytes, start)
             cached_size = _cached_part_size(part_paths[0], urls[0]) if resume else None
             if cached_size is not None:
@@ -622,10 +642,8 @@ def download_stream(
     preserve_parts = keep_temp or not assemble_output
     try:
         temp_root.mkdir(parents=True, exist_ok=True)
-        _write_resume_manifest(temp_root, stream, output_path, len(urls))
+        _prepare_resume_parts(temp_root, stream, output_path, urls, resume=resume)
         part_paths: list[Path] = [temp_root / f"{index:08d}.part" for index in range(len(urls))]
-        if resume:
-            _migrate_inline_init_resume_parts(stream, output_path, temp_dir, temp_root, part_paths)
         progress_bytes = _part_progress_callback(progress, stream, len(urls), total_bytes, start)
         pool = DownloaderThreadPoolExecutor(max_workers=max(1, workers))
         pool_wait = True
@@ -1842,76 +1860,21 @@ def _resume_temp_dir(
     output_path: Path,
     temp_dir: str | Path | None,
     segments: list[SegmentInfo] | None = None,
-    *,
-    search_fallback: bool = True,
 ) -> Path:
     root = Path(temp_dir).expanduser() if temp_dir else _default_tmp_root()
     root = safe_temp_root(root, max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
     key = _stream_resume_key(stream, segments=segments)
+    if stream.vod_resume_id:
+        return bounded_child_path(
+            root, f"renew_{stream.vod_resume_id[:12]}_{key[:16]}",
+            max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
+        )
     label = _safe_name("-".join(part for part in [stream.media_type, stream.resolution, stream.language, str(stream.bandwidth or "")] if part))
-    target = bounded_child_path(
+    return bounded_child_path(
         root,
         f"{_short_temp_label(label or output_path.stem, 20)}_{key[:16]}",
         max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT,
     )
-    if target.exists() or not search_fallback:
-        return target
-
-    # Apple programme filtering can remove leading MAPs and renumber every
-    # retained part. Only the exact segment-list key is safe: the old URL-only
-    # fallback could read a bumper's numbered part as the main programme.
-    if stream.extra.get("asset_filter_adam_id"):
-        return target
-
-    # A refreshed manifest can legitimately change its segment list (for
-    # example, a service may add a new init segment) while still pointing at the
-    # same title.  Older versions keyed the directory by every segment URL, so
-    # a new signed playlist could strand otherwise valid ``.part`` files in an
-    # unreachable directory.  Look for a prior manifest carrying the stable
-    # stream identity and reuse that directory.  The output path check prevents
-    # accidentally borrowing parts from a different save target.
-    identity = _stream_resume_identity(stream)
-    candidate: tuple[float, Path] | None = None
-    try:
-        # Python 3.11/3.12 defer directory access until iteration. Consume it
-        # here so a missing first-download cache is handled on every version.
-        # The caller creates the returned target with parents=True.
-        entries = list(root.iterdir())
-    except OSError:
-        return target
-    for entry in entries:
-        if not entry.is_dir() or entry == target:
-            continue
-        marker = entry / "resume.json"
-        try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        if data.get("output") != str(output_path):
-            continue
-        marker_identity = data.get("identity")
-        if marker_identity != identity:
-            # Caches written before the identity field was introduced can still
-            # be matched safely by their canonical original manifest URL and
-            # the exact output path.  Volatile query parameters are removed by
-            # ``_resume_url_key`` just as they are for the current key.
-            marker_url = data.get("original_url")
-            if (
-                marker_identity is not None
-                or not marker_url
-                or not stream.original_url
-                or _resume_url_key(marker_url) != _resume_url_key(stream.original_url)
-            ):
-                continue
-        try:
-            updated = float(data.get("updated_at", marker.stat().st_mtime))
-        except (TypeError, ValueError, OSError):
-            updated = 0.0
-        if candidate is None or updated > candidate[0]:
-            candidate = (updated, entry)
-    return candidate[1] if candidate is not None else target
 
 
 def _stream_resume_identity(stream: StreamInfo) -> str:
@@ -1940,34 +1903,267 @@ def _stream_resume_identity(stream: StreamInfo) -> str:
 
 
 def _stream_resume_key(stream: StreamInfo, segments: list[SegmentInfo] | None = None) -> str:
+    if stream.vod_resume_id:
+        urls = segments if segments is not None else _segment_urls(stream)
+        return hashlib.sha256(json.dumps(_vod_part_fingerprints(stream, urls)).encode()).hexdigest()
     segment_list = segments if segments is not None else _segment_urls(stream)
-    payload = {
-        # Keep the original exact-key payload stable so existing caches remain
-        # addressable after an upgrade.  The relaxed identity is only used by
-        # the fallback directory scan above.
-        "manifest_type": stream.manifest_type,
-        "media_type": stream.media_type,
-        "url": _resume_url_key(stream.url),
-        "original_url": _resume_url_key(stream.original_url),
-        "id": stream.id,
-        "group_id": stream.group_id,
-        "name": stream.name,
-        "language": stream.language,
-        "bandwidth": stream.bandwidth,
-        "resolution": stream.resolution,
-        "segments": [
-            {
-                "url": _resume_url_key(segment.url),
-                "index": segment.index,
-                "byte_range": segment.byte_range,
-                "inline_sha1": hashlib.sha1(segment.data).hexdigest() if segment.data is not None else None,
-                "key_id": segment.key_id,
-            }
-            for segment in segment_list
-        ],
-    }
-    data = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha1(data).hexdigest()
+    payload = (_RESUME_PARTS_VERSION, _stream_resume_identity(stream), _resume_part_fingerprints(stream, segment_list))
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
+_RESUME_PARTS_VERSION = 3
+
+
+class _ResumeInitCache:
+    """Verified bytes belong to this transfer, never to the picker or the next job."""
+
+    def __init__(self) -> None:
+        self.init_epoch = uuid.uuid4().hex
+        self.inits: dict[tuple[int, int], tuple[StreamInfo, SegmentInfo, bytes, bytes | None]] = {}
+        self.lock = threading.Lock()
+
+    def close(self) -> None:
+        with self.lock:
+            self.inits.clear()
+
+
+def _resume_init_cache() -> _ResumeInitCache | None:
+    runtime = current_download_runtime()
+    return runtime.resource(_ResumeInitCache) if runtime is not None else None
+
+
+def _verified_init(stream: StreamInfo, segment: SegmentInfo) -> SegmentInfo:
+    if segment.data is None and (cache := _resume_init_cache()) is not None:
+        with cache.lock:
+            entry = cache.inits.get((id(stream), id(segment)))
+        if entry is not None and entry[3] is not None:
+            return replace(segment, data=entry[3])
+    return segment
+
+
+def _resume_part_fingerprints(stream: StreamInfo, segments: list[SegmentInfo]) -> list[str]:
+    result = []
+    init = ""
+    for segment in segments:
+        if segment.index == -1:
+            segment = _verified_init(stream, segment)
+        part = _resume_part_identity(segment)
+        if segment.index == -1:
+            init = part
+            if segment.data is None and (cache := _resume_init_cache()) is not None:
+                # URL and range alone don't prove these bytes stayed the same.
+                init += ":" + cache.init_epoch
+        result.append(hashlib.sha256(f"{init}:{part}".encode()).hexdigest() if init else part)
+    return result
+
+
+def prepare_resume_init(stream: StreamInfo, headers: dict[str, str], timeout: int) -> None:
+    """Verify the selected track's init before restoring any derived artifact.
+
+    Keep bytes only for this delivery and reuse them for the actual transfer;
+    don't modify the picker inventory or trust bytes from a previous job.
+    """
+    if stream.is_live or stream.vod_resume_id:
+        return
+    if not any(segment.index == -1 and segment.data is None for segment in stream.segments):
+        return
+    memo = {}
+    header_tag = hashlib.sha256(json.dumps(sorted((k.lower(), v) for k, v in headers.items())).encode()).digest()
+    for segment in stream.segments:
+        if segment.index != -1 or segment.data is not None:
+            continue
+        cache = _resume_init_cache()
+        if cache is None:
+            return
+        slot = (id(stream), id(segment))
+        with cache.lock:
+            if (prior := cache.inits.get(slot)) is not None and prior[2] == header_tag:
+                continue
+        key = (segment.url, segment.byte_range, segment.restrict_request_headers)
+        if key not in memo:
+            try:
+                memo[key] = _read_resume_init(segment, headers, timeout)
+            except (OSError, ValueError, http.client.HTTPException, HttpClientError):
+                memo[key] = None
+        with cache.lock:
+            cache.inits[slot] = (stream, segment, header_tag, memo[key])
+
+
+def _read_resume_init(segment: SegmentInfo, headers: dict[str, str], timeout: int) -> bytes | None:
+    limit = 2 * 1024 * 1024
+    expected = None
+    if segment.byte_range is not None:
+        start, end = segment.byte_range
+        expected = end - start + 1
+        if start < 0 or not 0 < expected <= limit:
+            return None
+    if is_url(segment.url):
+        request_headers = _segment_request_headers(segment, {**headers, "Accept-Encoding": "identity"})
+        with get_global_http_client().request("GET", segment.url, headers=request_headers, timeout=timeout) as response:
+            if segment.byte_range and (
+                response.status != 206 or not (response.get_header("Content-Range") or "").startswith(f"bytes {start}-{end}/")
+            ):
+                return None
+            length = _expected_response_size(response)
+            if length is not None and length > limit:
+                return None
+            data = response.read(limit + 1)
+            if length is not None and len(data) != length:
+                return None
+    else:
+        with source_path(segment.url).open("rb") as handle:
+            if segment.byte_range:
+                handle.seek(start)
+            data = handle.read(expected or (limit + 1))
+    return data if data and len(data) <= limit and (expected is None or len(data) == expected) else None
+
+
+def _resume_part_identity(segment: SegmentInfo) -> str:
+    # Media sequence is also the default AES IV. An added init may shift file
+    # slots without changing the sequence or identity of a media segment.
+    payload = (
+        _resume_url_key(segment.url), segment.index, segment.byte_range,
+        hashlib.sha256(segment.data).hexdigest() if segment.data is not None else None,
+        segment.encrypted, segment.encryption_scheme, segment.key_id,
+        _resume_url_key(segment.key_uri), segment.key_iv.hex() if segment.key_iv is not None else None,
+        segment.gap, segment.allow_range_status_200,
+    )
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
+def verify_vod_resume_inputs(
+    stream: StreamInfo, headers: dict[str, str], timeout: int, hls_crypto: HlsCrypto | None = None,
+) -> None:
+    """Hash bounded init/transport key bytes before restoring VOD checkpoints."""
+    headers = source_request_headers(stream.extra, headers) or {}
+    max_init = 2 * 1024 * 1024
+    key_fingerprints: dict[tuple[str, str | None], str] = {}
+    for segment in stream.segments:
+        if segment.index == -1 and segment.data is None and is_url(segment.url):
+            if segment.byte_range and segment.byte_range[1] - segment.byte_range[0] + 1 > max_init:
+                continue
+            try:
+                request_headers = _segment_request_headers(segment, {**headers, "Accept-Encoding": "identity"})
+                with get_global_http_client().request("GET", segment.url, headers=request_headers, timeout=timeout) as response:
+                    length = _expected_response_size(response)
+                    if length is not None and length > max_init:
+                        continue
+                    if segment.byte_range:
+                        start, end = segment.byte_range
+                        content_range = response.get_header("Content-Range") or ""
+                        if response.status != 206 or not content_range.startswith(f"bytes {start}-{end}/"):
+                            continue
+                    data = response.read(max_init + 1)
+                    if data and len(data) <= max_init and (length is None or len(data) == length):
+                        if segment.byte_range is None or len(data) == end - start + 1:
+                            segment.data = data
+            except (HTTPError, URLError, OSError, http.client.HTTPException, HttpClientError) as exc:
+                abort_expired_vod_transfer(exc, phase="initialization")
+        if _hls_method(segment.encryption_scheme) not in _HLS_SEGMENT_CIPHER_METHODS:
+            continue
+        if hls_crypto is not None and hls_crypto.key:
+            segment.vod_key_fingerprint = hashlib.sha256(hls_crypto.key + (hls_crypto.iv or b"")).hexdigest()
+            continue
+        if not segment.key_uri or hls_crypto and _hls_method(hls_crypto.method) == "NONE":
+            continue
+        key_identity = (segment.key_uri, segment.key_id)
+        if key_identity not in key_fingerprints and len(key_fingerprints) < 64:
+            try:
+                key = _load_hls_key(segment, headers, 1, timeout)
+                key_fingerprints[key_identity] = hashlib.sha256(key).hexdigest() if key else ""
+            except DownloadError:
+                key_fingerprints[key_identity] = ""
+        segment.vod_key_fingerprint = key_fingerprints.get(key_identity, "")
+
+
+
+
+def _vod_part_fingerprints(stream: StreamInfo, segments: list[SegmentInfo]) -> list[str]:
+    """Only media from the same verified initialization/crypto scope can mix."""
+    fingerprints = []
+    init = ""
+    track_kid = str(stream.extra.get("key_id") or stream.extra.get("kid") or "")
+    for segment in segments:
+        inline = hashlib.sha256(segment.data).hexdigest() if segment.data is not None else None
+        scheme = _hls_method(segment.encryption_scheme or stream.encryption_scheme)
+        opaque_crypto = (
+            not segment.vod_key_fingerprint if scheme in _HLS_SEGMENT_CIPHER_METHODS
+            else (segment.encrypted or stream.encrypted) and not (segment.key_id or track_kid)
+        )
+        identity = (
+            stream.vod_resume_id, _resume_url_key(segment.url), segment.index,
+            segment.byte_range, segment.duration, segment.timeline_time, segment.timeline_presentation_time,
+            inline, segment.encrypted, scheme, segment.key_id, track_kid,
+            segment.vod_key_fingerprint,
+            _resume_url_key(segment.key_uri), segment.key_iv.hex() if segment.key_iv else None,
+            segment.gap, segment.discontinuity_after, segment.allow_range_status_200,
+            stream.vod_resume_generation if opaque_crypto else "",
+        )
+        value = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        if segment.index == -1:
+            init = value if inline is not None else f"{value}:{stream.vod_resume_generation}"
+        fingerprints.append(hashlib.sha256(f"{init}:{value}".encode()).hexdigest())
+    return fingerprints
+
+
+def _prepare_vod_resume_parts(target: Path, stream: StreamInfo, segments: list[SegmentInfo]) -> None:
+    fingerprints = _vod_part_fingerprints(stream, segments)
+    marker = target / "vod-parts.json"
+    expected = {"version": 1, "id": stream.vod_resume_id, "parts": fingerprints}
+    if target.is_symlink() or marker.is_symlink():
+        raise RuntimeError("VOD resume cache contains an unexpected symlink")
+    for partial in target.glob("*.part.tmp"):
+        partial.unlink(missing_ok=True)
+    if marker.exists():
+        if json.loads(marker.read_text("utf-8")) != expected:
+            raise RuntimeError("VOD resume cache does not match the verified media inventory")
+        if any(part.is_symlink() for part in target.glob("*.part")):
+            raise RuntimeError("VOD resume cache contains an unexpected part symlink")
+        return
+    # Nothing without a published inventory is accepted, even if numbered
+    # files happen to be present. Reused parts were atomically completed.
+    for orphan in target.glob("*.part"):
+        orphan.unlink()
+    waiting: dict[str, list[int]] = {}
+    for index, fingerprint in enumerate(fingerprints):
+        waiting.setdefault(fingerprint, []).append(index)
+    for candidate in target.parent.glob(f"renew_{stream.vod_resume_id[:12]}_*"):
+        if not waiting or candidate == target or candidate.is_symlink():
+            continue
+        previous_marker = candidate / "vod-parts.json"
+        if previous_marker.is_symlink():
+            continue
+        try:
+            prior = json.loads(previous_marker.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            not isinstance(prior, dict) or prior.get("version") != 1
+            or prior.get("id") != stream.vod_resume_id or not isinstance(prior.get("parts"), list)
+        ):
+            continue
+        for slot, fingerprint in enumerate(prior["parts"]):
+            if not isinstance(fingerprint, str) or fingerprint not in waiting:
+                continue
+            source = candidate / f"{slot:08d}.part"
+            if source.is_symlink() or not source.is_file():
+                continue
+            for index in tuple(waiting[fingerprint]):
+                destination = target / f"{index:08d}.part"
+                try:
+                    size = source.stat().st_size
+                    if size <= 0 or not _cached_part_is_complete(source, size, segments[index]):
+                        continue
+                    try:
+                        os.link(source, destination)
+                    except OSError:
+                        atomic_write_via(destination, lambda path, source=source: shutil.copyfile(source, path))
+                except OSError:
+                    continue
+                waiting[fingerprint].remove(index)
+            if not waiting[fingerprint]:
+                del waiting[fingerprint]
+    atomic_write_text(marker, json.dumps(expected, separators=(",", ":")))
 
 
 def _resume_url_key(url: str | None) -> str | None:
@@ -2000,72 +2196,94 @@ def _stable_resume_path(path: str) -> str:
     return path
 
 
-def _migrate_inline_init_resume_parts(
-    stream: StreamInfo,
-    output_path: Path,
-    temp_dir: str | Path | None,
-    target_dir: Path,
-    part_paths: list[Path],
+def _prepare_resume_parts(
+    target: Path, stream: StreamInfo, output: Path, segments: list[SegmentInfo], *, resume: bool,
 ) -> None:
-    segments = _segment_urls(stream)
-    if not segments or not any(segment.index == -1 and segment.data is not None for segment in segments):
+    if not resume:
         return
-    if any(path.exists() for path in part_paths):
+    if stream.vod_resume_id:
+        _prepare_vod_resume_parts(target, stream, segments)
         return
-    legacy_segments = [segment for segment in segments if not (segment.index == -1 and segment.data is not None)]
-    if len(legacy_segments) == len(segments):
-        return
-    legacy_dir = _resume_temp_dir(
-        stream,
-        output_path,
-        temp_dir,
-        segments=legacy_segments,
-        search_fallback=False,
-    )
-    if legacy_dir == target_dir or not legacy_dir.exists():
-        return
-
-    media_index = 0
-    migrated = False
-    for index, segment in enumerate(segments):
-        target = part_paths[index]
-        if segment.index == -1 and segment.data is not None:
-            tmp = target.with_suffix(target.suffix + ".tmp")
-            tmp.write_bytes(segment.data)
-            tmp.replace(target)
-            migrated = True
-            continue
-        source = legacy_dir / f"{media_index:08d}.part"
-        media_index += 1
-        if not source.exists():
-            continue
-        shutil.copyfile(source, target)
-        migrated = True
-    if migrated:
-        legacy_manifest = legacy_dir / "resume.json"
-        if legacy_manifest.exists():
-            shutil.copyfile(legacy_manifest, target_dir / "resume.legacy.json")
+    fingerprints = _resume_part_fingerprints(stream, segments)
+    marker = target / "resume.json"
+    if not marker.exists() and not stream.extra.get("asset_filter_adam_id"):
+        _reuse_verified_parts(target, _stream_resume_identity(stream), output, segments, fingerprints)
+    _write_resume_manifest(target, stream, output, len(segments), fingerprints=fingerprints)
 
 
-def _write_resume_manifest(temp_root: Path, stream: StreamInfo, output_path: Path, total_segments: int) -> None:
-    manifest = {
-        "output": str(output_path),
-        "stream": stream.format_line(),
-        "identity": _stream_resume_identity(stream),
-        "original_url": stream.original_url,
-        "total_segments": total_segments,
-        "updated_at": int(time.time()),
-    }
-    marker = temp_root / "resume.json"
-    temporary = marker.with_suffix(".json.tmp")
+def _reuse_verified_parts(
+    target: Path, identity: str, output: Path, segments: list[SegmentInfo], fingerprints: list[str],
+) -> None:
+    # Old numbered parts have no identity. Title and count alone are not
+    # sufficient to associate them with the refreshed manifest.
+    pending: dict[str, list[int]] = {}
+    for slot, fingerprint in enumerate(fingerprints):
+        pending.setdefault(fingerprint, []).append(slot)
     try:
-        temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(marker)
+        candidates = list(target.parent.iterdir())
     except OSError:
+        return
+    for candidate in candidates:
+        if not pending:
+            break
+        if candidate == target or not candidate.is_dir() or candidate.is_symlink():
+            continue
         try:
-            temporary.unlink()
-        except OSError:
-            pass
+            prior = json.loads((candidate / "resume.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(prior, dict) or prior.get("parts_version") != _RESUME_PARTS_VERSION:
+            continue
+        if prior.get("identity") != identity or prior.get("output") != str(output):
+            continue
+        old_parts = prior.get("parts")
+        if not isinstance(old_parts, list):
+            continue
+        for slot, fingerprint in enumerate(old_parts):
+            if not isinstance(fingerprint, str) or fingerprint not in pending:
+                continue
+            source = candidate / f"{slot:08d}.part"
+            if not source.is_file() or source.is_symlink():
+                continue
+            for new_slot in list(pending[fingerprint]):
+                destination = target / f"{new_slot:08d}.part"
+                try:
+                    size = source.stat().st_size
+                    if size <= 0 or not _cached_part_is_complete(source, size, segments[new_slot]):
+                        continue
+                    # Both paths are in the same cache root. Never replace
+                    # another worker's completed part.
+                    try:
+                        os.link(source, destination)
+                    except FileExistsError:
+                        pass
+                    except OSError:
+                        if not destination.exists():
+                            atomic_write_via(destination, lambda temporary, source=source: shutil.copyfile(source, temporary))
+                except OSError:
+                    continue
+                pending[fingerprint].remove(new_slot)
+            if not pending[fingerprint]:
+                del pending[fingerprint]
+
+
+def _write_resume_manifest(
+    temp_root: Path, stream: StreamInfo, output_path: Path, total_segments: int,
+    *, fingerprints: list[str] | None = None,
+) -> None:
+    if fingerprints is None:
+        fingerprints = _resume_part_fingerprints(stream, _segment_urls(stream))
+    manifest = {
+        "parts_version": _RESUME_PARTS_VERSION,
+        "output": str(output_path),
+        "identity": _stream_resume_identity(stream),
+        "total_segments": total_segments,
+        "parts": fingerprints,
+    }
+    try:
+        atomic_write_text(temp_root / "resume.json", json.dumps(manifest, separators=(",", ":")))
+    except OSError:
+        pass
 
 
 def _cached_part_size(path: Path, segment: SegmentInfo | None = None) -> int | None:
@@ -2918,6 +3136,7 @@ def _stream_part_to_file(
             last_error = exc
             if permit:
                 permit.failure(_is_adaptive_retryable_error(exc), error=exc)
+            abort_expired_vod_transfer(exc)
             try:
                 tmp_out.unlink()
             except OSError:
@@ -3079,6 +3298,7 @@ def _stream_part_to_file(
             last_error = exc
             if permit:
                 permit.failure(_is_adaptive_retryable_error(exc), error=exc)
+            abort_expired_vod_transfer(exc)
             invalid_query_bbts = (
                 segment.allow_range_status_200
                 and not plain_query_fallback
@@ -3419,6 +3639,7 @@ def _fetch_bytes(
     request_timeout: int = 30,
     prefer_curl: bool = False,
     host_limiter: _HostAdaptiveLimiter | None = None,
+    stop_on_http_auth: bool = False,
 ) -> bytes:
     _runtime_checkpoint()
     if segment.data is not None:
@@ -3453,6 +3674,7 @@ def _fetch_bytes(
             last_error = exc
             if permit:
                 permit.failure(_is_adaptive_retryable_error(exc), error=exc)
+            abort_expired_vod_transfer(exc)
 
     for attempt in range(max(1, retries)):
         while True:
@@ -3500,7 +3722,12 @@ def _fetch_bytes(
                 last_error = exc
                 if permit:
                     permit.failure(_is_adaptive_retryable_error(exc), error=exc)
+                abort_expired_vod_transfer(exc)
                 _runtime_checkpoint()
+                if stop_on_http_auth and (
+                    exc.code if isinstance(exc, HTTPError) else getattr(exc, "http_status", None)
+                ) in {401, 403}:
+                    raise
                 if attempt + 1 < retries:
                     _runtime_sleep(_retry_delay(attempt))
                 break
@@ -3650,7 +3877,11 @@ def _run_curl(
     result = managed_run(args, capture_output=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
-        raise DownloadError(f"curl fallback failed: {detail or f'exit {result.returncode}'}", url=segment.url)
+        status = re.search(r"requested URL returned error: (401|403)\b", detail) if result.returncode == 22 else None
+        raise DownloadError(
+            f"curl fallback failed: {detail or f'exit {result.returncode}'}", url=segment.url,
+            http_status=int(status[1]) if status else None,
+        )
     return result
 
 
@@ -3773,10 +4004,15 @@ def _fetch_hls_key(key_uri: str, headers: dict[str, str] | None, retries: int, r
                     return _fetch_https_localhost_hls_key_unverified(key_uri, request_headers, request_timeout)
                 return get_global_http_client().fetch_bytes(key_uri, headers=request_headers, timeout=request_timeout)
             except (HTTPError, URLError, TimeoutError, OSError, http.client.HTTPException, HttpClientError) as exc:
+                abort_expired_vod_transfer(exc, phase="hls_key")
                 last_error = exc
                 if attempt + 1 < retries:
                     _runtime_sleep(_retry_delay(attempt))
-        raise DownloadError(f"Failed to fetch HLS key after {max(1, retries)} attempts: {_error_text(last_error)}", url=key_uri)
+        status = last_error.code if isinstance(last_error, HTTPError) else getattr(last_error, "http_status", None)
+        raise DownloadError(
+            f"Failed to fetch HLS key after {max(1, retries)} attempts: {_error_text(last_error)}",
+            url=key_uri, http_status=status,
+        ) from last_error
     try:
         return source_path(key_uri).read_bytes()
     except OSError as exc:

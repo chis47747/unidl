@@ -43,19 +43,36 @@ from . import banner
 from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card
 from .input import ClipboardInput as Input
-from .settings_layout import SettingRow, label_width, setting_row
+from .settings_layout import SettingRow, is_setting_modified, label_width, setting_row
 from .theme import (
     ACCENT_PRESETS,
     DEFAULT_ACCENT,
+    DEFAULT_DENSITY,
+    DEFAULT_SEMANTIC_COLORS,
     DEFAULT_TITLE_COLOR,
     normalize_accent,
+    normalize_density,
+    normalize_semantic_colors,
+    normalize_theme,
     normalize_title_color,
     palette_for,
     swatch_markup,
     title_color_stops,
 )
 
-APPEARANCE_SETTING_KEYS = frozenset({"theme", "accent_color", "title_color"})
+APPEARANCE_SETTING_KEYS = frozenset(
+    {"theme", "accent_color", "title_color", "layout_density", "semantic_colors"}
+)
+
+_THEME_SWATCH_SURFACES: dict[str, str] = {
+    "dark": "#3a3a3a",
+    "light": "#d4d0c7",
+    "tokyo_night": "#3b4261",
+    "catppuccin": "#45475a",
+    "nord": "#4c566a",
+    "gruvbox": "#504945",
+    "high_contrast": "#ffffff",
+}
 
 
 def appearance_swatch_markup(
@@ -65,12 +82,12 @@ def appearance_swatch_markup(
     dark: bool,
     accent: str = DEFAULT_ACCENT,
 ) -> str:
-    """Colour swatch representing a theme, system accent, or title colour choice."""
+    """Colour swatch representing a theme, accent, title colour, density, or status-color choice."""
     accent_key = normalize_accent(accent)
     if setting_key == "theme":
-        mode = "light" if str(value or "").lower() == "light" else "dark"
+        mode = normalize_theme(str(value or ""))
         pal = palette_for(mode, accent_key)
-        surface = "#3a3a3a" if mode == "dark" else "#d4d0c7"
+        surface = _THEME_SWATCH_SURFACES.get(mode, "#3a3a3a")
         return f"[{surface}]━━[/][{pal.accent}]━━[/]"
     if setting_key == "accent_color":
         preset = ACCENT_PRESETS[normalize_accent(str(value or ""))]
@@ -78,6 +95,18 @@ def appearance_swatch_markup(
     if setting_key == "title_color":
         stops = title_color_stops(str(value or ""), dark=dark, accent=accent_key)
         return swatch_markup(stops, blocks=4)
+    if setting_key == "layout_density":
+        density = normalize_density(str(value or ""))
+        pal = palette_for("dark" if dark else "light", accent_key)
+        if density == "comfortable":
+            return f"[{pal.accent}]━  ━[/]"
+        if density == "compact":
+            return f"[{pal.accent}]━━━━[/]"
+        return f"[{pal.dim}]─[/][{pal.accent}]━━[/][{pal.dim}]─[/]"
+    if setting_key == "semantic_colors":
+        semantic = normalize_semantic_colors(str(value or ""))
+        pal = palette_for("dark" if dark else "light", accent_key, semantic)
+        return f"[{pal.ok}]━━[/][{pal.warn}]━[/][{pal.error}]━[/]"
     return ""
 
 
@@ -218,23 +247,31 @@ class _AppearanceChoiceEditor(_Editor):
     def _fit_modal(self) -> None:
         fit_modal_card(self, "#modal-card", "#appearance-options")
 
-    def _preview_state(self, value: Any) -> tuple[str, str, str]:
-        mode = str(getattr(self.app, "theme_preference", "dark") or "dark").lower()
+    def _preview_state(self, value: Any) -> tuple[str, str, str, str, str]:
+        mode = normalize_theme(getattr(self.app, "theme_preference", "dark"))
         accent = normalize_accent(getattr(self.app, "accent_preference", DEFAULT_ACCENT))
         title_color = normalize_title_color(
             getattr(self.app, "title_color_preference", DEFAULT_TITLE_COLOR)
         )
+        density = normalize_density(getattr(self.app, "density_preference", DEFAULT_DENSITY))
+        semantic = normalize_semantic_colors(
+            getattr(self.app, "semantic_colors_preference", DEFAULT_SEMANTIC_COLORS)
+        )
         if self.setting.key == "theme":
-            mode = "light" if str(value or "").lower() == "light" else "dark"
+            mode = normalize_theme(str(value or ""))
         elif self.setting.key == "accent_color":
             accent = normalize_accent(str(value or ""))
         elif self.setting.key == "title_color":
             title_color = normalize_title_color(str(value or ""))
-        return mode, accent, title_color
+        elif self.setting.key == "layout_density":
+            density = normalize_density(str(value or ""))
+        elif self.setting.key == "semantic_colors":
+            semantic = normalize_semantic_colors(str(value or ""))
+        return mode, accent, title_color, density, semantic
 
     def _option_prompts(self, value: Any) -> list[str]:
-        mode, accent, _title_color = self._preview_state(value)
-        dark = mode != "light"
+        mode, accent, _title_color, _density, _semantic = self._preview_state(value)
+        dark = palette_for(mode, accent).dark
         prompts: list[str] = []
         for option in self.setting.options:
             mark = "▸" if option.value == self._previewed else " "
@@ -260,25 +297,40 @@ class _AppearanceChoiceEditor(_Editor):
             options.add_option(Option(prompt, id=str(index)))
 
     def _render_preview(self, value: Any) -> None:
-        mode, accent, title_color = self._preview_state(value)
-        pal = palette_for(mode, accent)
+        mode, accent, title_color, density, semantic = self._preview_state(value)
+        pal = palette_for(mode, accent, semantic)
         stops = title_color_stops(title_color, dark=pal.dark, accent=accent)
         viewport_h = self.size.height or self.app.size.height
-        compact = bool(viewport_h and viewport_h < 26)
+        if density == "compact":
+            compact = True
+        elif density == "comfortable":
+            compact = bool(viewport_h and viewport_h < 20)
+        else:
+            compact = bool(viewport_h and viewport_h < 26)
         self.query_one("#appearance-preview-banner", Static).update(
             banner.mini_art(stops, compact=compact)
         )
-        prism = pal.prism
-        k1 = prism[0] if prism else pal.accent
-        k2 = prism[1 % len(prism)] if prism else pal.accent
-        k3 = prism[2 % len(prism)] if prism else pal.accent
-        settings_word = escape_markup(phrase("Settings"))
-        apply_word = escape_markup(phrase("Apply"))
-        sample = (
-            f"[{k1}]◆[/] [{pal.fg}]unidl[/]"
-            f"   [{pal.gutter}]·[/]   [{k2}]^s[/] [{pal.muted}]{settings_word}[/]"
-            f"   [{pal.gutter}]·[/]   [{k3}]✓[/] [{pal.accent}]{apply_word}[/]"
-        )
+        if self.setting.key == "semantic_colors":
+            ok_word = escape_markup(tr("appearance.sample.ok", default="OK"))
+            warn_word = escape_markup(tr("appearance.sample.warn", default="Warning"))
+            err_word = escape_markup(tr("appearance.sample.error", default="Error"))
+            sample = (
+                f"[{pal.ok}]✓ {ok_word}[/]"
+                f"   [{pal.gutter}]·[/]   [{pal.warn}]⚠ {warn_word}[/]"
+                f"   [{pal.gutter}]·[/]   [{pal.error}]✗ {err_word}[/]"
+            )
+        else:
+            prism = pal.prism
+            k1 = prism[0] if prism else pal.accent
+            k2 = prism[1 % len(prism)] if prism else pal.accent
+            k3 = prism[2 % len(prism)] if prism else pal.accent
+            settings_word = escape_markup(phrase("Settings"))
+            apply_word = escape_markup(phrase("Apply"))
+            sample = (
+                f"[{k1}]◆[/] [{pal.fg}]unidl[/]"
+                f"   [{pal.gutter}]·[/]   [{k2}]^s[/] [{pal.muted}]{settings_word}[/]"
+                f"   [{pal.gutter}]·[/]   [{k3}]✓[/] [{pal.accent}]{apply_word}[/]"
+            )
         self.query_one("#appearance-preview-ui", Static).update(sample)
 
     def _apply_live_preview(self, value: Any, *, repaint_app: bool = True) -> None:
@@ -292,6 +344,10 @@ class _AppearanceChoiceEditor(_Editor):
                     preview_fn(accent=str(value))
                 elif self.setting.key == "title_color":
                     preview_fn(title_color=str(value))
+                elif self.setting.key == "layout_density":
+                    preview_fn(density=str(value))
+                elif self.setting.key == "semantic_colors":
+                    preview_fn(semantic_colors=str(value))
         self._render_preview(value)
         self._rebuild_options(value)
 
@@ -814,6 +870,7 @@ class SettingsScreen(Screen):
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "noop", "Change", show=True),
         Binding("r", "reset", "Reset", show=True),
+        Binding("m", "toggle_modified", "Modified only", show=True),
     ]
 
     def action_noop(self) -> None:
@@ -831,6 +888,7 @@ class SettingsScreen(Screen):
         self._label_width = 0
         self._focus_key = focus_key
         self._search_key = focus_key
+        self._modified_only = False
 
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
@@ -839,32 +897,52 @@ class SettingsScreen(Screen):
             yield Static("", id="crumbs-pill", classes="pill")
         with Vertical(id="body"):
             yield OptionList(id="settings-list")
-        yield KeyBar(("enter", "change"), ("r", "reset"), ("^b", "back"), ("esc", "quit"))
+        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", "modified only"), ("^b", "back"), ("esc", "quit"))
 
-    def on_mount(self) -> None:
+    def _render_masthead(self, modified_count: int = 0) -> None:
         if self.service is None:
             title = f"{tr('settings.title')}  [$dim]{tr('settings.global')}[/]"
         else:
             title = f"{tr('settings.title')}  [$dim]{visual_markup(self.service.NAME)}[/]"
-        self.query_one("#masthead", Static).update(title)
+        if self._modified_only:
+            title += f"  [$accent]{tr('settings.modified_filter_on', count=modified_count)}[/]"
+        found = self.query("#masthead")
+        if found:
+            found.first(Static).update(title)
+
+    def _refresh_keybar(self, modified_count: int = 0) -> None:
+        mod_label = (
+            tr("settings.show_all")
+            if self._modified_only
+            else (
+                tr("settings.modified_count", count=modified_count)
+                if modified_count > 0
+                else tr("settings.modified_only")
+            )
+        )
+        for bar in self.query(KeyBar):
+            bar.render_pairs(
+                ("enter", "change"),
+                ("r", "reset"),
+                ("m", mod_label),
+                ("^b", "back"),
+                ("esc", "quit"),
+            )
+
+    def action_toggle_modified(self) -> None:
+        self._modified_only = not self._modified_only
+        self.rebuild()
+
+    def on_mount(self) -> None:
         self.set_hint("")
         self.rebuild()
         self.query_one("#settings-list", OptionList).focus()
 
     def relocalize(self) -> None:
-        from .chrome import Chrome, KeyBar
+        from .chrome import Chrome
 
         for chrome in self.query(Chrome):
             chrome.refresh_locale()
-        for bar in self.query(KeyBar):
-            bar.render_pairs()
-        if self.service is None:
-            title = f"{tr('settings.title')}  [$dim]{tr('settings.global')}[/]"
-        else:
-            title = f"{tr('settings.title')}  [$dim]{visual_markup(self.service.NAME)}[/]"
-        found = self.query("#masthead")
-        if found:
-            found.first(Static).update(title)
         self.rebuild()
 
     def set_hint(self, text: str) -> None:
@@ -938,8 +1016,19 @@ class SettingsScreen(Screen):
             self._rows.append(None)
             option_list.add_option(Option("", disabled=True))
 
+        modified_total = 0
+
         def add_section(name: str, specs: list[Setting], scope: Settings, note: str = "") -> None:
+            nonlocal modified_total
             visible_specs = [spec for spec in specs if spec.visible or spec.key == self._search_key]
+            for spec in visible_specs:
+                if is_setting_modified(spec, scope):
+                    modified_total += 1
+            if self._modified_only:
+                visible_specs = [
+                    spec for spec in visible_specs
+                    if is_setting_modified(spec, scope) or spec.key == self._search_key
+                ]
             if not visible_specs:
                 return
             self._rows.append(None)
@@ -1004,6 +1093,13 @@ class SettingsScreen(Screen):
         settings_rows = [
             index for index, row in enumerate(self._rows) if row is not None
         ]
+        if not settings_rows and self._modified_only:
+            self._rows.append(None)
+            option_list.add_option(
+                Option(f"  [$dim]{tr('settings.modified_empty')}[/]", disabled=True)
+            )
+        self._render_masthead(modified_total)
+        self._refresh_keybar(modified_total)
         found = next(
             (
                 index
@@ -1298,6 +1394,9 @@ class SettingsScreen(Screen):
             if callable(clear_fn):
                 clear_fn(apply=False)
             self.app.apply_theme()
+            density_fn = getattr(self.app, "apply_layout_density", None)
+            if callable(density_fn):
+                density_fn()
         paired_device = ""
         if spec.key == "drm_system" and scope is self.globals:
             # The main-screen DRM chip already moves the global CDM with the

@@ -29,7 +29,7 @@ from ..core.terminal_cells import fit_middle
 from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card, refresh_locale_widgets
 from .input import ClipboardInput as Input
-from .settings_layout import SettingRow, label_width, setting_row
+from .settings_layout import SettingRow, label_width, setting_row, stable_help
 
 
 @dataclass(frozen=True)
@@ -270,13 +270,13 @@ class StorageManagerScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Chrome(show_search=False, show_settings=False)
         yield Static(tr("storage.title"), id="masthead")
-        yield Static("", id="storage-manager-help")
         yield Tabs(
             Tab(tr("storage.tab.output"), id="storage-tab-output"),
             Tab(tr("storage.tab.naming"), id="storage-tab-naming"),
             Tab(tr("storage.tab.advanced"), id="storage-tab-advanced"),
             id="storage-tabs",
         )
+        yield Static("", id="storage-manager-help")
         with Horizontal(id="statusline"):
             yield Static("", id="crumbs-pill", classes="pill")
         with Vertical(id="storage-manager-body"):
@@ -325,8 +325,14 @@ class StorageManagerScreen(Screen[None]):
         rows = self._tab_rows()
         self._rows = list(rows)
 
-        help_text = tr(f"storage.help.{self._tab}")
-        self.query_one("#storage-manager-help", Static).update(f"[$muted]{help_text}[/]")
+        help_by_tab = {
+            "output": f"[$muted]{tr('storage.help.output')}[/]",
+            "naming": f"[$muted]{tr('storage.help.naming')}[/]",
+            "advanced": f"[$muted]{tr('storage.help.advanced')}[/]",
+        }
+        self.query_one("#storage-manager-help", Static).update(
+            stable_help(help_by_tab.get(self._tab, help_by_tab["output"]), help_by_tab.values())
+        )
         tab_label = {
             "output": tr("storage.tab.output"),
             "naming": tr("storage.tab.naming"),

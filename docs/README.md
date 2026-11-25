@@ -11,6 +11,8 @@ and extending the project.
 - [Configuration](configuration.md) — YAML, paths, devices and runtime state.
 - [Settings](settings.md) — global, service and output-track preferences.
 - [Track selection](track-selection.md) — output scope, filters, Best/All rules and batch behavior.
+- [Live reauthorization](downloader-integration.md#live-reauthorization) — key rotation, source expiry and safe recording continuation.
+- [VOD source renewal](downloader-integration.md#vod-source-renewal) — expired links and verified cache reuse during finite downloads.
 - [Requirements and installation](requirements.md) — supported Python versions,
   external tools, package installs and runtime data.
 - [Readiness](readiness.md) — core, global and optional-enhancement dependencies.

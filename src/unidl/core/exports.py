@@ -39,7 +39,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from threading import Lock
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from .attachments import Attachment
@@ -292,6 +293,7 @@ class Entry:
             title=title,
             save_name=self.save_name,
             release_name_base=self.release_name_base,
+            from_export=True,
             manifest_url=self.manifest_url or None,
             alternate_manifest_urls=tuple(self.alternate_manifest_urls),
             merge_manifests=self.merge_manifests,
@@ -900,13 +902,39 @@ def read(path: Path) -> Document:
     return document
 
 
-#: Parsed documents, keyed by the file's identity rather than by its name: a file
-#: that has not been touched cannot have changed, and one that has gets a new key
-#: and is read again. Bounded by :data:`_CACHE_LIMIT` because this is a folder, not
-#: a database, and because the whole point is to avoid work on a folder small
-#: enough to be listed on one screen.
+#: Import needs full documents; home counts/search need only display metadata.
+#: The two bounded caches are kept in memory and invalidated together.
 _CACHE_LIMIT = 200
-_cache: dict[tuple[str, int, int], tuple[Document | None, str]] = {}
+_Stamp = tuple[str, int, int]
+_Cached = TypeVar("_Cached")
+_cache: dict[_Stamp, tuple[Document | None, str]] = {}
+
+
+@dataclass(frozen=True)
+class ExportSummary:
+    """Searchable display metadata only; the home index never needs a manifest."""
+
+    label: str
+    service: str
+    count: int
+    terms: str
+
+    @classmethod
+    def from_document(cls, document: Document) -> ExportSummary:
+        labels = [entry.label() for entry in document.entries]
+        titles = (entry.title.full_label() for entry in document.entries if entry.title)
+        return cls(
+            labels[0] if labels else "",
+            document.service_name or document.service,
+            len(labels),
+            " ".join((document.service, *labels, *titles)),
+        )
+
+
+_INDEX_LIMIT = 8192
+_index: dict[_Stamp, ExportSummary | None] = {}
+_cache_lock = Lock()
+_cache_epoch = 0
 
 
 def _stamp(path: Path) -> tuple[str, int, int] | None:
@@ -915,7 +943,7 @@ def _stamp(path: Path) -> tuple[str, int, int] | None:
         info = path.stat()
     except OSError:
         return None
-    return (str(path), int(info.st_mtime_ns), int(info.st_size))
+    return (str(path.absolute()), int(info.st_mtime_ns), int(info.st_size))
 
 
 def forget(path: Path | None = None) -> None:
@@ -924,11 +952,57 @@ def forget(path: Path | None = None) -> None:
     Only needed by something that writes a file and then reads it back inside the
     same tick, before the timestamp it was cached against could differ.
     """
-    if path is None:
-        _cache.clear()
-        return
-    for key in [key for key in _cache if key[0] == str(path)]:
-        _cache.pop(key, None)
+    global _cache_epoch
+    with _cache_lock:
+        _cache_epoch += 1
+        for cache in (_cache, _index):
+            if path is None:
+                cache.clear()
+            else:
+                name = str(Path(path).absolute())
+                for key in [key for key in cache if key[0] == name]:
+                    del cache[key]
+
+
+def _files(folder: Path) -> list[tuple[Path, _Stamp | None]]:
+    root = Path(folder)
+    files = [(path, _stamp(path)) for path in root.rglob("*.json")] if root.is_dir() else []
+    files.sort(key=lambda pair: (pair[1][1] if pair[1] else 0, pair[0]), reverse=True)
+    directory = root.absolute()
+    with _cache_lock:
+        for cache, limit in ((_cache, _CACHE_LIMIT), (_index, _INDEX_LIMIT)):
+            keep = {stamp for _, stamp in files[:limit]}
+            for key in [
+                key for key in cache
+                if key not in keep and Path(key[0]).is_relative_to(directory)
+            ]:
+                del cache[key]
+    return files
+
+
+def _remember(cache: dict[_Stamp, _Cached], stamp: _Stamp, value: _Cached, limit: int) -> None:
+    if stamp not in cache and len(cache) >= limit:
+        del cache[next(iter(cache))]
+    cache[stamp] = value
+
+
+def _read_row(
+    path: Path, stamp: _Stamp | None, *, remember: bool
+) -> tuple[Document | None, str]:
+    with _cache_lock:
+        hit = _cache.get(stamp) if stamp is not None else None
+        epoch = _cache_epoch
+    if hit is not None:
+        return hit
+    try:
+        row: tuple[Document | None, str] = (read(path), "")
+    except (ExportError, TypeError, ValueError, KeyError, AttributeError) as exc:
+        row = (None, str(exc))
+    if stamp is not None and remember:
+        with _cache_lock:
+            if epoch == _cache_epoch:
+                _remember(_cache, stamp, row, _CACHE_LIMIT)
+    return row
 
 
 def scan(folder: Path) -> list[tuple[Path, Document | None, str]]:
@@ -937,47 +1011,31 @@ def scan(folder: Path) -> list[tuple[Path, Document | None, str]]:
     A file that cannot be read is still listed, with its reason. A folder that
     silently drops the file you just put in it is a folder you stop trusting.
 
-    Parsing is remembered per file, because this is called far more often than the
-    folder changes: the main screen counts what is waiting to be imported every time
-    it refreshes, and every unchanged file was being read off disk and parsed again
-    to answer a question whose answer was already known.
+    The newest complete documents are kept for the import screens. Use scan_index
+    for a listing that does not retain manifests, headers or keys.
     """
-    root = Path(folder)
-    if not root.is_dir():
-        return []
+    return [
+        (path, *_read_row(path, stamp, remember=index < _CACHE_LIMIT))
+        for index, (path, stamp) in enumerate(_files(folder))
+    ]
 
-    def when(path: Path) -> float:
-        # This folder is one people drop files into and take them out of, so a
-        # name from the listing may already be gone by the time it is measured.
-        # Sorting must not be the thing that raises.
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
 
-    found: list[tuple[Path, Document | None, str]] = []
-    seen: set[tuple[str, int, int]] = set()
-    for path in sorted(root.rglob("*.json"), key=when, reverse=True):
-        stamp = _stamp(path)
-        if stamp is not None and stamp in _cache:
-            document, problem = _cache[stamp]
-            seen.add(stamp)
-            found.append((path, document, problem))
-            continue
-        try:
-            entry: tuple[Document | None, str] = (read(path), "")
-        except (ExportError, TypeError, ValueError, KeyError, AttributeError) as exc:
-            entry = (None, str(exc))
-        if stamp is not None:
-            if len(_cache) >= _CACHE_LIMIT:
-                _cache.clear()
-            _cache[stamp] = entry
-            seen.add(stamp)
-        found.append((path, entry[0], entry[1]))
-    # a file that was replaced or removed leaves its old stamp behind, and the
-    # entry it keeps alive is a whole parsed document
-    for key in [key for key in _cache if key[0].startswith(str(root)) and key not in seen]:
-        _cache.pop(key, None)
+def scan_index(folder: Path) -> list[tuple[Path, ExportSummary | None]]:
+    """Index names and readability without keeping full exports alive on Home."""
+    found = []
+    for index, (path, stamp) in enumerate(_files(folder)):
+        with _cache_lock:
+            epoch = _cache_epoch
+            if stamp is not None and stamp in _index:
+                found.append((path, _index[stamp]))
+                continue
+        document, _ = _read_row(path, stamp, remember=False)
+        info = ExportSummary.from_document(document) if document is not None else None
+        if stamp is not None and index < _INDEX_LIMIT:
+            with _cache_lock:
+                if epoch == _cache_epoch:
+                    _remember(_index, stamp, info, _INDEX_LIMIT)
+        found.append((path, info))
     return found
 
 
@@ -1014,5 +1072,6 @@ __all__ = [
     "loads",
     "read",
     "scan",
+    "scan_index",
     "write",
 ]

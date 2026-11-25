@@ -9,9 +9,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import requests
-from requests.adapters import HTTPAdapter
+from requests.adapters import HTTPAdapter, TimeoutSauce
 
 _active: ContextVar[tuple[NetworkCancellation, ...]] = ContextVar("unidl_network_cancellation", default=())
+_cleanup_deadline: ContextVar[float | None] = ContextVar("unidl_cleanup_deadline", default=None)
 
 
 class NetworkStopped(OSError):
@@ -71,6 +72,44 @@ class NetworkCancellation:
 def network_checkpoint() -> None:
     if any(scope.stopped for scope in _active.get()):
         raise NetworkStopped("network operation canceled")
+
+
+@contextmanager
+def playback_cleanup_scope(*, timeout: float = 2.0):
+    """Permit only bounded cleanup requests after the owning job is canceled."""
+    cleanup = NetworkCancellation()
+    deadline = _cleanup_deadline.set(time.monotonic() + timeout)
+    scopes = _active.set((cleanup,))
+    timer = threading.Timer(timeout, cleanup.cancel)
+    timer.daemon = True
+    try:
+        timer.start()
+        yield
+    finally:
+        timer.cancel()
+        cleanup.cancel()
+        _active.reset(scopes)
+        _cleanup_deadline.reset(deadline)
+
+
+def _cleanup_timeout(timeout, remaining: float):
+    if remaining <= 0:
+        raise NetworkStopped("playback cleanup timed out")
+    if isinstance(timeout, TimeoutSauce):
+        timeout = timeout.clone()
+        timeout.start_connect()
+        connect, read = timeout.connect_timeout, timeout.read_timeout
+        if isinstance(timeout.total, (int, float)):
+            remaining = min(remaining, timeout.total)
+    elif isinstance(timeout, tuple):
+        connect, read = timeout
+    else:
+        connect = read = timeout
+
+    def bounded(value):
+        return min(remaining, value) if isinstance(value, (int, float)) else remaining
+
+    return TimeoutSauce(connect=bounded(connect), read=bounded(read), total=remaining)
 
 
 def network_retry_delay(seconds: float) -> None:
@@ -225,6 +264,9 @@ class NetworkSession(requests.Session):
             self.mount(prefix, _InterruptibleAdapter())
 
     def send(self, request, **kwargs):
+        deadline = _cleanup_deadline.get()
+        if deadline is not None:
+            kwargs["timeout"] = _cleanup_timeout(kwargs.get("timeout"), deadline - time.monotonic())
         response = super().send(request, **kwargs)
         try:
             network_checkpoint()

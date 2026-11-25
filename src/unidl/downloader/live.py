@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import tempfile
@@ -8,14 +9,19 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from typing import NoReturn
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
+from ..core.delivery import LiveSourceExpired, LiveSourceRenewal, SourceKind
 from .console import Palette, color_enabled, paint
 from .downloader import KNOWN_OUTPUT_SUFFIXES, HlsCrypto, _fetch_bytes, _HostAdaptiveLimiter, _should_prefer_curl
 from .embedding import DownloadCancelled, DownloaderThreadPoolExecutor, LiveRecordingStopped, current_download_runtime
 from .ism_live import stream_ism_timescale, stream_uses_ism_timeline_index
+from .live_cursor import Clock, LiveCursor, live_positions, match_live_cursor
 from .live_rules import (
     live_media_retry_attempts,
     live_media_retry_grace_enabled,
@@ -25,6 +31,7 @@ from .live_rules import (
 from .loader import LoadError, load_text
 from .models import SegmentInfo, StreamInfo
 from .parser import parse_source
+from .parsers import parse_dash, parse_hls, parse_json
 from .sabr_ump import SabrUmpError, fetch_sabr_ump_live_segments
 from .utils import WINDOWS_INTERMEDIATE_PATH_LIMIT, safe_temp_root
 
@@ -56,6 +63,10 @@ class LiveRecordOptions:
     stop_on_interrupt: bool = False
     assemble_output: bool | Callable[[StreamInfo], bool] = True
     stop_recording_requested: Callable[[], bool] | None = None
+    renew_live_source: Callable[[LiveSourceExpired], LiveSourceRenewal | None] | None = None
+    renewal_log: Callable[[str], None] | None = None
+    current_segment_key_observer: Callable[[StreamInfo, StreamInfo, list[SegmentInfo]], None] | None = None
+    renewed_stream_transform: Callable[[list[StreamInfo], str], None] | None = None
 
 
 @dataclass(slots=True)
@@ -92,6 +103,7 @@ class LiveSegmentBatch:
     parts: list[Path]
     output_path: Path
     temp_dir: Path
+    media_playlist: str = ""
 
 
 def _runtime_sleep(seconds: float) -> None:
@@ -170,6 +182,13 @@ class _LiveRecordState:
     parts: list[Path]
     segments: list[SegmentInfo]
     pending_media: list[SegmentInfo]
+    cursor: LiveCursor | None = None
+    renewed: bool = False
+    generation: int = 0
+    resume_clock: Clock | None = None
+    awaiting_resume: bool = False
+    pending_inits: dict[int, SegmentInfo] = field(default_factory=dict)
+    active_init: tuple[str, tuple[int, int] | None, str | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +200,140 @@ class _LivePlannedBatch:
 
 class _DashPatchNoUpdate(Exception):
     pass
+
+
+class _LiveAuthorizationError(RuntimeError):
+    def __init__(self, status: int, phase: str) -> None:
+        super().__init__(f"HTTP {status} while fetching a live {phase}")
+        self.request = LiveSourceExpired(status, phase)
+
+
+def _live_http_auth_status(error: BaseException) -> int | None:
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        status = error.code if isinstance(error, HTTPError) else getattr(error, "http_status", None)
+        if status in (401, 403):
+            return status
+        if error.__cause__ is None:
+            break
+        error = error.__cause__
+    return None
+
+
+@dataclass(slots=True)
+class _LiveSourceRecovery:
+    options: LiveRecordOptions
+    used: bool = False
+
+    def renew(
+        self,
+        states: list[_LiveRecordState],
+        error: _LiveAuthorizationError,
+        headers: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        options = self.options
+        log = options.renewal_log or (lambda _message: None)
+
+        def stop(reason: str) -> NoReturn:
+            log(f"live authorization: {reason}")
+            if any(state.segments_count for state in states):
+                log("live authorization: stopping and saving the recording so far")
+                raise LiveRecordingStopped(reason) from None
+            raise RuntimeError(f"live authorization: {reason}") from None
+
+        _checkpoint(options)
+        if _recording_stop_requested(options):
+            raise LiveRecordingStopped()
+        if self.used or options.renew_live_source is None:
+            stop("the renewed source did not resume capture")
+        self.used = True
+        log(f"live authorization: {error}; asking the service for a fresh source")
+        try:
+            renewed = options.renew_live_source(error.request)
+        except Exception:
+            _raise_if_cancelled(options)
+            if _recording_stop_requested(options):
+                raise LiveRecordingStopped() from None
+            stop("the service could not renew its playback authorization")
+        _checkpoint(options)
+        if _recording_stop_requested(options):
+            raise LiveRecordingStopped()
+        if not renewed or not (renewed.manifest_urls or renewed.source):
+            stop("the service did not return a fresh playback source")
+
+        new_headers = dict(renewed.headers) if renewed.headers is not None else headers
+        for candidates in _renewal_candidate_sets(renewed, options, new_headers):
+            matched = [_renewed_live_rendition(state, candidates) for state in states]
+            if any(match is None for match in matched) or len({id(m[0]) for m in matched}) != len(states):
+                continue
+            for state, (candidate, first) in zip(states, matched, strict=True):
+                state.current_stream = candidate
+                state.renewed = True
+                state.generation += 1
+                state.awaiting_resume = True
+                state.resume_clock = live_positions(candidate).get(id(first))
+                # Keep output counters and media sequence numbers separate:
+                # rewriting an HLS sequence can also change its implicit IV.
+                state.edge_index = first.index - 1
+                state.seen.clear()
+                state.init_written.clear()
+                state.pending_media.clear()
+                state.pending_inits.clear()
+                state.active_init = None
+            log("live authorization: fresh source matched the recording position; resuming")
+            return new_headers
+        stop("the fresh source could not be aligned to all selected tracks")
+
+
+def _renewal_candidate_sets(renewed: LiveSourceRenewal, options: LiveRecordOptions, headers):
+    source = renewed.source
+    urls = renewed.manifest_urls
+    if source is not None and source.kind is SourceKind.REFERENCE:
+        urls = (source.reference, *urls)
+    base_url = renewed.base_url or ""
+    if source is not None and urlsplit(base_url).scheme in {"http", "https"}:
+        try:
+            if source.kind is SourceKind.INLINE_HLS:
+                streams = parse_hls(base_url, source.inline_text or "", headers=headers)
+            elif source.kind is SourceKind.INLINE_DASH:
+                streams = parse_dash(base_url, source.inline_text or "")
+            elif source.kind is SourceKind.JSON_MANIFEST:
+                streams = parse_json(base_url, json.dumps(dict(source.json_document or {})), headers=headers)
+            else:
+                streams = []
+            _transform_renewed_streams(options, streams, base_url)
+            _ensure_live_json_init_segments(streams)
+            if streams:
+                yield streams
+        except (LoadError, ValueError, SyntaxError, ET.ParseError):
+            pass
+    for url in dict.fromkeys(urls):
+        _checkpoint(options)
+        if _recording_stop_requested(options):
+            raise LiveRecordingStopped()
+        if not url or urlsplit(url).scheme not in {"http", "https"}:
+            continue
+        try:
+            streams = _load_refreshed_streams(url, options, headers=headers, renewed=True)
+        except _LiveAuthorizationError:
+            continue  # An alternate from this authorization may still work.
+        if streams:
+            yield streams
+
+
+def _renewed_live_rendition(
+    state: _LiveRecordState, candidates: list[StreamInfo],
+) -> tuple[StreamInfo, SegmentInfo] | None:
+    if state.cursor is not None:
+        return match_live_cursor(state.stream, candidates, state.cursor)
+    pending = state.pending_media[0] if state.pending_media else None
+    if pending is None:
+        return None
+    clock = live_positions(state.current_stream).get(id(pending))
+    return match_live_cursor(
+        state.stream, candidates, LiveCursor(pending, clock, committed=False),
+    )
 
 
 def parse_live_limit(value: str | None) -> float | None:
@@ -236,6 +389,7 @@ def record_live_stream_group(
     refresh_failed = False
     stagnant_refreshes = 0
     host_limiter = _HostAdaptiveLimiter(max_parallel=max(1, int(options.workers or 1)))
+    recovery = _LiveSourceRecovery(options)
 
     for state in states:
         _emit_state_progress(options, state, 0, "Waiting")
@@ -249,16 +403,25 @@ def record_live_stream_group(
             if _recording_stop_requested(options):
                 break
             planned = _plan_group_batches(states, options)
+            if recovery.used and not planned:
+                if options.renewal_log:
+                    options.renewal_log("live authorization: no synchronized batch at the renewed position")
+                if any(state.segments_count for state in states):
+                    raise LiveRecordingStopped()
+                raise RuntimeError("live authorization: could not start a synchronized batch after renewal")
             if planned:
                 stagnant_refreshes = 0
                 workers = max(1, int(options.workers or 1))
-                if options.segment_key_observer:
+                if options.current_segment_key_observer is None and options.segment_key_observer:
                     for plan in planned:
                         options.segment_key_observer(plan.state.stream, plan.segments)
                 for plan in planned:
                     _emit_state_progress(options, plan.state, len(plan.media_segments), "Recording")
                 pool = DownloaderThreadPoolExecutor(max_workers=len(planned))
                 futures = {}
+                completed_parts: dict[int, list[Path]] = {}
+                expired = None
+                failure = None
                 try:
                     futures = {
                         pool.submit(
@@ -287,18 +450,42 @@ def record_live_stream_group(
                             host_limiter,
                             False,
                             live_media_retry_grace_enabled(plan.state.stream),
+                            **({"renewable": True} if options.renew_live_source else {}),
                         ): plan
                         for plan in planned
                     }
-                    completed_parts: dict[int, list[Path]] = {}
                     for future in as_completed(futures):
                         plan = futures[future]
-                        completed_parts[id(plan.state)] = future.result()
+                        try:
+                            completed_parts[id(plan.state)] = future.result()
+                        except _LiveAuthorizationError as exc:
+                            expired = exc
+                        except Exception as exc:
+                            if not options.renew_live_source or isinstance(exc, DownloadCancelled):
+                                raise
+                            failure = exc
                 except BaseException:
                     _cancel_futures_now(pool, futures)
                     raise
                 else:
                     pool.shutdown(wait=True)
+                if expired:
+                    for parts in completed_parts.values():
+                        for part in parts:
+                            part.unlink(missing_ok=True)
+                    headers = recovery.renew(states, expired, headers)
+                    continue
+                if failure:
+                    raise failure
+                if options.current_segment_key_observer:
+                    try:
+                        for plan in planned:
+                            options.current_segment_key_observer(plan.state.stream, plan.state.current_stream, plan.segments)
+                    except LiveRecordingStopped:
+                        for parts in completed_parts.values():
+                            for part in parts:
+                                part.unlink(missing_ok=True)
+                        raise
                 group_batches: list[LiveSegmentBatch] = []
                 for plan in planned:
                     parts = completed_parts[id(plan.state)]
@@ -310,6 +497,7 @@ def record_live_stream_group(
                     group_batches.append(_live_segment_batch(plan, parts))
                 if options.group_segment_sink:
                     options.group_segment_sink(group_batches)
+                recovery.used = False
 
             if _recording_stop_requested(options):
                 break
@@ -325,7 +513,11 @@ def record_live_stream_group(
             _raise_if_cancelled(options)
             if _recording_stop_requested(options):
                 break
-            refresh_failed = not _refresh_group_states(states, options, headers=headers)
+            try:
+                refresh_failed = not _refresh_group_states(states, options, headers=headers)
+            except _LiveAuthorizationError as exc:
+                headers = recovery.renew(states, exc, headers)
+                continue
             if refresh_failed:
                 stagnant_refreshes += 1
             elif any(_state_has_new_live_media(state, options) for state in states):
@@ -374,6 +566,8 @@ def record_live_stream(
     options: LiveRecordOptions | None = None,
 ) -> LiveRecordResult:
     options = options or LiveRecordOptions()
+    if options.renew_live_source:
+        return record_live_stream_group([stream], output_dir, [filename], headers, options)[0]
     _ensure_live_json_init_segments([stream])
     output_path = _live_output_path(stream, output_dir, filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -704,20 +898,37 @@ def _live_temp_dir(output_path: Path, options: LiveRecordOptions) -> Path:
 def _plan_group_batches(states: list[_LiveRecordState], options: LiveRecordOptions) -> list[_LivePlannedBatch]:
     media_by_state: dict[int, list[SegmentInfo]] = {}
     init_by_state: dict[int, list[SegmentInfo]] = {}
-    sync_dvr_window = _should_synchronize_group_dvr_window(states, options)
+    sync_dvr_window = not any(state.renewed for state in states) and _should_synchronize_group_dvr_window(states, options)
     for state in states:
         media_segments = [segment for segment in state.current_stream.segments if segment.index != -1]
+        if state.resume_clock:
+            domain, floor = state.resume_clock
+            clocks = live_positions(state.current_stream)
+            media_segments = [
+                segment for segment in media_segments
+                if (clock := clocks.get(id(segment))) is None
+                or clock[0] != domain or clock[1] >= floor - 0.125
+            ]
         init_by_state[id(state)] = [segment for segment in state.current_stream.segments if segment.index == -1]
         new_segments = _new_live_media_segments(
             media_segments,
             state.seen,
             state.edge_index,
-            state.segments_count,
+            max(state.segments_count, int(state.renewed)),
             options,
             apply_dvr_window=not sync_dvr_window,
             stream=state.current_stream,
         )
         _merge_pending_media_segments(state, new_segments)
+        if state.renewed:
+            active_init = None
+            for segment in state.current_stream.segments:
+                if segment.index == -1:
+                    active_init = segment
+                elif active_init is not None:
+                    state.pending_inits[id(segment)] = active_init
+            pending_ids = {id(segment) for segment in state.pending_media}
+            state.pending_inits = {key: init for key, init in state.pending_inits.items() if key in pending_ids}
         state.available_seconds, state.available_count = _live_available_totals(
             media_segments,
             state.pending_media,
@@ -736,6 +947,14 @@ def _plan_group_batches(states: list[_LiveRecordState], options: LiveRecordOptio
             state.available_count = len(selected)
 
     aligned = _aligned_group_media_segments(states, media_by_state)
+    if any(
+        state.awaiting_resume and state.pending_media
+        and state.pending_media[0] not in aligned.get(id(state), [])
+        for state in states if state.stream.media_type in {"audio", "video"}
+    ):
+        # A fallback alignment must not skip the first segment whose identity
+        # was verified by the renewal. Otherwise save the prior recording.
+        return []
     for state in states:
         if should_repeat_live_media_request(state.current_stream):
             state.pending_media = list(aligned.get(id(state), []))
@@ -745,15 +964,39 @@ def _plan_group_batches(states: list[_LiveRecordState], options: LiveRecordOptio
         media_segments = _cap_media_segments_for_limit(media_segments, state, _effective_record_limit(options))
         if not media_segments:
             continue
+        if state.renewed:
+            batch = _renewed_batch_parts(state, media_segments)
+            clocks = live_positions(state.current_stream, media_segments) | live_positions(state.current_stream)
+            for segment in media_segments:
+                segment.live_generation = state.generation
+                segment.live_clock = clocks.get(id(segment))
+            planned.append(_LivePlannedBatch(state=state, segments=batch, media_segments=media_segments))
+            continue
         batch: list[SegmentInfo] = []
         for init_segment in init_by_state[id(state)]:
             key = _segment_key(init_segment)
             if key not in state.init_written:
                 batch.append(init_segment)
-                state.init_written.add(key)
         batch.extend(media_segments)
         planned.append(_LivePlannedBatch(state=state, segments=batch, media_segments=media_segments))
     return planned
+
+
+def _init_identity(segment: SegmentInfo) -> tuple[str, tuple[int, int] | None, str | None]:
+    return segment.url, segment.byte_range, segment.key_id
+
+
+def _renewed_batch_parts(state: _LiveRecordState, media_segments: list[SegmentInfo]) -> list[SegmentInfo]:
+    parts: list[SegmentInfo] = []
+    active = state.active_init
+    for segment in media_segments:
+        if (init := state.pending_inits.get(id(segment))) is not None:
+            identity = _init_identity(init)
+            if identity != active:
+                parts.append(init)
+                active = identity
+        parts.append(segment)
+    return parts
 
 
 def _should_synchronize_group_dvr_window(states: list[_LiveRecordState], options: LiveRecordOptions) -> bool:
@@ -861,6 +1104,12 @@ def _aligned_group_media_segments(
 ) -> dict[int, list[SegmentInfo]]:
     sync_states = [state for state in states if state.stream.media_type in {"video", "audio"}] or states
     sync_state_ids = {id(state) for state in sync_states}
+    if any(state.renewed for state in sync_states):
+        # CDN windows can renumber audio and video independently. Compare
+        # only positions in a common clock, never an accidental index overlap.
+        timed = _align_renewed_group(states, media_by_state, sync_states, sync_state_ids)
+        if timed is not None:
+            return timed
     if _has_explicit_dash_timeline(sync_states):
         aligned_by_timeline = _align_by_timeline_indexes(states, media_by_state, sync_states, sync_state_ids)
         if aligned_by_timeline:
@@ -1006,6 +1255,43 @@ def _align_by_program_time(
         timed_by_state,
         _program_time_alignment_tolerance(sync_states, media_by_state),
     )
+
+
+def _align_renewed_group(
+    states: list[_LiveRecordState],
+    media_by_state: dict[int, list[SegmentInfo]],
+    sync_states: list[_LiveRecordState],
+    sync_state_ids: set[int],
+) -> dict[int, list[SegmentInfo]] | None:
+    positions: dict[int, list[tuple[float, SegmentInfo]]] = {}
+    domain = None
+    for state in states:
+        state_id = id(state)
+        media = media_by_state.get(state_id, [])
+        clocks = live_positions(state.current_stream, media) | live_positions(state.current_stream)
+        if state_id in sync_state_ids and not media:
+            return {id(item): [] for item in states}
+        known = [(clocks.get(id(segment)), segment) for segment in media]
+        known = [(clock, segment) for clock, segment in known if clock is not None]
+        if state_id in sync_state_ids:
+            if len(known) != len(media):
+                # Existing shared sequence alignment remains available for
+                # streams where all tracks keep their native numbering.
+                return None
+            for clock, _ in known:
+                if domain is None:
+                    domain = clock[0]
+                elif domain != clock[0]:
+                    return None
+        positions[state_id] = [(clock[1], segment) for clock, segment in known if clock[0] == domain]
+    end = min(_timed_segment_intervals(positions[id(state)])[-1][1] for state in sync_states)
+    if any(positions[id(state)][0][0] >= end for state in sync_states):
+        return {id(state): [] for state in states}
+    return {
+        id(state): [segment for time, segment in positions[id(state)] if time < end]
+        if positions[id(state)] else media_by_state.get(id(state), [])
+        for state in states
+    }
 
 
 def _align_by_timeline_indexes(
@@ -1289,6 +1575,19 @@ def _apply_group_batch(
     state = plan.state
     state.parts.extend(parts)
     state.segments.extend(plan.segments)
+    state.init_written.update(_segment_key(segment) for segment in plan.segments if segment.index == -1)
+    for segment in plan.segments:
+        if segment.index == -1:
+            state.active_init = _init_identity(segment)
+    if options.renew_live_source:
+        last = plan.media_segments[-1]
+        position = live_positions(state.current_stream).get(id(last))
+        if position is None:
+            position = live_positions(state.current_stream, plan.media_segments).get(id(last))
+        state.cursor = LiveCursor(last, position, committed=True)
+        state.awaiting_resume = False
+        if state.renewed and position is not None and last.duration:
+            state.resume_clock = (position[0], position[1] + last.duration)
     state.downloaded_bytes += _paths_total_size(parts)
     for segment in plan.media_segments:
         state.seen.add(_segment_key(segment))
@@ -1325,6 +1624,7 @@ def _live_segment_batch(plan: _LivePlannedBatch, parts: list[Path]) -> LiveSegme
         parts=list(parts),
         output_path=state.output_path,
         temp_dir=state.temp_dir,
+        media_playlist=state.current_stream.url,
     )
 
 
@@ -1645,7 +1945,10 @@ def _refresh_group_states(states: list[_LiveRecordState], options: LiveRecordOpt
     sabr_refreshed = _refresh_sabr_live_states(states, options, headers=headers)
     common_source = _common_live_refresh_source([state.current_stream for state in states])
     if common_source:
-        refreshed = _load_refreshed_streams(common_source, options, headers=headers)
+        refreshed = _load_refreshed_streams(
+            common_source, options, headers=headers,
+            **({"renewed": True} if any(state.renewed for state in states) else {}),
+        )
         if refreshed is not None:
             for state in states:
                 state.current_stream = _match_live_state_refreshed_stream(state, refreshed, options) or state.current_stream
@@ -1800,6 +2103,13 @@ def _batch_progress_callback(
 def _transform_refreshed_streams(options: LiveRecordOptions, streams: list[StreamInfo]) -> None:
     if options.stream_transform and streams:
         options.stream_transform(streams)
+
+
+def _transform_renewed_streams(options: LiveRecordOptions, streams: list[StreamInfo], source: str) -> None:
+    if options.renewed_stream_transform and streams:
+        options.renewed_stream_transform(streams, source)
+    else:
+        _transform_refreshed_streams(options, streams)
 
 
 def _default_group_wait_seconds(states: list[_LiveRecordState]) -> int:
@@ -1990,9 +2300,21 @@ def _append_segments(
     host_limiter: _HostAdaptiveLimiter | None = None,
     assemble_output: bool = True,
     retry_grace: bool = True,
+    *,
+    renewable: bool = False,
 ) -> list[Path]:
     batch_id = time.time_ns()
     part_paths = [temp_dir / f"{batch_id}_{index:08d}.part" for index in range(len(segments))]
+
+    def check_authorization(failures: dict[int, Exception]) -> None:
+        if renewable:
+            for failure in failures.values():
+                if status := _live_http_auth_status(failure):
+                    for path in part_paths:
+                        path.unlink(missing_ok=True)
+                    raise _LiveAuthorizationError(status, "segment") from failure
+
+    auth_options = {"stop_on_http_auth": True} if renewable else {}
     failures = _download_live_segment_parts(
         segments,
         part_paths,
@@ -2005,7 +2327,9 @@ def _append_segments(
         request_timeout=request_timeout,
         progress=progress,
         host_limiter=host_limiter,
+        **auth_options,
     )
+    check_authorization(failures)
     if retry_grace and failures and workers > 1:
         _runtime_sleep(0.75)
         failures = _download_live_segment_parts(
@@ -2020,7 +2344,9 @@ def _append_segments(
             request_timeout=request_timeout,
             progress=progress,
             host_limiter=host_limiter,
+            **auth_options,
         )
+        check_authorization(failures)
     if retry_grace and failures:
         _runtime_sleep(2.5)
         failures = _download_live_segment_parts(
@@ -2035,7 +2361,9 @@ def _append_segments(
             request_timeout=request_timeout,
             progress=progress,
             host_limiter=host_limiter,
+            **auth_options,
         )
+        check_authorization(failures)
     if failures:
         index = min(failures)
         raise failures[index]
@@ -2065,6 +2393,7 @@ def _download_live_segment_parts(
     request_timeout: int,
     progress: Callable[[SegmentInfo, Path], None] | None,
     host_limiter: _HostAdaptiveLimiter | None = None,
+    stop_on_http_auth: bool = False,
 ) -> dict[int, Exception]:
     failures: dict[int, Exception] = {}
     pool = DownloaderThreadPoolExecutor(max_workers=max(1, workers))
@@ -2077,6 +2406,8 @@ def _download_live_segment_parts(
                 kwargs["request_timeout"] = request_timeout
             if host_limiter is not None:
                 kwargs["host_limiter"] = host_limiter
+            if stop_on_http_auth:
+                kwargs["stop_on_http_auth"] = True
             future = pool.submit(_download_segment_to_path, *args, **kwargs)
             futures[future] = index
         for future in as_completed(futures):
@@ -2115,8 +2446,10 @@ def _download_segment_to_path(
     retries: int = 3,
     request_timeout: int = 30,
     host_limiter: _HostAdaptiveLimiter | None = None,
+    stop_on_http_auth: bool = False,
 ) -> None:
-    path.write_bytes(_fetch_bytes(segment, headers=headers, retries=retries, prefer_curl=prefer_curl, hls_crypto=hls_crypto, request_timeout=request_timeout, host_limiter=host_limiter))
+    auth_options = {"stop_on_http_auth": True} if stop_on_http_auth else {}
+    path.write_bytes(_fetch_bytes(segment, headers=headers, retries=retries, prefer_curl=prefer_curl, hls_crypto=hls_crypto, request_timeout=request_timeout, host_limiter=host_limiter, **auth_options))
 
 
 def _paths_total_size(paths: list[Path]) -> int:
@@ -2182,12 +2515,19 @@ def _live_refresh_sources(stream: StreamInfo) -> list[str]:
     return sources
 
 
-def _load_refreshed_streams(source: str, options: LiveRecordOptions, headers: dict[str, str] | None = None) -> list[StreamInfo] | None:
+def _load_refreshed_streams(
+    source: str, options: LiveRecordOptions, headers: dict[str, str] | None = None, *, renewed: bool = False,
+) -> list[StreamInfo] | None:
     try:
         refreshed = parse_source(source, headers=headers, fetch_child_playlists=True)
-    except (LoadError, ValueError, SyntaxError, ET.ParseError):
+    except (LoadError, ValueError, SyntaxError, ET.ParseError) as exc:
+        if options.renew_live_source and (status := _live_http_auth_status(exc)):
+            raise _LiveAuthorizationError(status, "manifest") from exc
         return None
-    _transform_refreshed_streams(options, refreshed)
+    if renewed:
+        _transform_renewed_streams(options, refreshed, source)
+    else:
+        _transform_refreshed_streams(options, refreshed)
     _ensure_live_json_init_segments(refreshed)
     return refreshed
 
@@ -2217,7 +2557,9 @@ def _refresh_live_state_from_candidates(
     for source in _live_refresh_sources(state.current_stream):
         if skip_sources and source in skip_sources:
             continue
-        refreshed = _load_refreshed_streams(source, options, headers=headers)
+        refreshed = _load_refreshed_streams(
+            source, options, headers=headers, **({"renewed": True} if state.renewed else {}),
+        )
         if refreshed is None:
             continue
         last_refreshed = refreshed

@@ -76,7 +76,9 @@ from .downloader import (
     fetch_segment_probe_bytes,
     prepare_dvr_sequence_windows,
     prepare_remote_stream_download_plan,
+    prepare_resume_init,
     set_allow_insecure_localhost_hls_keys,
+    verify_vod_resume_inputs,
 )
 from .embedding import (
     DownloadArtifact,
@@ -88,6 +90,7 @@ from .embedding import (
     LiveKeyProvider,
     LiveKeyRequest,
     LiveRecordingStopped,
+    abort_expired_vod_transfer,
     current_download_runtime,
     managed_popen,
     managed_run,
@@ -959,7 +962,11 @@ def _download_impl(args: argparse.Namespace) -> int:
             validate_caption(stream)
             if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
                 raise RuntimeError("FFmpeg and ffprobe are required for embedded CC extraction.")
-    hydrated = [_hydrate_stream(stream, headers=headers, no_probe=args.no_probe, base_url=args.base_url) for stream in selected]
+    try:
+        hydrated = [_hydrate_stream(stream, headers=headers, no_probe=args.no_probe, base_url=args.base_url) for stream in selected]
+    except LoadError as exc:
+        abort_expired_vod_transfer(exc, phase="manifest")
+        raise
     _preflight_mp4box(hydrated, args)
     if (
         chapter_records
@@ -1019,6 +1026,13 @@ def _download_impl(args: argparse.Namespace) -> int:
                 force=bool(stream.encrypted),
             )
     print()
+    runtime = current_download_runtime()
+    if runtime is not None and runtime.vod_transfer is not None and not args.no_resume:
+        args._vod_resume_keys = tuple((key.kid or "", key.key) for key in keys)
+        for stream in hydrated:
+            verify_vod_resume_inputs(
+                stream, headers, max(1, args.http_request_timeout), _hls_crypto_for_stream(stream, hls_crypto),
+            )
     _verify_selected_content_keys(args, hydrated, keys, headers)
     _print_selected_download_summary(hydrated, original_streams=streams, colors=colors)
     _log_line(args, "Selected: " + ", ".join(stream.format_line() for stream in hydrated))
@@ -2214,12 +2228,22 @@ _COMPLETED_TRACK_CACHE_VERSION = 1
 
 
 def _completed_track_cache_identity(stream, filename: str | None, args: argparse.Namespace) -> dict:
+    vod_keys = getattr(args, "_vod_resume_keys", ())
+    if stream.vod_resume_id and stream.encrypted and vod_keys and not args.no_decrypt:
+        selected_kids = set(_stream_key_ids(stream))
+        # An unknown KID cannot establish that the old clear artifact still
+        # corresponds to the available key set after a source change.
+        relevant = sorted(pair for pair in vod_keys if not selected_kids or not pair[0] or pair[0] in selected_kids)
+        vod_key_signature = hashlib.sha256(json.dumps(relevant).encode()).hexdigest()
+    else:
+        vod_key_signature = None
     return {
         **({"embedded_caption": stream.extra["hls_instream_id"], "carrier": stream.extra["hls_caption_source"]} if is_caption(stream) else {}),
         **({"preserve_captions": True} if stream.extra.get(_PRESERVE_CAPTIONS) else {}),
         **({"muxed_source": stream.extra["_unidl_muxed_source"],
             "demux_media": stream.extra["_unidl_demux_media"]} if is_demux_stream(stream) else {}),
         "stream_key": _stream_resume_key(stream),
+        **({"vod_key_signature": vod_key_signature} if vod_key_signature is not None else {}),
         "track_shape": {
             key: getattr(stream, key, None)
             for key in ("codecs", "channels", "role", "duration", "encrypted", "encryption_scheme")
@@ -2452,6 +2476,14 @@ def _download_selected_stream(
     )
     original_index = _stream_original_index(all_streams, stream, offset)
     status = _TrackStatusReporter(original_index, stream, emit, colors, status_callback, force=getattr(args, "force_ansi_console", False))
+    if not args.no_resume:
+        from ..core.manifest_sources import source_request_headers
+
+        prepare_resume_init(
+            stream,
+            source_request_headers(stream.extra, headers) or {},
+            max(1, args.http_request_timeout),
+        )
     checkpoint = TrackCheckpoint(
         _task_temp_subdir(args, "checkpoints"),
         _completed_track_cache_identity(stream, name, args),
@@ -3920,6 +3952,12 @@ class _LiveKeyValidationError(RuntimeError):
 
 
 def _live_pipe_segment_marker(segment: SegmentInfo) -> tuple[str, object] | None:
+    generation = getattr(segment, "live_generation", 0)
+    if generation:
+        if clock := segment.live_clock:
+            return ("renewed-clock", (generation, clock[0], round(clock[1], 3)))
+        if segment.index is not None and segment.index >= 0:
+            return ("renewed-index", (generation, segment.index))
     if getattr(segment, "index", None) is not None and segment.index >= 0:
         return ("index", segment.index)
     if getattr(segment, "timeline_time", None) is not None:
@@ -4874,7 +4912,10 @@ class _LivePipeMuxSession:
                             init_path = self._extract_pipe_self_contained_mp4_init(batch.stream, part)
                         if init_path is None:
                             raise RuntimeError("Encrypted live pipe fragment appeared before init segment.")
-                        source_part = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
+                        source_part = self._decrypt_pipe_fragment(
+                            batch.stream, part, init_path, decrypter=fragment_decrypter,
+                            segment=segment, media_playlist=batch.media_playlist,
+                        )
                         source_part = self._restamp_pipe_fragment(batch.stream, source_part, segment)
                         if not _live_pipe_part_contains_init(batch.stream, segment, source_part):
                             remux_init = self._decrypted_init_for_remux(
@@ -4896,7 +4937,10 @@ class _LivePipeMuxSession:
                         init_path = self._extract_pipe_self_contained_mp4_init(batch.stream, part)
                     if init_path is None:
                         raise RuntimeError("Encrypted live pipe fragment appeared before init segment.")
-                    decrypted = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
+                    decrypted = self._decrypt_pipe_fragment(
+                        batch.stream, part, init_path, decrypter=fragment_decrypter,
+                        segment=segment, media_playlist=batch.media_playlist,
+                    )
                     restamped = self._restamp_pipe_fragment(batch.stream, decrypted, segment)
                     payload.append((sequence, restamped, segment))
                 else:
@@ -4910,7 +4954,10 @@ class _LivePipeMuxSession:
                         init_path = self._extract_pipe_self_contained_mp4_init(batch.stream, part)
                     if init_path is None:
                         raise RuntimeError("Encrypted live pipe fragment appeared before init segment.")
-                    source_part = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
+                    source_part = self._decrypt_pipe_fragment(
+                        batch.stream, part, init_path, decrypter=fragment_decrypter,
+                        segment=segment, media_playlist=batch.media_playlist,
+                    )
                 payload.append((sequence, self._remux_pipe_fragment_to_ts(batch.stream, source_part, None), segment))
                 continue
             if pipe_format in {"aac", "ac3", "eac3", "mp3"}:
@@ -4929,7 +4976,10 @@ class _LivePipeMuxSession:
                 init_path = self._extract_pipe_self_contained_mp4_init(batch.stream, part)
             if init_path is None:
                 raise RuntimeError("Encrypted live pipe fragment appeared before init segment.")
-            decrypted = self._decrypt_pipe_fragment(batch.stream, part, init_path, decrypter=fragment_decrypter, segment=segment)
+            decrypted = self._decrypt_pipe_fragment(
+                batch.stream, part, init_path, decrypter=fragment_decrypter,
+                segment=segment, media_playlist=batch.media_playlist,
+            )
             restamped = self._restamp_pipe_fragment(batch.stream, decrypted, segment)
             remux_init = (
                 None
@@ -5034,6 +5084,7 @@ class _LivePipeMuxSession:
                     self.colors,
                     reason="Live fragment KID detected",
                     provider=_live_key_provider(self.args),
+                    media_playlist=batch.media_playlist,
                 )
 
     def _should_detect_pipe_part_key_ids(self, stream) -> bool:
@@ -5139,7 +5190,10 @@ class _LivePipeMuxSession:
         webm_key = select_webm_key(self.keys, webm_key_ids(part) or expected_kids)
         return decrypt_webm_file(part, webm_key, output, validate=False)
 
-    def _decrypt_pipe_fragment(self, stream, part: Path, init_path: Path, decrypter: str | None = None, segment=None) -> Path:
+    def _decrypt_pipe_fragment(
+        self, stream, part: Path, init_path: Path, decrypter: str | None = None, segment=None,
+        *, media_playlist: str = "",
+    ) -> Path:
         patch_kid = self._candidate_patch_kid(stream, segment)
         while True:
             try:
@@ -5159,6 +5213,7 @@ class _LivePipeMuxSession:
                     force=True,
                     replace_existing=True,
                     provider=_live_key_provider(self.args),
+                    media_playlist=media_playlist,
                 )
                 replacement_kid = _normalize_kid_text(replacement.kid) or prompt_kid
                 if replacement_kid:
@@ -5180,6 +5235,7 @@ class _LivePipeMuxSession:
                     force=True,
                     replace_existing=True,
                     provider=_live_key_provider(self.args),
+                    media_playlist=media_playlist,
                 )
                 replacement_kid = _normalize_kid_text(replacement.kid) or prompt_kid
                 if replacement_kid:
@@ -5466,6 +5522,7 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
     progress_callback = _embedding_live_progress(args, progress_display)
     runtime = current_download_runtime()
     stop_capture = _embedding_recording_stop_callback(args)
+    renew_source = getattr(getattr(args, "embedding_hooks", None), "renew_live_source", None)
 
     def delivery_sink(sink):
         if runtime is None or sink is None:
@@ -5512,9 +5569,18 @@ def _record_live_streams(live_streams, all_streams, args, headers, keys, output,
             )
         ),
         stream_transform=_live_stream_transform(args),
+        renewed_stream_transform=_live_stream_transform(args),
         hls_crypto=hls_crypto,
         stop_on_interrupt=_live_stop_on_interrupt_enabled(pipe_session, args, live_streams),
         assemble_output=_live_assemble_output_selector(pipe_session, args),
+        renew_live_source=renew_source,
+        renewal_log=_embedding_message_emitter(args) or print,
+        current_segment_key_observer=(
+            None if args.no_decrypt or renew_source is None else
+            lambda stream, current, segments: _ensure_live_segment_keys(
+                keys, stream, segments, colors, provider=_live_key_provider(args), active_stream=current,
+            )
+        ),
     )
     _print_live_recording_summary(live_streams, args, pipe_session, colors=colors, show_progress=panel.enabled)
     results = []
@@ -5727,9 +5793,9 @@ def _live_stream_transform(args):
     if not getattr(args, "append_url_params", False) and not getattr(args, "vgc", False):
         return None
 
-    def transform(refreshed):
+    def transform(refreshed, renewed_source=None):
         if getattr(args, "append_url_params", False):
-            _append_input_params(refreshed, args.input)
+            _append_input_params(refreshed, renewed_source or args.input)
         if getattr(args, "vgc", False):
             prepare_vgc_streams(refreshed)
 
@@ -8156,10 +8222,22 @@ def _ensure_live_segment_keys(
     segments: list[SegmentInfo],
     colors: bool | None = None,
     provider: LiveKeyProvider | None = None,
+    active_stream: StreamInfo | None = None,
 ) -> None:
-    if not keys:
+    if not keys and active_stream is None:
         return
+    init_for_segment = {}
+    if active_stream is not None:
+        initialization = None
+        for segment in active_stream.segments:
+            if segment.index == -1:
+                initialization = segment
+            elif initialization is not None:
+                init_for_segment[id(segment)] = initialization
+    batch_init = None
     for segment in segments:
+        if segment.index == -1:
+            batch_init = segment
         if not getattr(segment, "encrypted", False):
             continue
         kid = _normalize_kid_text(getattr(segment, "key_id", None))
@@ -8173,6 +8251,9 @@ def _ensure_live_segment_keys(
             colors,
             reason="Live key changed",
             provider=provider,
+            media_playlist=active_stream.url if active_stream else "",
+            manifest_url=active_stream.original_url if active_stream else "",
+            initialization=init_for_segment.get(id(segment), batch_init),
         )
 
 
@@ -8187,6 +8268,9 @@ def _prompt_for_live_key(
     force: bool = False,
     replace_existing: bool = False,
     provider: LiveKeyProvider | None = None,
+    media_playlist: str = "",
+    manifest_url: str = "",
+    initialization: SegmentInfo | None = None,
 ) -> RawKey:
     kid = _normalize_kid_text(kid)
     existing_key = _raw_key_for_kid(keys, kid)
@@ -8208,6 +8292,9 @@ def _prompt_for_live_key(
                 force=force,
                 replace_existing=replace_existing,
                 provider=provider,
+                media_playlist=media_playlist,
+                manifest_url=manifest_url,
+                initialization=initialization,
             )
         finally:
             if progress_panel is not None:
@@ -8225,6 +8312,9 @@ def _prompt_for_live_key_locked(
     force: bool = False,
     replace_existing: bool = False,
     provider: LiveKeyProvider | None = None,
+    media_playlist: str = "",
+    manifest_url: str = "",
+    initialization: SegmentInfo | None = None,
 ) -> RawKey:
     kid = _normalize_kid_text(kid)
     existing_key = _raw_key_for_kid(keys, kid)
@@ -8240,6 +8330,9 @@ def _prompt_for_live_key_locked(
                 require_kid=require_kid,
                 force=force,
                 replace_existing=replace_existing,
+                media_playlist=media_playlist,
+                manifest_url=manifest_url,
+                initialization=initialization,
             )
         )
         raw = str(supplied or "").strip()
@@ -8665,31 +8758,74 @@ def _path_is_under(path: Path, root: Path) -> bool:
     return True
 
 
+def _publish_no_replace(source: Path, destination: Path) -> None:
+    """Publish a finished file atomically; an existing name is always a collision."""
+    src, dst = windows_long_path(source), windows_long_path(destination)
+    if os.name == "nt":
+        # Unlike POSIX rename(), Windows rename fails if the destination exists.
+        os.rename(src, dst)
+        return
+    try:
+        os.link(src, dst)
+    except OSError as exc:
+        if exc.errno not in {errno.ENOTSUP, errno.EPERM, errno.ENOSYS, errno.EMLINK}:
+            raise
+        # FAT/exFAT and some network mounts cannot create hard links. Prefer
+        # the OS's exclusive rename over a placeholder + unsafe os.replace().
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            result = libc.renamex_np(os.fsencode(src), os.fsencode(dst), 4)  # RENAME_EXCL
+        elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            result = libc.renameat2(-100, os.fsencode(src), -100, os.fsencode(dst), 1)  # RENAME_NOREPLACE
+        else:
+            raise
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), dst) from exc
+    else:
+        source.unlink()
+
+
 def _move_staged_artifact(source: Path, destination: Path) -> Path:
-    """Commit one staged file, falling back safely across filesystems."""
+    """Resolve filename collisions at commit time, not just before muxing."""
 
     source = Path(source).expanduser()
     destination = Path(destination).expanduser()
     if not source.is_file():
         raise FileNotFoundError(f"staged artifact is missing: {source}")
+    if source.absolute() == destination.absolute():
+        return source
     destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = None
     try:
-        os.replace(windows_long_path(source), windows_long_path(destination))
-        return destination
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-    partial = destination.with_name(f".{destination.name}.{uuid.uuid4().hex[:8]}.commit")
-    try:
-        shutil.copy2(windows_long_path(source), windows_long_path(partial))
-        os.replace(windows_long_path(partial), windows_long_path(destination))
-        source.unlink()
+        for index in range(10000):
+            candidate = destination if index == 0 else bounded_path(
+                destination.with_name(f"{destination.stem}_{index}{destination.suffix}")
+            )
+            try:
+                _publish_no_replace(partial or source, candidate)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno != errno.EXDEV or partial is not None:
+                    raise
+                descriptor, name = tempfile.mkstemp(prefix=".unidl-", suffix=".commit", dir=destination.parent)
+                os.close(descriptor)
+                partial = Path(name)
+                shutil.copy2(windows_long_path(source), windows_long_path(partial))
+                try:
+                    _publish_no_replace(partial, candidate)
+                except FileExistsError:
+                    continue
+            if partial is not None:
+                source.unlink()
+            return candidate
+        raise FileExistsError(f"Could not find an unused output path for {destination}")
     finally:
-        try:
-            partial.unlink()
-        except OSError:
-            pass
-    return destination
+        if partial is not None:
+            partial.unlink(missing_ok=True)
 
 
 def _commit_task_outputs(
@@ -8879,6 +9015,9 @@ def _short_temp_label(value: str, limit: int = 40) -> str:
 
 
 def _task_temp_payload(args: argparse.Namespace, streams) -> str:
+    runtime = current_download_runtime()
+    if runtime is not None and runtime.vod_transfer is not None:
+        return json.dumps({"vod": runtime.vod_transfer.cache_id}, sort_keys=True)
     payload = {
         "input": _resume_url_key(getattr(args, "input", None)),
         "save_name": getattr(args, "save_name", None),

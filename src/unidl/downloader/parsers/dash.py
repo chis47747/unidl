@@ -521,7 +521,10 @@ def _segments_for_representation(
     if segment_list is None:
         segment_list = _first_child(adaptation, "SegmentList")
     if segment_list is not None:
-        return _segments_from_list(base_uri, period_duration, segment_list, adaptation, representation, encrypted, encryption_scheme, key_id, live_context)
+        return _segments_from_list(
+            base_uri, period_duration, segment_list, adaptation, representation,
+            encrypted, encryption_scheme, key_id, live_context, period_start=period_start,
+        )
 
     segment_base = _first_child(representation, "SegmentBase")
     if segment_base is None:
@@ -665,6 +668,12 @@ def _segments_from_template(
                 encrypted=encrypted,
                 encryption_scheme=encryption_scheme,
                 key_id=key_id,
+                timeline_presentation_time=(
+                    _segment_timeline_presentation_time(
+                        (number - start_number) * duration_ticks, presentation_time_offset_ticks, timescale, period_start,
+                    )
+                    if live_context and live_context.is_live and live_context.availability_start is not None else None
+                ),
             )
         )
     return segments
@@ -727,10 +736,13 @@ def _segments_from_list(
     encryption_scheme: str | None,
     key_id: str | None,
     live_context: _LiveDashContext | None = None,
+    *,
+    period_start: float | None = None,
 ) -> list[SegmentInfo]:
     segments: list[SegmentInfo] = []
     timescale = _int_or_none(segment_list.attrib.get("timescale")) or 1
     start_number = _dash_start_number(segment_list)
+    presentation_offset = _int_or_none(segment_list.attrib.get("presentationTimeOffset")) or 0
     duration_ticks = _int_or_none(segment_list.attrib.get("duration"))
     segment_urls = _children(segment_list, "SegmentURL")
     if segment_urls and not segment_urls[0].attrib.get("media") and not segment_urls[0].attrib.get("mediaRange"):
@@ -764,8 +776,15 @@ def _segments_from_list(
         timeline_entry = timeline_entries[index] if index < len(timeline_entries) else None
         duration = _segment_list_segment_duration(index, timeline_entry, duration_seconds, duration_ticks, timescale)
         media_index = index
+        timeline_time = None
+        presentation_time = None
         if live_context and live_context.is_live:
             media_index = int(timeline_entry[0]) if timeline_entry is not None else start_number + index
+            if timeline_entry is not None:
+                timeline_time = timeline_entry[0]
+                presentation_time = _segment_timeline_presentation_time(
+                    timeline_time, presentation_offset, timescale, period_start,
+                )
         segments.append(
             SegmentInfo(
                 url=segment_url,
@@ -775,6 +794,8 @@ def _segments_from_list(
                 encrypted=encrypted,
                 encryption_scheme=encryption_scheme,
                 key_id=key_id,
+                timeline_time=timeline_time,
+                timeline_presentation_time=presentation_time,
             )
         )
     return segments
@@ -1236,6 +1257,8 @@ def _dash_template_extra(
         extra["dash_adaptation_id"] = adaptation_id
     if live_context and live_context.refresh_location:
         extra["dash_refresh_url"] = live_context.refresh_location
+    if live_context and live_context.is_live and live_context.availability_start is not None:
+        extra["dash_live_availability_start"] = live_context.availability_start.timestamp()
     template = _segment_template_for(representation, adaptation)
     if template is None:
         segment_list = _first_child(representation, "SegmentList")

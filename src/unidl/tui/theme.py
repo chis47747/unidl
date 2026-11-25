@@ -198,10 +198,231 @@ LIGHT = Palette(
     scroll_fg="#98948c",
 )
 
-PALETTES: dict[str, Palette] = {"dark": DARK, "light": LIGHT}
+TOKYO_NIGHT = Palette(
+    name="tokyo_night",
+    dark=True,
+    fg="#c0caf5",
+    fg2="#a9b1d6",
+    muted="#9aa5ce",
+    dim="#8e98c2",
+    gutter="#8a95bf",
+    accent="#bb9af7",
+    manifest="#7aa2f7",
+    ok="#9ece6a",
+    warn="#e0af68",
+    error="#f7768e",
+    dv="#bb9af7",
+    hdr10="#e0af68",
+    hdr10plus="#ff9e64",
+    hlg="#7aa2f7",
+    hdr_vivid="#2ac3de",
+    atmos="#9ece6a",
+    audio_vivid="#d386b7",
+    stereo="#7dcfff",
+    original="#73daca",
+    search_services="#9baec2",
+    search_exports="#b9aa92",
+    search_vault="#9ab5a0",
+    search_settings="#b4a0bb",
+    search_justwatch="#b8b38f",
+    search_catalog="#bd9c96",
+    search_url="#96b6ba",
+    rule="#414868",
+    bg="#1a1b26",
+    panel="#1f2335",
+    highlight="#262b3d",
+    hover="#31374f",
+    visual="#3b4261",
+    scroll_bg="#16161e",
+    scroll_fg="#565f89",
+)
 
+CATPPUCCIN = Palette(
+    name="catppuccin",
+    dark=True,
+    fg="#cdd6f4",
+    fg2="#bac2de",
+    muted="#a6adc8",
+    dim="#969cb5",
+    gutter="#9197b0",
+    accent="#cba6f7",
+    manifest="#89b4fa",
+    ok="#a6e3a1",
+    warn="#f9e2af",
+    error="#f38ba8",
+    dv="#cba6f7",
+    hdr10="#f9e2af",
+    hdr10plus="#fab387",
+    hlg="#89b4fa",
+    hdr_vivid="#89dceb",
+    atmos="#a6e3a1",
+    audio_vivid="#f5c2e7",
+    stereo="#74c7ec",
+    original="#94e2d5",
+    search_services="#94b0d6",
+    search_exports="#cbb89e",
+    search_vault="#9bc4a4",
+    search_settings="#bfa6cc",
+    search_justwatch="#c9c099",
+    search_catalog="#cda3a6",
+    search_url="#93c1c4",
+    rule="#585b70",
+    bg="#1e1e2e",
+    panel="#181825",
+    highlight="#2b2c3d",
+    hover="#36384d",
+    visual="#45475a",
+    scroll_bg="#11111b",
+    scroll_fg="#6c7086",
+)
+
+NORD = Palette(
+    name="nord",
+    dark=True,
+    fg="#eceff4",
+    fg2="#d8dee9",
+    muted="#aeb8ca",
+    dim="#9ca8be",
+    gutter="#96a3ba",
+    accent="#88c0d0",
+    manifest="#81a1c1",
+    ok="#a3be8c",
+    warn="#ebcb8b",
+    error="#ee8490",
+    dv="#b48ead",
+    hdr10="#ebcb8b",
+    hdr10plus="#e39d7a",
+    hlg="#81a1c1",
+    hdr_vivid="#88c0d0",
+    atmos="#a3be8c",
+    audio_vivid="#cfa3c7",
+    stereo="#8fbcbb",
+    original="#8fbcbb",
+    search_services="#9bb4ce",
+    search_exports="#c5b49b",
+    search_vault="#a3be8c",
+    search_settings="#b89eb3",
+    search_justwatch="#d2be96",
+    search_catalog="#c99ca2",
+    search_url="#8fbcbb",
+    rule="#4c566a",
+    bg="#21262f",
+    panel="#272d38",
+    highlight="#2e3440",
+    hover="#3b4252",
+    visual="#434c5e",
+    scroll_bg="#1b2028",
+    scroll_fg="#616e88",
+)
+
+GRUVBOX = Palette(
+    name="gruvbox",
+    dark=True,
+    fg="#ebdbb2",
+    fg2="#d5c4a1",
+    muted="#bdae93",
+    dim="#a89984",
+    gutter="#a3947f",
+    accent="#fabd2f",
+    manifest="#83a598",
+    ok="#b8bb26",
+    warn="#fabd2f",
+    error="#fb6b58",
+    dv="#d3869b",
+    hdr10="#fabd2f",
+    hdr10plus="#fe8019",
+    hlg="#83a598",
+    hdr_vivid="#8ec07c",
+    atmos="#b8bb26",
+    audio_vivid="#d3869b",
+    stereo="#83a598",
+    original="#8ec07c",
+    search_services="#9ab4a7",
+    search_exports="#d5b884",
+    search_vault="#b8bb6a",
+    search_settings="#cfa0ae",
+    search_justwatch="#dec07c",
+    search_catalog="#df9789",
+    search_url="#8ec07c",
+    rule="#5a524c",
+    bg="#1d2021",
+    panel="#262524",
+    highlight="#2f2d2b",
+    hover="#3c3836",
+    visual="#504945",
+    scroll_bg="#181a1b",
+    scroll_fg="#665c54",
+)
+
+HIGH_CONTRAST = Palette(
+    name="high_contrast",
+    dark=True,
+    fg="#ffffff",
+    fg2="#f0f0f0",
+    muted="#d0d0d0",
+    dim="#bdbdbd",
+    gutter="#b3b3b3",
+    accent="#5ce1ff",
+    manifest="#75baff",
+    ok="#5df27a",
+    warn="#ffd84d",
+    error="#ff6b7a",
+    dv="#d6a6ff",
+    hdr10="#ffd84d",
+    hdr10plus="#ffa657",
+    hlg="#75baff",
+    hdr_vivid="#5ce1ff",
+    atmos="#5df27a",
+    audio_vivid="#ff94d6",
+    stereo="#7ae6ff",
+    original="#7ef2d4",
+    search_services="#9ecaff",
+    search_exports="#e6cc9e",
+    search_vault="#8ef0a2",
+    search_settings="#deb0ff",
+    search_justwatch="#f0e08e",
+    search_catalog="#ffadb5",
+    search_url="#8be9f5",
+    rule="#8c8c8c",
+    bg="#000000",
+    panel="#0c0c0c",
+    highlight="#1a1a1a",
+    hover="#262626",
+    visual="#333333",
+    scroll_bg="#000000",
+    scroll_fg="#9e9e9e",
+)
+
+PALETTES: dict[str, Palette] = {
+    "dark": DARK,
+    "light": LIGHT,
+    "tokyo_night": TOKYO_NIGHT,
+    "catppuccin": CATPPUCCIN,
+    "nord": NORD,
+    "gruvbox": GRUVBOX,
+    "high_contrast": HIGH_CONTRAST,
+}
+
+DEFAULT_THEME = "dark"
 DEFAULT_ACCENT = "violet"
 DEFAULT_TITLE_COLOR = "accent"
+DEFAULT_DENSITY = "auto"
+DENSITY_OPTIONS: tuple[str, ...] = ("auto", "comfortable", "compact")
+DEFAULT_SEMANTIC_COLORS = "default"
+SEMANTIC_COLOR_OPTIONS: tuple[str, ...] = ("default", "colorblind")
+
+#: Okabe-Ito inspired colorblind-safe status colors (bluish-teal / amber / magenta)
+#: tuned for >= 4.5:1 WCAG contrast on every dark and light surface.
+_COLORBLIND_DARK_SEMANTICS: dict[str, str] = {
+    "ok": "#4fd1b5",
+    "warn": "#f5be41",
+    "error": "#e58ac4",
+}
+_COLORBLIND_LIGHT_SEMANTICS: dict[str, str] = {
+    "ok": "#007358",
+    "warn": "#8f5400",
+    "error": "#9e2a76",
+}
 
 
 @dataclass(frozen=True)
@@ -358,6 +579,21 @@ TITLE_COLOR_PRESETS: dict[str, TitleColorPreset] = {
 }
 
 
+def normalize_theme(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    return key if key in PALETTES else DEFAULT_THEME
+
+
+def normalize_density(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    return key if key in DENSITY_OPTIONS else DEFAULT_DENSITY
+
+
+def normalize_semantic_colors(value: str | None) -> str:
+    key = str(value or "").strip().lower()
+    return key if key in SEMANTIC_COLOR_OPTIONS else DEFAULT_SEMANTIC_COLORS
+
+
 def normalize_accent(value: str | None) -> str:
     key = str(value or "").strip().lower()
     return key if key in ACCENT_PRESETS else DEFAULT_ACCENT
@@ -370,37 +606,53 @@ def normalize_title_color(value: str | None) -> str:
     return DEFAULT_TITLE_COLOR
 
 
-def theme_name_for(mode: str, accent: str = DEFAULT_ACCENT) -> str:
-    base = "light" if str(mode or "").lower() == "light" else "dark"
+def theme_name_for(
+    mode: str,
+    accent: str = DEFAULT_ACCENT,
+    semantic: str = DEFAULT_SEMANTIC_COLORS,
+) -> str:
+    base = normalize_theme(mode)
     accent_key = normalize_accent(accent)
-    return base if accent_key == DEFAULT_ACCENT else f"{base}-{accent_key}"
+    semantic_key = normalize_semantic_colors(semantic)
+    name = base if accent_key == DEFAULT_ACCENT else f"{base}-{accent_key}"
+    return f"{name}-cb" if semantic_key == "colorblind" else name
 
 
-def palette_for(mode: str, accent: str = DEFAULT_ACCENT) -> Palette:
-    """The palette for a theme mode and accent preset, defaulting to dark violet."""
-    base_name = "light" if str(mode or "").lower() == "light" else "dark"
+def palette_for(
+    mode: str,
+    accent: str = DEFAULT_ACCENT,
+    semantic: str = DEFAULT_SEMANTIC_COLORS,
+) -> Palette:
+    """The palette for a theme mode, accent preset, and semantic mode."""
+    base_name = normalize_theme(mode)
     base = PALETTES.get(base_name, DARK)
     accent_key = normalize_accent(accent)
-    if accent_key == DEFAULT_ACCENT:
+    semantic_key = normalize_semantic_colors(semantic)
+    if accent_key == DEFAULT_ACCENT and semantic_key == DEFAULT_SEMANTIC_COLORS:
         return base
-    preset = ACCENT_PRESETS[accent_key]
-    if base.dark:
-        return replace(
-            base,
-            name=theme_name_for(base_name, accent_key),
-            accent=preset.dark_accent,
-            accent_key=accent_key,
-            prism=preset.dark_prism if preset.colorful else (),
-        )
-    return replace(
-        base,
-        name=theme_name_for(base_name, accent_key),
-        accent=preset.light_accent,
-        highlight=preset.light_highlight,
-        visual=preset.light_visual,
-        accent_key=accent_key,
-        prism=preset.light_prism if preset.colorful else (),
-    )
+    result = base
+    if accent_key != DEFAULT_ACCENT:
+        preset = ACCENT_PRESETS[accent_key]
+        if result.dark:
+            result = replace(
+                result,
+                accent=preset.dark_accent,
+                accent_key=accent_key,
+                prism=preset.dark_prism if preset.colorful else (),
+            )
+        else:
+            result = replace(
+                result,
+                accent=preset.light_accent,
+                highlight=preset.light_highlight,
+                visual=preset.light_visual,
+                accent_key=accent_key,
+                prism=preset.light_prism if preset.colorful else (),
+            )
+    if semantic_key == "colorblind":
+        overrides = _COLORBLIND_DARK_SEMANTICS if result.dark else _COLORBLIND_LIGHT_SEMANTICS
+        result = replace(result, **overrides)
+    return replace(result, name=theme_name_for(base_name, accent_key, semantic_key))
 
 
 def title_color_stops(
@@ -520,7 +772,7 @@ THEMES: dict[str, Theme] = {name: textual_theme(p) for name, p in PALETTES.items
 #: or live-previewing options repaints without dynamic stylesheet rebuilds.
 ALL_THEMES: dict[str, Theme] = {
     theme_name_for(mode, accent): textual_theme(palette_for(mode, accent))
-    for mode in ("dark", "light")
+    for mode in PALETTES
     for accent in ACCENT_PRESETS
 }
 
@@ -1084,10 +1336,20 @@ AttachmentsScreen {
 }
 /* the batch queue: hidden for a single title, where it would only restate the
    header above it */
-#queue-summary {
+#queue-summary-row {
     display: none;
     height: 2;
     padding: 1 2 0 2;
+}
+#queue-summary {
+    display: none;
+    width: 1fr;
+    height: 1;
+    padding: 0;
+}
+#queue-retry-all {
+    display: none;
+    color: $warn;
 }
 #queue-list {
     display: none;
@@ -1183,6 +1445,10 @@ JobDetailsScreen {
 DownloadScreen.active-ask #queue-list {
     max-height: 4;
 }
+DownloadScreen.active-ask MultiPickWidget .ask-hint {
+    height: 1;
+    padding: 0 1;
+}
 .short #job-modal {
     height: 90%;
     padding: 0 1;
@@ -1206,7 +1472,10 @@ DownloadScreen #ask-area.active-ask {
 
 /* These panels describe the previous/current transfer and are stale while a
    queued title's track selection is waiting for input. */
-DownloadScreen.active-ask #delivery-details,
+DownloadScreen.active-ask #delivery-details {
+    display: none;
+}
+
 DownloadScreen.active-ask #delivery-audio-side {
     display: none;
 }
@@ -1523,6 +1792,31 @@ AddKeysScreen.narrow #vault-destination-choose { min-width: 6; padding: 0 1; }
 #service-list-head {
     width: 100%;
 }
+#recent-bar {
+    display: none;
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    overflow-x: hidden;
+}
+.recent-label {
+    width: auto;
+    height: 1;
+    margin: 0 1 0 0;
+    color: $muted;
+}
+.recent-chip {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    margin: 0 1 0 0;
+    background: $recessed;
+    color: $fg2;
+}
+.recent-chip:hover {
+    background: $highlight;
+    color: $accent;
+}
 #service-list-summary {
     width: 1fr;
     height: 1;
@@ -1692,6 +1986,13 @@ BetaHomeScreen #beta-hint {
     color: $dim;
     background: transparent;
 }
+BetaHomeScreen #recent-bar {
+    margin-top: 1;
+    padding: 0;
+}
+BetaHomeScreen.compact #recent-bar {
+    margin-top: 0;
+}
 BetaHomeScreen #beta-summary, BetaHomeScreen #beta-empty {
     height: auto;
     margin-top: 1;
@@ -1798,6 +2099,7 @@ TextWidget {
 }
 .ask-title {
     height: 1;
+    overflow-x: hidden;
     color: $foreground;
     text-style: bold;
     padding: 0 1 0 1;
@@ -1808,6 +2110,14 @@ TextWidget {
     height: 2;
     color: $dim;
     padding: 0 1 1 1;
+}
+#multi-summary {
+    display: none;
+    height: 1;
+    padding: 0 1;
+    background: $recessed;
+    color: $fg2;
+    overflow: hidden;
 }
 /* an unbordered empty input looks like empty space; the accent bar says
    "the cursor is here", and the three rows are what make it a box rather than a
@@ -2014,7 +2324,8 @@ TextWidget {
 #log-pane.collapsed {
     height: 3;
 }
-#log-pane.collapsed .log-tail {
+#log-pane.collapsed .log-tail,
+#log-pane.collapsed #log-search-bar {
     display: none;
 }
 /* nothing logged yet: take no space rather than showing an empty box */
@@ -2154,7 +2465,7 @@ ModalScreen {
     background: $highlight;
     color: $foreground;
 }
-#about-modal, #update-modal {
+#about-modal, #update-modal, #shortcuts-modal {
     width: 86;
     max-width: 94%;
     height: auto;
@@ -2163,24 +2474,24 @@ ModalScreen {
     background: $recessed;
     border: round $rule;
 }
-#about-modal-head, #update-modal-head {
+#about-modal-head, #update-modal-head, #shortcuts-modal-head {
     width: 100%;
     height: 2;
 }
-#about-modal-title, #update-modal-title {
+#about-modal-title, #update-modal-title, #shortcuts-modal-title {
     width: 1fr;
     height: 1;
     color: $accent;
     text-style: bold;
 }
-#about-modal-close, #update-modal-close {
+#about-modal-close, #update-modal-close, #shortcuts-modal-close {
     width: 5;
     height: 1;
     content-align: right middle;
     color: $accent;
     text-style: bold;
 }
-#about-modal-close:hover, #update-modal-close:hover {
+#about-modal-close:hover, #update-modal-close:hover, #shortcuts-modal-close:hover {
     background: $highlight;
     color: $foreground;
 }
@@ -2190,13 +2501,18 @@ ModalScreen {
     padding: 0 0 1 0;
     color: $muted;
 }
-#about-list {
+#about-list, #shortcuts-list {
     width: 100%;
     height: 1fr;
     min-height: 8;
     max-height: 28;
     padding: 0 1;
     background: $base;
+}
+#shortcuts-body {
+    width: 100%;
+    height: auto;
+    padding: 1 0;
 }
 .about-row {
     width: 100%;
@@ -2242,7 +2558,7 @@ ModalScreen {
     height: auto;
     padding: 0 0 1 0;
 }
-#about-modal-hint, #update-modal-hint {
+#about-modal-hint, #update-modal-hint, #shortcuts-modal-hint {
     width: 100%;
     height: 2;
     padding: 1 0 0 0;
@@ -3272,6 +3588,56 @@ ModalScreen {
 #log-bar {
     height: 1;
 }
+#log-filter {
+    width: auto;
+    margin: 0 0 0 2;
+    padding: 0 1;
+    color: $muted;
+}
+#log-filter:hover {
+    background: $highlight;
+    color: $foreground;
+}
+#log-search-toggle {
+    width: auto;
+    margin: 0 0 0 1;
+    padding: 0 1;
+    color: $dim;
+}
+#log-search-toggle:hover {
+    background: $highlight;
+    color: $foreground;
+}
+#log-search-bar {
+    display: none;
+    height: 1;
+    margin: 0 0 0 0;
+    padding: 0 1;
+    background: $recessed;
+}
+#log-search-input {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0;
+    background: transparent;
+    color: $foreground;
+}
+#log-search-input:focus {
+    border: none;
+    background: $highlight;
+}
+#log-search-clear {
+    width: auto;
+    padding: 0 1;
+    color: $muted;
+}
+#log-search-clear:hover {
+    background: $highlight;
+    color: $foreground;
+}
 #log-share {
     width: auto;
     margin: 0 0 0 2;
@@ -3322,9 +3688,27 @@ ModalScreen {
 }
 
 /* ------------------------------------------------------------ readiness */
-#ready-head {
+#ready-bar {
     height: 2;
     padding: 1 2 0 2;
+}
+#ready-head {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+}
+#ready-copy {
+    display: none;
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    margin: 0 0 0 2;
+    color: $muted;
+    background: $recessed;
+}
+#ready-copy:hover {
+    background: $highlight;
+    color: $accent;
 }
 #ready-body {
     height: 1fr;
@@ -3435,6 +3819,7 @@ JumpToBottom:hover {
 .rtl .modal-close,
 .rtl #about-modal-close,
 .rtl #update-modal-close,
+.rtl #shortcuts-modal-close,
 .rtl #chapter-modal-close,
 .rtl #lyrics-modal-close,
 .rtl #attachment-modal-close,
@@ -3504,6 +3889,7 @@ JumpToBottom:hover {
 .rtl #vault-action-hint,
 .rtl #about-modal-title,
 .rtl #update-modal-title,
+.rtl #shortcuts-modal-title,
 .rtl #chapter-modal-title,
 .rtl #lyrics-modal-title,
 .rtl #attachment-modal-title,
@@ -3512,6 +3898,8 @@ JumpToBottom:hover {
 .rtl #about-intro,
 .rtl #about-license-note,
 .rtl #about-modal-hint,
+.rtl #shortcuts-body,
+.rtl #shortcuts-modal-hint,
 .rtl #update-current,
 .rtl #update-status,
 .rtl #update-result,
@@ -3529,6 +3917,7 @@ JumpToBottom:hover {
 .rtl #job-modal-hint,
 .rtl .ask-title,
 .rtl .ask-hint,
+.rtl #multi-summary,
 .rtl .section-head,
 .rtl #import-head,
 .rtl #import-note,
@@ -3642,5 +4031,12 @@ JumpToBottom:hover {
 .rtl #update-result {
     border-left: none;
     border-right: solid $ok;
+}
+.rtl #recent-bar {
+    align-horizontal: right;
+}
+.rtl .recent-label,
+.rtl .recent-chip {
+    margin: 0 0 0 1;
 }
 """

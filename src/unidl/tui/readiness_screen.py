@@ -13,19 +13,26 @@ and this one only has to be believed.
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
+import re
+from pathlib import Path
 
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Static
 
+from .. import __version__
 from ..core import readiness
-from ..core.i18n import cell_width, tr
-from .bidi import visual_text
-from .chrome import Chrome, KeyBar, refresh_locale_widgets
+from ..core.i18n import cell_width, get_translator, tr
+from ..core.redact import redact
+from .bidi import rtl_terminal_mode, visual_text
+from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
+from .terminal_progress import supports_osc_progress
 
 #: state -> (glyph, palette role).  Core runtime gaps are red, global DRM setup
 #: gaps are yellow, and service/Hybrid enhancements are blue.
@@ -51,6 +58,87 @@ def _first_line(text: str) -> str:
     """The first line of what a tool said about itself, shortened to fit."""
     first = visual_text(text).splitlines()[0] if text else ""
     return first if len(first) <= DETAIL_LIMIT else f"{first[: DETAIL_LIMIT - 1]}…"
+
+
+_BEARER_RE = re.compile(r"(?i)\b(bearer)\s+\S+")
+
+
+def redact_diagnostics_text(text: str) -> str:
+    """Replace local home directory paths with ``~`` and scrub credentials."""
+    cleaned = _BEARER_RE.sub(r"\1 ***", redact(str(text or "")))
+    homes: list[str] = []
+    try:
+        home = Path.home()
+        homes.append(str(home))
+        resolved = str(home.resolve())
+        if resolved not in homes:
+            homes.append(resolved)
+    except Exception:
+        pass
+    for raw_home in sorted(homes, key=len, reverse=True):
+        if raw_home and len(raw_home) > 1:
+            cleaned = cleaned.replace(raw_home, "~")
+            posix_home = raw_home.replace("\\", "/")
+            if posix_home != raw_home:
+                cleaned = cleaned.replace(posix_home, "~")
+    return cleaned
+
+
+def format_diagnostics_report(app: object, report: readiness.Report) -> str:
+    """Build a redacted, issue-ready environment and readiness summary."""
+    term = os.environ.get("TERM") or "unknown"
+    term_prog = os.environ.get("TERM_PROGRAM") or "unknown"
+    locale = get_translator().locale
+    theme = getattr(app, "theme_preference", "dark")
+    accent = getattr(app, "accent_preference", "violet")
+    semantic = getattr(app, "semantic_colors_preference", "default")
+    density = getattr(app, "density_preference", "auto")
+    globals_scope = getattr(app, "globals", None)
+    drm_system = (
+        str(globals_scope.get("drm_system", "widevine") or "widevine")
+        if hasattr(globals_scope, "get")
+        else "unknown"
+    )
+    config = getattr(app, "config", None)
+    device_kind = "none"
+    if config is not None and hasattr(config, "device_name_for"):
+        try:
+            dev_name = config.device_name_for("") or ""
+            if dev_name:
+                remote = config.remote_cdm(dev_name) if hasattr(config, "remote_cdm") else None
+                device_kind = "remote" if remote is not None else "local"
+        except Exception:
+            device_kind = "unknown"
+
+    lines: list[str] = [
+        "UniDL Diagnostics",
+        "=================",
+        f"Version:   {__version__}",
+        f"OS:        {platform.system()} {platform.release()} ({platform.machine()})",
+        f"Python:    {platform.python_version()}",
+        (
+            f"Terminal:  TERM={term} · TERM_PROGRAM={term_prog} · "
+            f"BiDi={rtl_terminal_mode()} · OSC9;4={'yes' if supports_osc_progress() else 'no'}"
+        ),
+        (
+            f"Interface: locale={locale} · theme={theme} · accent={accent} · "
+            f"semantic={semantic} · density={density}"
+        ),
+        f"DRM:       system={drm_system} · device={device_kind}",
+        "",
+    ]
+    for group in readiness.GROUPS:
+        items = report.group(group)
+        if not items:
+            continue
+        lines.append(f"{tr(f'ready.group.{group}', default=readiness.GROUP_LABEL[group])}:")
+        for item in items:
+            glyph, _ = mark_for(item)
+            first = item.detail.splitlines()[0] if item.detail else ""
+            lines.append(f"  {glyph} {item.label}  {redact_diagnostics_text(first)}")
+            if not item.ok and item.hint:
+                lines.append(f"      {redact_diagnostics_text(item.hint)}")
+    return "\n".join(lines)
 
 
 def mark_for(item: readiness.Item) -> tuple[str, str]:
@@ -84,7 +172,9 @@ class ReadinessScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Chrome(can_go_back=True)
-        yield Static("", id="ready-head")
+        with Horizontal(id="ready-bar"):
+            yield Static("", id="ready-head")
+            yield StatusChip("copy_all", id="ready-copy")
         yield VerticalScroll(id="ready-body")
         yield KeyBar(("^r", "check again"), ("^y", "copy the report"), ("^b", "back"))
 
@@ -133,6 +223,9 @@ class ReadinessScreen(Screen[None]):
             head.append("  ·  ", style=palette.dim)
             head.append("…", style=palette.muted)
             self.query_one("#ready-head", Static).update(head)
+            copy_chips = self.query("#ready-copy")
+            if copy_chips:
+                copy_chips.first(StatusChip).display = False
         self._run_survey(fresh=fresh, notify=notify, generation=generation)
 
     @work(exclusive=True, group="readiness-survey")
@@ -169,6 +262,11 @@ class ReadinessScreen(Screen[None]):
         else:
             head.append(tr("ready.ok"), style=palette.ok)
         self.query_one("#ready-head", Static).update(head)
+        copy_chips = self.query("#ready-copy")
+        if copy_chips:
+            chip = copy_chips.first(StatusChip)
+            chip.update(tr("ready.copy_diagnostics"))
+            chip.display = True
 
         body = self.query_one("#ready-body", VerticalScroll)
         saved_scroll_y = body.scroll_y
@@ -220,25 +318,11 @@ class ReadinessScreen(Screen[None]):
 
     # ------------------------------------------------------------------- copying
     def action_copy_all(self) -> None:
-        """The whole report as text, for pasting where it can be answered."""
+        """Copy a redacted environment and readiness diagnostics report."""
         report = self._report
         if report is None:
             return
-        lines: list[str] = []
-        for group in readiness.GROUPS:
-            items = report.group(group)
-            if not items:
-                continue
-            lines.append(f"{tr(f'ready.group.{group}', default=readiness.GROUP_LABEL[group])}:")
-            for item in items:
-                glyph, _ = mark_for(item)
-                # the whole first line here, not the shortened one: this is going
-                # into a bug report, where the build string is the useful part
-                first = item.detail.splitlines()[0] if item.detail else ""
-                lines.append(f"  {glyph} {item.label}  {first}")
-                if not item.ok and item.hint:
-                    lines.append(f"      {item.hint}")
-        text = "\n".join(lines)
+        text = format_diagnostics_report(getattr(self, "app", None), report)
         try:
             if self.app.copy_text(text) is False:
                 return
@@ -248,4 +332,9 @@ class ReadinessScreen(Screen[None]):
         self.notify(tr("ready.copied", count=len(report.items)), timeout=3)
 
 
-__all__ = ["ReadinessScreen", "mark_for"]
+__all__ = [
+    "ReadinessScreen",
+    "format_diagnostics_report",
+    "mark_for",
+    "redact_diagnostics_text",
+]

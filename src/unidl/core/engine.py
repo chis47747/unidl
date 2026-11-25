@@ -53,21 +53,25 @@ from .delivery import (
     DeliveryStatus,
     DownloadPolicy,
     LivePolicy,
+    LiveSourceExpired,
+    LiveSourceRenewal,
     MessageEvent,
     ParsedManifest,
     ParsePolicy,
     ParseRequest,
     PauseToken,
+    PlaybackSourceRenewal,
     StageEvent,
     TrackDescriptor,
     TrackProgressEvent,
+    VodSourceExpired,
 )
 from .delivery import (
     LiveKeyRequest as CoreLiveKeyRequest,
 )
 from .diagnostics import DebugRecorder, activate, safe_log_text
 from .manifest_sources import manifest_json, merge_source_metadata, subtitle_source_identity, with_subtitle_sources
-from .network import network_get
+from .network import network_checkpoint, network_get
 from .output_paths import finished_download_root, render_episode_folder
 from .playback import Playback, normalize_live_record_limit
 from .secureio import atomic_write_bytes, atomic_write_text, locked_path, private_directory, private_file, safe_filename
@@ -1921,19 +1925,20 @@ class Engine:
         playback: Playback,
         service,
         settings: Settings | None = None,
-    ) -> Callable[[str | None, object, object, str], str]:
+        *,
+        reauthorize: Callable[[CoreLiveKeyRequest], list[str] | LiveSourceRenewal | None] | None = None,
+        allow_reauthorization: bool = True,
+    ) -> Callable[..., str]:
         """Resolve a KID discovered after a live recording has started.
 
         UniDL used to ask for this on the controlling terminal. That is valid
         for its standalone CLI, but an embedded Textual application already owns
         the terminal and must never let a downloader change its input mode.
 
-        The automatic provider is intentionally a service-declared Widevine path:
-        the event's exact stream/segment/KID goes to ``service.live_key_pssh`` and
-        the resulting challenge still goes through that service's
-        ``resolve_keys`` / ``get_license``. There is no common licence transport
-        and no guessed KID-only PSSH. If vault and service cannot answer, the TUI
-        callback asks for KEY or KID:KEY without exposing Textual's stdin.
+        Opted-in services can renew authorization using the typed key event.
+        Legacy services can still supply an exact Widevine PSSH through
+        ``live_key_pssh``. Neither path guesses init data. If the vault and
+        service cannot answer, fall back to the host's manual prompt.
         """
 
         def remember(values: Sequence[str], *, source: str, pssh: str | None = None) -> list[str]:
@@ -1963,13 +1968,19 @@ class Engine:
                 title=playback.save_name,
                 pssh=pssh,
                 source=source,
-                cdm=self.device_used(playback, service, WIDEVINE) or None,
+                cdm=self.device_used(playback, service) or None,
             )
             if stored:
                 self.log(f"live key rotation: stored {stored} new key(s) in the vault")
             return pairs
 
-        def provide(kid: str | None, stream: object, segment: object, reason: str) -> str:
+        opted_in = allow_reauthorization and not playback.from_export and getattr(service, "LIVE_REAUTHORIZATION", False) is True
+        attempted_replacements: set[str] = set()
+
+        def provide(
+            kid: str | None, stream: object, segment: object, reason: str,
+            *, request: CoreLiveKeyRequest | None = None,
+        ) -> str:
             wanted = normalize_hex(kid)
             automatic_error = ""
             (
@@ -1980,7 +1991,12 @@ class Engine:
                 write_local,
                 _write_remote,
             ) = self.vault_targets(settings)
-            validation_failed = "validation failed" in str(reason).lower()
+            validation_failed = (
+                bool(request and request.replace_existing and any(
+                    (pair := split_pair(value)) and pair[0] == wanted for value in playback.keys
+                ))
+                or "validation failed" in str(reason).lower()
+            )
             # A validation failure means the key already in hand did not decrypt
             # the fragment. Do not feed the same cached value back into the retry.
             if (
@@ -2010,12 +2026,46 @@ class Engine:
                 for value in playback.keys
                 if (pair := split_pair(str(value))) is not None
             }
-            if wanted and wanted in held_kids:
+            if opted_in and wanted:
+                prior = next(
+                    (p for value in playback.keys if (p := split_pair(value)) and p[0] == wanted),
+                    None,
+                )
+                if prior and not validation_failed:
+                    return f"{prior[0]}:{prior[1]}"
+                try:
+                    if validation_failed:
+                        if wanted in attempted_replacements:
+                            raise CdmError("live key replacement has already been attempted")
+                        attempted_replacements.add(wanted)
+                    event = request or CoreLiveKeyRequest(wanted, "", reason, track=stream, segment=segment)
+                    network_checkpoint()
+                    self.log(f"live key rotation: requesting {wanted} through {service.NAME}")
+                    values = reauthorize(event) if reauthorize else service.reauthorize_live(playback, event, self.log)
+                    network_checkpoint()
+                    fresh = self._merge_key_pairs(values) if isinstance(values, list) else []
+                    match = next(
+                        (value for value in fresh if (p := split_pair(value)) and p[0] == wanted),
+                        None,
+                    )
+                    if match and (not prior or match != f"{prior[0]}:{prior[1]}"):
+                        if validation_failed:
+                            # The replacement still has to decrypt the failing
+                            # fragment. Don't backfill an unverified replacement.
+                            playback.keys = self._merge_key_pairs([match], playback.keys)
+                        else:
+                            remember(fresh, source="license")
+                        return match
+                    automatic_error = f"{service.NAME} did not return a usable key for {wanted}"
+                except Exception:
+                    network_checkpoint()
+                    automatic_error = f"{service.NAME} could not renew the live license"
+            elif wanted and wanted in held_kids:
                 automatic_error = (
                     f"KID {wanted} is already in the recording key set; automatic "
                     "license rotation only handles a newly observed KID"
                 )
-            elif wanted and drm is not None and service is not None:
+            elif wanted and drm is not None and service is not None and not playback.from_export:
                 system = str(drm.system or WIDEVINE).lower()
                 if system != WIDEVINE:
                     automatic_error = (
@@ -2070,7 +2120,7 @@ class Engine:
                         automatic_error = str(exc)
             elif not wanted:
                 automatic_error = "the live fragment did not expose its KID"
-            elif service is None:
+            elif service is None or playback.from_export:
                 automatic_error = "the embedded download has no service license context"
             else:
                 automatic_error = "the playback has no DRM context"
@@ -4842,7 +4892,26 @@ class Engine:
                 else None
             )
             if playback.is_live:
-                provider = self.live_key_provider(playback, service, settings)
+                renewal_declared = getattr(service, "LIVE_REAUTHORIZATION", False) is True
+                opt_in = renewal_declared and not playback.from_export and not plan.policy.live.perform_as_vod
+                renewal_lock = threading.Lock()
+
+                def reauthorize(request: CoreLiveKeyRequest | LiveSourceExpired):
+                    # A pipe writer can discover a KID while the recorder is
+                    # renewing the source. Do not renew the same session twice.
+                    with renewal_lock:
+                        network_checkpoint()
+                        renew = getattr(service, "reauthorize_playback", None) or service.reauthorize_live
+                        renewed = renew(playback, request, self.log)
+                        network_checkpoint()
+                        return renewed
+
+                if opt_in:
+                    provider = self.live_key_provider(playback, service, settings, reauthorize=reauthorize)
+                elif renewal_declared:
+                    provider = self.live_key_provider(playback, service, settings, allow_reauthorization=False)
+                else:
+                    provider = self.live_key_provider(playback, service, settings)
 
                 def supply_live_key(request: CoreLiveKeyRequest) -> str:
                     return provider(
@@ -4850,10 +4919,32 @@ class Engine:
                         request.track or object(),
                         request.segment,
                         request.reason,
+                        **({"request": request} if opt_in else {}),
                     )
+
+                def renew_live_source(request: LiveSourceExpired) -> LiveSourceRenewal | None:
+                    renewed = reauthorize(request)
+                    return renewed if isinstance(renewed, LiveSourceRenewal) else None
             else:
+                opt_in = False
+
                 def supply_live_key(_request: CoreLiveKeyRequest) -> None:
                     return None
+
+            vod_opt_in = (
+                getattr(service, "VOD_REAUTHORIZATION", False) is True
+                and not playback.is_live and not playback.from_export
+                and not plan.policy.live.enabled and not plan.policy.live.perform_as_vod
+            )
+            vod_asset_id = str(playback.vod_asset_id or "").strip()
+            if vod_opt_in and not vod_asset_id:
+                self.log("VOD source renewal is unavailable: service did not identify the active asset edition.")
+
+            def renew_vod_source(request: VodSourceExpired) -> PlaybackSourceRenewal | None:
+                network_checkpoint()
+                renewed = service.reauthorize_playback(playback, request, self.log)
+                network_checkpoint()
+                return renewed if isinstance(renewed, PlaybackSourceRenewal) else None
 
             def publish_event(event) -> None:
                 if isinstance(event, TrackProgressEvent):
@@ -4888,6 +4979,11 @@ class Engine:
                 pause=PauseToken(pause.is_set if pause is not None else None),
                 emit=publish_event,
                 request_live_key=supply_live_key,
+                renew_live_source=renew_live_source if opt_in else None,
+                vod_asset_id=vod_asset_id if vod_opt_in else "",
+                vod_service_id=playback.title.service if vod_opt_in else "",
+                vod_drm_system=str(playback.drm.system or "") if vod_opt_in and playback.drm else "",
+                renew_vod_source=renew_vod_source if vod_opt_in and vod_asset_id else None,
                 display_width=lambda: self.frame_columns,
                 stop_recording_requested=(
                     stop_recording.is_set if stop_recording is not None else None

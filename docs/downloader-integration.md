@@ -70,6 +70,80 @@ Core does not construct argv, capture ANSI output, replace process-wide streams,
 or patch private downloader functions. Unknown service delivery switches fail
 at plan construction instead of crossing the boundary as arbitrary arguments.
 
+## Live reauthorization
+
+Live reauthorization is off unless the current service declares
+`LIVE_REAUTHORIZATION = True` and implements
+[`reauthorize_live`](writing-a-service.md#reauthorizing-an-active-live-recording).
+There is no global user switch. VOD, live-as-VOD, saved commands and portable
+imports do not acquire a new provider session from this feature.
+
+- A missing content KID first follows the normal vault policy. If not found,
+  the service receives the current track, segment, and available init context.
+  The requested KID must be present in the result before the downloader
+  retries. A previously rejected key is not retrieved again from the vault.
+- HTTP 401/403 from the active manifest or media can request a fresh playback
+  source. Core stages the new inventory and validates all selected tracks
+  before switching. It discards old uncommitted URLs, keeps already written
+  batches and the active muxer, and uses the new init section where required.
+  It does not retry stale media URLs through the full retry budget after an
+  explicit auth failure.
+- Cursor validation uses HLS program date-time, DASH presentation timing,
+  or Smooth Streaming timeline ticks divided by each track's timescale.
+  Audio and video can use different numbering and segment durations. Native
+  sequence values remain untouched, including HLS sequences used for implicit
+  AES-128 IVs. Without timing, the fallback requires unique media overlap and
+  unchanged sequence numbers.
+
+Source renewal is attempted once without forward progress. If the replacement
+is ambiguous, has a gap, or cannot open, any fully captured batches are saved
+as a partial recording and the log reports the reason. If nothing was captured,
+the recording fails. An unavailable new key still offers manual entry, and
+Back/Stop interrupts recovery and finalizes previously captured media where
+possible. A 404, 503, or ordinary timeout retains normal retry behavior.
+
+## Resuming and saving a finished file
+
+When resuming a selected VOD track, UniDL checks its initialization section
+before restoring a completed track or reusing its fragments. If the same URL
+now returns different initialization bytes, fragments from that section are
+downloaded again. Matching sections can still be reused. Older caches without
+verifiable part identities may need a one-time redownload.
+
+If another task creates the chosen filename during muxing, UniDL leaves that
+file untouched and publishes the new output under a numbered name instead.
+
+## VOD source renewal
+
+During an active download, a service that opts into
+[`VOD_REAUTHORIZATION`](writing-a-service.md#reauthorizing-a-vod-download)
+can renew an expired finite playback source without returning to its menu.
+The native downloader treats HTTP 401/403 from the selected media playlist,
+initialization, media segment, or HLS key request as a renewal signal. The
+service decides whether it can authorize the same asset again. Ordinary
+timeouts, 404 and 503 still use the normal retry policy.
+
+Old transfer workers are stopped and joined before the replacement is used.
+Core verifies the provider edition ID, the same selected renditions, and
+newly advertised KIDs. Existing completed parts and track checkpoints are
+reused only when their fingerprints still match; partial HTTP responses
+are not carried into the new authorization. A fresh source with unknown
+media identity can require re-downloading affected parts. If resume is
+disabled, the attempt starts from the beginning with the fresh source.
+
+More than one renewal is possible when new media positions have completed.
+If a replacement expires without verified progress, or the service returns
+a different edition, an ambiguous/missing track, or a missing new key, the
+job stops with no mixed output and retains resumable data according to the
+existing cache policy. Back/Cancel also stops the renewal request when the
+service uses the cancellation-aware client.
+
+This feature is independent of live key rotation. It is off for unconfigured
+services, saved CLI commands, portable imports, live streams, and live-as-VOD.
+For opted-in VOD tasks, the native Python downloader handles the transfer
+so Core can distinguish typed HTTP failures and safely stop the old workers;
+an aria2c preference for other tasks remains unchanged.
+
 ## Script manifest URLs and request encoding
 
 Do not treat the URL suffix as the response format. Script endpoints such as

@@ -17,6 +17,7 @@ import re
 import threading
 from typing import TYPE_CHECKING, Any
 
+from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -33,7 +34,8 @@ from ..core.terminal_cells import crop as crop_cells
 from .asks import BACK, AskWidget, AwaitWidget, ManualStep, PanelWidget, widget_for
 from .bidi import visual_markup
 from .chrome import Chrome, KeyBar, StatusChip
-from .logline import LIVE_STATE, LogLine, status_line
+from .input import ClipboardInput
+from .logline import LIVE_STATE, STATE_ALIASES, LogLine, status_line
 from .logpane import SelectableLog
 from .scroll_tail import ScrollTail
 
@@ -50,6 +52,18 @@ def _is_manifest_field(line: object) -> bool:
         and line.label.casefold() == "manifest"
         and line.body.lower().startswith(("http://", "https://"))
     )
+
+
+class _LogSearchInput(ClipboardInput):
+    """Inline log keyword filter whose Escape closes the search bar only."""
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            close = getattr(self.screen, "action_close_log_search", None)
+            if callable(close):
+                close()
 
 
 #: what happens once a title is picked, spelled out rather than abbreviated
@@ -146,6 +160,7 @@ class AskHost(Screen):
         Binding("slash", "app.global_search", "Search", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+l", "toggle_log", "Log", show=True),
+        Binding("ctrl+g", "toggle_log_search", "Search log", show=False),
         Binding("ctrl+p", "command_palette", "Commands", show=True),
         Binding("space", "noop", "Toggle", show=True),
         Binding("enter", "confirm", "Confirm", show=True),
@@ -200,7 +215,13 @@ class AskHost(Screen):
         #: that reasons about "is the flow blocked" must not see it.
         self._panel: PanelWidget | None = None
         self._log_state = "normal"
+        self._log_filter = "all"
+        self._log_query = ""
+        self._log_search_open = False
         self._log_lines = 0
+        self._log_warn_count = 0
+        self._log_error_count = 0
+        self._log_placeholder = False
         self._error: Static | None = None
         #: The newest log line, kept because it is the only one whose state can
         #: still change: while its work is running its dot pulses, and it settles
@@ -240,9 +261,17 @@ class AskHost(Screen):
                     # a clickable header, because ctrl+l is not something you find
                     # by looking at the screen
                     yield StatusChip("toggle_log", id="log-header")
+                    yield StatusChip("cycle_log_filter", id="log-filter")
+                    yield StatusChip("toggle_log_search", id="log-search-toggle")
                     # and beside it, the one thing people do with a whole log:
                     # take it somewhere else to ask about it
                     yield StatusChip("share_log", id="log-share")
+                with Horizontal(id="log-search-bar"):
+                    yield _LogSearchInput(
+                        placeholder=tr("log.search.placeholder"),
+                        id="log-search-input",
+                    )
+                    yield StatusChip("clear_log_search", id="log-search-clear")
                 yield ScrollTail(
                     SelectableLog(
                         highlight=False,
@@ -569,6 +598,50 @@ class AskHost(Screen):
         self._error = None
 
     # --------------------------------------------------------------------- log
+    @staticmethod
+    def _log_line_state(line: Any) -> str:
+        raw = str(getattr(line, "state", "") or "").strip().lower()
+        return STATE_ALIASES.get(raw, raw)
+
+    @staticmethod
+    def _log_line_plain(line: Any) -> str:
+        if isinstance(line, LogLine):
+            return " ".join(part for part in (line.label, line.body) if part)
+        if isinstance(line, Text):
+            return line.plain
+        return str(line or "")
+
+    def _log_filter_active(self) -> bool:
+        return (
+            getattr(self, "_log_filter", "all") != "all"
+            or bool(getattr(self, "_log_query", "").strip())
+        )
+
+    def _log_line_matches(self, line: Any) -> bool:
+        mode = getattr(self, "_log_filter", "all")
+        if mode != "all":
+            state = self._log_line_state(line)
+            if mode == "warn" and state not in {"warning", "error"}:
+                return False
+            if mode == "error" and state != "error":
+                return False
+        query = getattr(self, "_log_query", "").strip().casefold()
+        if query:
+            return query in self._log_line_plain(line).casefold()
+        return True
+
+    def _recount_log_levels(self, lines: list[Any]) -> None:
+        warns = 0
+        errors = 0
+        for line in lines:
+            state = self._log_line_state(line)
+            if state == "warning":
+                warns += 1
+            elif state == "error":
+                errors += 1
+        self._log_warn_count = warns
+        self._log_error_count = errors
+
     def _drawn(self, line: Any) -> Any:
         """A log line as text. Anything already renderable is passed through."""
         render = getattr(line, "render", None)
@@ -584,8 +657,15 @@ class AskHost(Screen):
         if not log:
             return
         widget = log.first(SelectableLog)
-        for line in lines:
-            widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
+        self._recount_log_levels(lines)
+        visible = [line for line in lines if self._log_line_matches(line)]
+        self._log_placeholder = False
+        if visible:
+            for line in visible:
+                widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
+        elif self._log_filter_active():
+            self._log_placeholder = True
+            widget.write_counted(Text(tr("log.filter.empty"), style=self.app.palette.dim))
         self._last_line = lines[-1]
         self._log_lines = len(lines)
         self._reveal_log()
@@ -597,6 +677,11 @@ class AskHost(Screen):
         if not log:
             return
         widget = log.first(SelectableLog)
+        state = self._log_line_state(renderable)
+        if state == "warning":
+            self._log_warn_count += 1
+        elif state == "error":
+            self._log_error_count += 1
         if self._log_state == "collapsed" or widget.scrollable_content_region.width <= 0:
             # A hidden or zero-width SelectableLog renders Table rows into empty
             # strips. Defer drawing until the pane expands or finishes layout.
@@ -607,10 +692,21 @@ class AskHost(Screen):
             self._sync_pulse()
             self.call_after_refresh(self._reflow_log)
             return
-        # The line that was newest is not any more, so whatever it was doing has
-        # been overtaken: settle it before the new one goes under it.
-        self._settle_last(widget)
-        widget.write_counted(self._drawn(renderable), join_wrapped=_is_manifest_field(renderable))
+        matches = self._log_line_matches(renderable)
+        if matches and self._log_placeholder:
+            self._log_placeholder = False
+            self._log_dirty = True
+            self._last_line = renderable
+            self._log_lines += 1
+            self._reveal_log()
+            self._sync_pulse()
+            self._reflow_log()
+            return
+        if matches:
+            # The line that was newest is not any more, so whatever it was doing has
+            # been overtaken: settle it before the new one goes under it.
+            self._settle_last(widget)
+            widget.write_counted(self._drawn(renderable), join_wrapped=_is_manifest_field(renderable))
         self._last_line = renderable
         self._log_lines += 1
         self._reveal_log()
@@ -673,9 +769,16 @@ class AskHost(Screen):
         self._log_dirty = False
         if not lines:
             return
+        self._recount_log_levels(lines)
+        visible = [line for line in lines if self._log_line_matches(line)]
         widget.clear()
-        for line in lines:
-            widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
+        self._log_placeholder = False
+        if visible:
+            for line in visible:
+                widget.write_counted(self._drawn(line), join_wrapped=_is_manifest_field(line))
+        elif self._log_filter_active():
+            self._log_placeholder = True
+            widget.write_counted(Text(tr("log.filter.empty"), style=self.app.palette.dim))
         self._last_line = lines[-1]
         self._log_lines = len(lines)
         self._render_log_header()
@@ -684,7 +787,12 @@ class AskHost(Screen):
     def _settle_last(self, widget: SelectableLog) -> None:
         """Redraw the newest line as finished, if it was drawn mid-pulse."""
         last = self._last_line
-        if last is None or not getattr(last, "live", False) or not self._pulse_dim:
+        if (
+            last is None
+            or not getattr(last, "live", False)
+            or not self._pulse_dim
+            or not self._log_line_matches(last)
+        ):
             return
         self._pulse_dim = False
         if not widget.has_selection:
@@ -722,7 +830,7 @@ class AskHost(Screen):
         if getattr(self._status, "live", False):
             self._render_status()
         last = self._last_line
-        if last is None or not getattr(last, "live", False):
+        if last is None or not getattr(last, "live", False) or not self._log_line_matches(last):
             return
         # Never while a selection is up: redrawing a line moves text under the
         # pointer, and a pulsing dot is not worth breaking a drag for.
@@ -748,6 +856,46 @@ class AskHost(Screen):
             chip = share.first()
             chip.display = bool(self._log_lines)
             chip.update(f"[$dim]{tr('log.copy_report')}[/]" if self._log_lines else "")
+        filt = self.query("#log-filter")
+        if filt:
+            chip = filt.first()
+            chip.display = bool(self._log_lines)
+            if self._log_lines:
+                warns = int(getattr(self, "_log_warn_count", 0))
+                errs = int(getattr(self, "_log_error_count", 0))
+                mode = getattr(self, "_log_filter", "all")
+                if mode == "warn":
+                    chip.update(f"[$warn]{tr('log.filter.warn')} ({warns + errs})[/]")
+                elif mode == "error":
+                    chip.update(f"[$bad]{tr('log.filter.error')} ({errs})[/]")
+                else:
+                    badges: list[str] = [f"[$dim]{tr('log.filter.all')}[/]"]
+                    if warns:
+                        badges.append(f"[$warn]⚠ {warns}[/]")
+                    if errs:
+                        badges.append(f"[$bad]✗ {errs}[/]")
+                    chip.update("  ".join(badges))
+            else:
+                chip.update("")
+        search_toggle = self.query("#log-search-toggle")
+        if search_toggle:
+            chip = search_toggle.first()
+            chip.display = bool(self._log_lines)
+            if self._log_lines:
+                needle = getattr(self, "_log_query", "").strip()
+                if needle:
+                    shown = needle if len(needle) <= 16 else f"{needle[:15]}…"
+                    chip.update(f"[$accent]⌕ {visual_markup(shown)}[/]")
+                else:
+                    chip.update(f"[$dim]⌕ {tr('log.search.button')}[/]")
+            else:
+                chip.update("")
+        search_clear = self.query("#log-search-clear")
+        if search_clear:
+            search_clear.first().update("×")
+        search_input = self.query("#log-search-input")
+        if search_input:
+            search_input.first(ClipboardInput).placeholder = tr("log.search.placeholder")
         found = self.query("#log-header")
         if not found:
             return
@@ -761,6 +909,80 @@ class AskHost(Screen):
             f"[$accent]{LOG_ARROW[state]}[/] [$muted]{tr('log.title')}[/]  "
             f"[$muted]{label}[/]  [$dim]^l · {note}[/]"
         )
+
+    def action_cycle_log_filter(self) -> None:
+        """Cycle log visibility between all entries, warnings+, and errors only."""
+        if not self._log_lines:
+            return
+        order = ("all", "warn", "error")
+        current = getattr(self, "_log_filter", "all")
+        self._log_filter = order[(order.index(current) + 1) % len(order)] if current in order else "all"
+        self._log_dirty = True
+        self._drawn_width = 0
+        self._render_log_header()
+        self._reflow_log()
+
+    def action_toggle_log_search(self) -> None:
+        """Show or focus the inline keyword search bar for the session log."""
+        if not self._log_lines:
+            return
+        bars = self.query("#log-search-bar")
+        inputs = self.query("#log-search-input")
+        if not bars or not inputs:
+            return
+        bar = bars.first(Horizontal)
+        field = inputs.first(ClipboardInput)
+        if self._log_search_open and self.focused is field:
+            self.action_close_log_search()
+            return
+        if self._log_state == "collapsed":
+            pane = self.query("#log-pane")
+            if pane:
+                self._log_state = "normal"
+                pane.first().remove_class("collapsed", "tall")
+                self.refresh_keys()
+        self._log_search_open = True
+        bar.display = True
+        self._render_log_header()
+        field.focus()
+        self.call_after_refresh(field.focus)
+
+    def action_close_log_search(self) -> None:
+        """Close the inline log search bar and clear any active keyword filter."""
+        changed = bool(self._log_query)
+        self._log_search_open = False
+        self._log_query = ""
+        inputs = self.query("#log-search-input")
+        if inputs:
+            inputs.first(ClipboardInput).value = ""
+        bars = self.query("#log-search-bar")
+        if bars:
+            bars.first(Horizontal).display = False
+        if changed:
+            self._log_dirty = True
+            self._drawn_width = 0
+            self._reflow_log()
+        self._render_log_header()
+        if self._current_ask is not None:
+            self._current_ask.focus_first()
+
+    def action_clear_log_search(self) -> None:
+        self.action_close_log_search()
+
+    def on_input_changed(self, event: ClipboardInput.Changed) -> None:
+        if event.input.id != "log-search-input":
+            return
+        event.stop()
+        self._log_query = event.value
+        self._log_dirty = True
+        self._drawn_width = 0
+        self._render_log_header()
+        self._reflow_log()
+
+    def on_input_submitted(self, event: ClipboardInput.Submitted) -> None:
+        if event.input.id != "log-search-input":
+            return
+        event.stop()
 
     def action_toggle_log(self) -> None:
         """Cycle the log: normal height, tall, header only."""

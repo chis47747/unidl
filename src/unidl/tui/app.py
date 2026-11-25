@@ -61,14 +61,31 @@ from .bidi import (
 from .clipboard import write_system_clipboard
 from .home import HomeScreen
 from .palette import UnidlCommands
+from .terminal_progress import (
+    DEFAULT_COMPLETION_ALERT,
+    DEFAULT_TERMINAL_TITLE,
+    OSC_PROGRESS_CLEAR,
+    PROGRESS_HIDDEN,
+    normalize_completion_alert,
+    osc_notify_sequence,
+    osc_progress_sequence,
+    osc_title_sequence,
+    supports_osc_progress,
+    supports_osc_title,
+)
 from .theme import (
     ALL_THEMES,
     CSS,
     DEFAULT_ACCENT,
+    DEFAULT_DENSITY,
+    DEFAULT_SEMANTIC_COLORS,
     DEFAULT_TITLE_COLOR,
     THEME_NAMES,
     Palette,
     normalize_accent,
+    normalize_density,
+    normalize_semantic_colors,
+    normalize_theme,
     normalize_title_color,
     palette_for,
     textual_theme,
@@ -91,6 +108,10 @@ PROCESS_SHUTDOWN_TIMEOUT = 8.0
 #: air is what has to go, because the list is the screen and the space around it
 #: is not.
 ROOMY_ROWS = 28
+
+#: How many recently opened services appear in the Home quick-launch bar.
+MAX_RECENT_SERVICES = 5
+RECENT_SERVICES_KEY = "recent_services"
 
 _SERVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
@@ -172,7 +193,7 @@ def _portable_import_service_class(document) -> type[Service]:
 # bypass that path and leave iTerm in mouse-reporting mode.  Keep this cleanup
 # deliberately independent from Textual so it also covers a renderer failure.
 _TERMINAL_RESET = (
-    f"\x1b[0m\x1b[<u{EXPLICIT_BIDI_EXIT}\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
+    f"\x1b[0m\x1b[<u{EXPLICIT_BIDI_EXIT}{OSC_PROGRESS_CLEAR}\x1b[?7h\x1b[?47l\x1b[?1047l\x1b[?1049l\x1b[?25h"
     "\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[?2048l"
     # Disable reporting on the restored primary screen, after leaving every
     # alternate-screen mode. Include UTF-8 mouse mode as well as SGR.
@@ -298,6 +319,7 @@ class UnidlApp(App):
             "Settings",
             show=False,
         ),
+        Binding("question_mark", "show_shortcuts", "Shortcuts", show=False),
     ]
     def __init__(self, config: Config | None = None):
         super().__init__()
@@ -331,6 +353,14 @@ class UnidlApp(App):
         self._preview_theme: str | None = None
         self._preview_accent: str | None = None
         self._preview_title_color: str | None = None
+        self._preview_density: str | None = None
+        self._preview_semantic_colors: str | None = None
+        self._last_dark_theme: str = (
+            self.theme_preference
+            if palette_for(self.theme_preference).dark
+            else "dark"
+        )
+        self._terminal_progress_state: tuple[int, int, str] | None = None
         # Themes have to be registered and selected here, not in on_mount: the
         # stylesheet is parsed before then, and it refers to this theme's own
         # variables, which would be undefined under the default one.
@@ -383,6 +413,78 @@ class UnidlApp(App):
         except Exception:
             pass
 
+    def set_terminal_progress(
+        self,
+        state: int,
+        percent: int = 0,
+        *,
+        title: str = DEFAULT_TERMINAL_TITLE,
+    ) -> None:
+        """Emit OSC 9;4 native progress and OSC 0 window title when changed."""
+        if getattr(self, "is_headless", False):
+            return
+        driver = getattr(self, "_driver", None)
+        if driver is None or not hasattr(driver, "write"):
+            return
+        clamped = max(0, min(100, int(percent)))
+        clean_title = title or DEFAULT_TERMINAL_TITLE
+        key = (int(state), clamped, clean_title)
+        if key == getattr(self, "_terminal_progress_state", None):
+            return
+        self._terminal_progress_state = key
+        parts: list[str] = []
+        if supports_osc_progress():
+            parts.append(osc_progress_sequence(state, clamped))
+        if supports_osc_title():
+            parts.append(osc_title_sequence(clean_title))
+        if not parts:
+            return
+        try:
+            driver.write("".join(parts))
+            if hasattr(driver, "flush"):
+                driver.flush()
+        except Exception:
+            pass
+
+    def clear_terminal_progress(self) -> None:
+        """Hide any OSC 9;4 terminal progress bar and restore default title."""
+        self.set_terminal_progress(PROGRESS_HIDDEN, 0, title=DEFAULT_TERMINAL_TITLE)
+
+    def emit_completion_alert(self, title: str, body: str = "") -> bool:
+        """Emit an optional terminal completion notification (OSC 9/99/777 or BEL)."""
+        mode = normalize_completion_alert(
+            self.globals.get("completion_alert", DEFAULT_COMPLETION_ALERT)
+        )
+        if mode == "off" or getattr(self, "is_headless", False):
+            return False
+        driver = getattr(self, "_driver", None)
+        if driver is None or not hasattr(driver, "write"):
+            return False
+        sequence = osc_notify_sequence(title, body, mode=mode)
+        if not sequence:
+            return False
+        try:
+            driver.write(sequence)
+            if hasattr(driver, "flush"):
+                driver.flush()
+            return True
+        except Exception:
+            return False
+
+    def action_show_shortcuts(self) -> None:
+        """Toggle the contextual shortcut cheat sheet unless typing in a field."""
+        from textual.widgets import Input as TextualInput
+        from textual.widgets import TextArea as TextualTextArea
+
+        from .shortcuts_screen import ShortcutsScreen
+
+        if isinstance(self.screen, ShortcutsScreen):
+            self.pop_screen()
+            return
+        if isinstance(self.focused, (TextualInput, TextualTextArea)):
+            return
+        self.push_screen(ShortcutsScreen(self.screen))
+
     def on_mount(self) -> None:
         # Keep initial composition on Textual's get_default_screen path, which
         # puts the root on its stack before mounting children. In Textual 8.2,
@@ -390,6 +492,7 @@ class UnidlApp(App):
         # eager tasks then let Input access an empty stack. Register only after
         # startup so switch_mode can safely return to this already-mounted root.
         self._sync_terminal_bidi(enable_explicit=True)
+        self.apply_layout_density()
         self.add_mode(self.DEFAULT_MODE, self.get_default_screen)
 
     def on_app_focus(self) -> None:
@@ -411,6 +514,7 @@ class UnidlApp(App):
         hook during its async shutdown phase, so the bounded wait runs in a
         helper thread while the loop remains able to drain those callbacks.
         """
+        self.clear_terminal_progress()
         self._sync_terminal_bidi(enable_explicit=False)
         self.abort_sessions()
         await asyncio.to_thread(self.wait_for_sessions, SESSION_SHUTDOWN_TIMEOUT)
@@ -449,7 +553,7 @@ class UnidlApp(App):
         alternative was five screens each deciding for themselves, which is five
         chances for two of them to disagree while both are on the stack.
         """
-        self.set_class(event.size.height < ROOMY_ROWS, "short")
+        self.apply_layout_density(height=event.size.height)
 
     def notify(  # noqa: D102 - overrides Textual's own, documented there
         self,
@@ -496,6 +600,46 @@ class UnidlApp(App):
 
         chosen = {str(value).strip().lower() for value in service_ids if str(value).strip()}
         self._home_service_ids = chosen & self._registered_service_ids
+
+    def recent_service_ids(self) -> tuple[str, ...]:
+        """Up to ``MAX_RECENT_SERVICES`` recently opened registered service IDs."""
+        self._sync_registry_state()
+        raw = self.settings_store.values_for(service_catalog.GLOBAL_SCOPE).get(
+            RECENT_SERVICES_KEY
+        )
+        if not isinstance(raw, list):
+            return ()
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in raw:
+            sid = str(item or "").strip().lower()
+            if not sid or sid in seen or sid not in self._registered_service_ids:
+                continue
+            seen.add(sid)
+            result.append(sid)
+            if len(result) >= MAX_RECENT_SERVICES:
+                break
+        return tuple(result)
+
+    def recent_services(self) -> list[type[Service]]:
+        """Registered services opened most recently, in MRU order."""
+        by_id = {service.ID: service for service in self.services}
+        return [by_id[sid] for sid in self.recent_service_ids() if sid in by_id]
+
+    def record_recent_service(self, service_cls: type[Service]) -> None:
+        """Persist ``service_cls`` at the front of the MRU list."""
+        if getattr(service_cls, "_PORTABLE_IMPORT_FALLBACK", False):
+            return
+        self._sync_registry_state()
+        sid = str(getattr(service_cls, "ID", "") or "").strip().lower()
+        if not sid or sid not in self._registered_service_ids:
+            return
+        existing = list(self.recent_service_ids())
+        updated = [sid, *(item for item in existing if item != sid)][:MAX_RECENT_SERVICES]
+        if updated == existing:
+            return
+        self.settings_store.put(service_catalog.GLOBAL_SCOPE, RECENT_SERVICES_KEY, updated)
+        self.settings_store.save()
 
     def _sync_registry_state(self) -> None:
         """Keep headless/test registry replacements usable without persistence churn.
@@ -623,6 +767,7 @@ class UnidlApp(App):
             ),
         )
         self.register_session(controller)
+        self.record_recent_service(service_cls)
         if replace_screen is not None and self.screen is replace_screen:
             self.pop_screen()
         self.push_screen(controller.start_screen())
@@ -875,8 +1020,7 @@ class UnidlApp(App):
     @property
     def theme_preference(self) -> str:
         """The selected palette, normalising legacy ``system`` values to dark."""
-        value = str(self.globals.get("theme", "dark") or "dark").lower()
-        return value if value in THEME_NAMES else "dark"
+        return normalize_theme(self.globals.get("theme", "dark"))
 
     @property
     def theme_mode(self) -> str:
@@ -903,6 +1047,66 @@ class UnidlApp(App):
         """The active title/banner colour preset (including live preview)."""
         return self._preview_title_color or self.title_color_preference
 
+    @property
+    def density_preference(self) -> str:
+        """The persisted layout density mode (auto, comfortable, or compact)."""
+        return normalize_density(self.globals.get("layout_density", DEFAULT_DENSITY))
+
+    @property
+    def density_mode(self) -> str:
+        """The active layout density mode (including live preview)."""
+        return self._preview_density or self.density_preference
+
+    @property
+    def semantic_colors_preference(self) -> str:
+        """The persisted semantic status color mode (default or colorblind)."""
+        return normalize_semantic_colors(
+            self.globals.get("semantic_colors", DEFAULT_SEMANTIC_COLORS)
+        )
+
+    @property
+    def semantic_colors_mode(self) -> str:
+        """The active semantic status color mode (including live preview)."""
+        return self._preview_semantic_colors or self.semantic_colors_preference
+
+    def apply_layout_density(self, *, height: int | None = None) -> None:
+        """Apply compact/comfortable/auto spacing across the app and mounted screens."""
+        mode = self.density_mode
+        if mode == "compact":
+            is_short = True
+        elif mode == "comfortable":
+            is_short = False
+        else:
+            rows = height if height is not None else getattr(self.size, "height", 0)
+            is_short = bool(rows and rows < ROOMY_ROWS)
+        self.set_class(is_short, "short")
+        if not self.is_running:
+            return
+        for screen in self._all_live_screens():
+            screen.set_class(is_short, "short")
+            fit_beta = getattr(screen, "_fit_beta", None)
+            if callable(fit_beta):
+                try:
+                    fit_beta()
+                except Exception:
+                    pass
+            resize_spacing = getattr(screen, "_resize_spacing", None)
+            if callable(resize_spacing):
+                try:
+                    resize_spacing()
+                except Exception:
+                    pass
+            refresh_banner = getattr(screen, "refresh_banner", None)
+            if callable(refresh_banner):
+                try:
+                    refresh_banner()
+                except Exception:
+                    pass
+            try:
+                screen.refresh(layout=True)
+            except Exception:
+                pass
+
     def title_banner_colour(self) -> str | tuple[str, ...]:
         """Colour token or gradient stops for the ``unidl`` and service banners."""
         stops = title_color_stops(
@@ -922,7 +1126,7 @@ class UnidlApp(App):
         styles itself without knowing about Textual's design tokens, so those
         call sites need the numbers.
         """
-        return palette_for(self.theme_mode, self.accent_mode)
+        return palette_for(self.theme_mode, self.accent_mode, self.semantic_colors_mode)
 
     def set_appearance_preview(
         self,
@@ -930,16 +1134,24 @@ class UnidlApp(App):
         theme: str | None = None,
         accent: str | None = None,
         title_color: str | None = None,
+        density: str | None = None,
+        semantic_colors: str | None = None,
     ) -> None:
         """Temporarily preview appearance changes without writing settings.json."""
         if theme is not None:
-            mode = str(theme).lower()
+            mode = str(theme).strip().lower()
             self._preview_theme = mode if mode in THEME_NAMES else None
         if accent is not None:
             self._preview_accent = normalize_accent(accent)
         if title_color is not None:
             self._preview_title_color = normalize_title_color(title_color)
+        if density is not None:
+            self._preview_density = normalize_density(density)
+        if semantic_colors is not None:
+            self._preview_semantic_colors = normalize_semantic_colors(semantic_colors)
         self.apply_theme()
+        if density is not None:
+            self.apply_layout_density()
 
     def clear_appearance_preview(self, *, apply: bool = True) -> None:
         """Drop any active live preview overrides and optionally repaint."""
@@ -947,15 +1159,24 @@ class UnidlApp(App):
             self._preview_theme is not None
             or self._preview_accent is not None
             or self._preview_title_color is not None
+            or self._preview_density is not None
+            or self._preview_semantic_colors is not None
         )
+        had_density = self._preview_density is not None
         self._preview_theme = None
         self._preview_accent = None
         self._preview_title_color = None
+        self._preview_density = None
+        self._preview_semantic_colors = None
         if apply and had_preview:
             self.apply_theme()
+            if had_density:
+                self.apply_layout_density()
 
     def apply_theme(self) -> None:
-        target = theme_name_for(self.theme_mode, self.accent_mode)
+        target = theme_name_for(
+            self.theme_mode, self.accent_mode, self.semantic_colors_mode
+        )
         if target not in self.available_themes:
             self.register_theme(textual_theme(self.palette))
         self.theme = target
@@ -1050,11 +1271,20 @@ class UnidlApp(App):
             screen.refresh(layout=True)
         return True
 
-    def action_toggle_theme(self) -> None:
-        """Toggle between the dark and light palettes and remember it."""
-        order = ["dark", "light"]
+    def next_toggle_theme(self) -> str:
+        """Target theme for quick light/dark toggling."""
         current = self.theme_preference
-        wanted = order[(order.index(current) + 1) % len(order)]
+        if palette_for(current).dark:
+            return "light"
+        fallback = getattr(self, "_last_dark_theme", "dark")
+        return fallback if (fallback in THEME_NAMES and palette_for(fallback).dark) else "dark"
+
+    def action_toggle_theme(self) -> None:
+        """Toggle between the active dark palette and light palette and remember it."""
+        current = self.theme_preference
+        if palette_for(current).dark:
+            self._last_dark_theme = current
+        wanted = self.next_toggle_theme()
         self.globals.set("theme", wanted)
         self.apply_theme()
         self.notify(
