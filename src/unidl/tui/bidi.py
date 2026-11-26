@@ -66,6 +66,15 @@ _ARABIC_RESHAPER = arabic_reshaper.ArabicReshaper(
         "shift_harakat_position": True,
     }
 )
+# Only characters that arabic_reshaper actually transforms into distinct
+# presentation forms count as "unshaped". Treating unmapped extended Arabic
+# codepoints (e.g. Kurdish/Pashto letters outside the reshaper table) as
+# unshaped would trigger a second BiDi pass on already-visualized text.
+_UNSHAPED_ARABIC_CHARS = frozenset(
+    ch
+    for ch, forms in _ARABIC_RESHAPER.letters.items()
+    if ch != "\u0640" and any(form and form != ch for form in forms)
+)
 _TEXTUAL_RTL_INSTALLED = False
 
 # ECMA-48 BDSM Explicit Mode (CSI 8 l) + SCP LTR (CSI 1 SP k) + disable
@@ -123,17 +132,7 @@ def rtl_shaping_disabled() -> bool:
 
 
 def _is_unshaped_arabic(char: str) -> bool:
-    code = ord(char)
-    if code == 0x0640:
-        # U+0640 (Arabic tatweel/kashida) has no separate presentation form and
-        # remains U+0640 after shaping, so it must not trigger re-shaping.
-        return False
-    return (
-        (0x0621 <= code <= 0x064A)
-        or (0x066E <= code <= 0x06D5)
-        or (0x0750 <= code <= 0x077F)
-        or (0x08A0 <= code <= 0x08FF)
-    )
+    return char in _UNSHAPED_ARABIC_CHARS
 
 
 def _is_arabic_run_char(char: str) -> bool:
@@ -177,9 +176,14 @@ def _reshape_styled_chars(
         end = index + 1
         while end < total and _is_arabic_run_char(chars[end][0]):
             end += 1
-        word = "".join(ch for ch, _ in chars[index:end])
+        span = chars[index:end]
+        if not any(_is_unshaped_arabic(ch) for ch, _ in span):
+            out.extend(span)
+            index = end
+            continue
+        word = "".join(ch for ch, _ in span)
         reshaped = _ARABIC_RESHAPER.reshape(word)
-        word_styles = [st for _, st in chars[index:end]]
+        word_styles = [st for _, st in span]
         if len(reshaped) == len(word):
             out.extend((rc, word_styles[offset]) for offset, rc in enumerate(reshaped))
         else:
@@ -277,7 +281,7 @@ def _apply_bidi_to_styled(
     for open_idx, close_idx in pairs:
         inner_types = {chars_info[pos]["type"] for pos in range(open_idx + 1, close_idx)}
         has_ltr = bool(inner_types & {"L", "EN"})
-        has_rtl_inner = bool(inner_types & _RTL_CLASSES)
+        has_rtl_inner = bool(inner_types & {"R", "AL"})
         if has_ltr and not has_rtl_inner:
             chars_info[open_idx]["type"] = "L"
             chars_info[close_idx]["type"] = "L"
@@ -379,14 +383,14 @@ def shape_strip(
         needs_shape = any(
             _is_unshaped_arabic(ch) or (0x0590 <= ord(ch) <= 0x05FF)
             for seg in segments
-            if not seg.control
+            if not seg.control and seg.text and not seg.text.isascii()
             for ch in seg.text
         )
     else:
         needs_shape = any(
             _is_unshaped_arabic(ch)
             for seg in segments
-            if not seg.control
+            if not seg.control and seg.text and not seg.text.isascii()
             for ch in seg.text
         )
     if not needs_shape:
@@ -509,6 +513,27 @@ def freeze_strip_for_apple_terminal(
     has_any_rtl = _strip_has_rtl(strip)
     if not has_any_rtl and not anchor_col0:
         return strip
+    if not has_any_rtl and anchor_col0:
+        first_seg_idx = next(
+            (i for i, seg in enumerate(segments) if not seg.control and seg.text),
+            -1,
+        )
+        if first_seg_idx == -1:
+            return strip
+        first_seg = segments[first_seg_idx]
+        first_ch = first_seg.text[0]
+        if unicodedata.bidirectional(first_ch) == "L":
+            return strip
+        if len(first_seg.text) >= 2 and first_seg.text[1] == _RTL_FREEZE_MARK:
+            return strip
+        patched = list(segments)
+        patched[first_seg_idx] = Segment(
+            first_ch + _RTL_FREEZE_MARK + first_seg.text[1:],
+            first_seg.style,
+        )
+        from textual.strip import Strip
+
+        return Strip(patched, cell_length=strip.cell_length)
 
     chars: list[tuple[str, Style | None]] = []
     controls: dict[int, list[Segment]] = {}
@@ -701,6 +726,18 @@ def install_textual_rtl_shaping() -> None:
             row_has_rtl = any(_strip_has_rtl(strip) for _, strip in emitted)
             need_anchor = rtl_locale or row_has_rtl
             anchored = False
+            if need_anchor and emitted and not any(x == 0 and strip.cell_length > 0 for x, strip in emitted):
+                col0_strip = line.get(0)
+                if col0_strip is not None and col0_strip.cell_length > 0:
+                    anchor_cell = col0_strip.crop(0, 1)
+                    append(move_to(0, y).segment.text)
+                    append(
+                        freeze_strip_for_apple_terminal(
+                            anchor_cell,
+                            anchor_col0=True,
+                        ).render(console)
+                    )
+                    anchored = True
             for x, strip in emitted:
                 anchor_this = need_anchor and not anchored and x == 0 and strip.cell_length > 0
                 if anchor_this:

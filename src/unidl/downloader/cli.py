@@ -75,6 +75,7 @@ from .downloader import (
     download_stream,
     fetch_segment_probe_bytes,
     prepare_dvr_sequence_windows,
+    prepare_media_versions,
     prepare_remote_stream_download_plan,
     prepare_resume_init,
     set_allow_insecure_localhost_hls_keys,
@@ -2479,11 +2480,11 @@ def _download_selected_stream(
     if not args.no_resume:
         from ..core.manifest_sources import source_request_headers
 
-        prepare_resume_init(
-            stream,
-            source_request_headers(stream.extra, headers) or {},
-            max(1, args.http_request_timeout),
-        )
+        track_headers = source_request_headers(stream.extra, headers) or {}
+        timeout = max(1, args.http_request_timeout)
+        prepare_resume_init(stream, track_headers, timeout)
+        if getattr(args, "downloader", "python") in {"python", "auto"}:
+            prepare_media_versions(stream, track_headers, timeout, _task_temp_subdir(args, "vod"))
     checkpoint = TrackCheckpoint(
         _task_temp_subdir(args, "checkpoints"),
         _completed_track_cache_identity(stream, name, args),

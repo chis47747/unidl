@@ -1,5 +1,7 @@
 # Readiness levels
 
+[English](readiness.md) | [简体中文](zh-CN/readiness.md)
+
 The readiness chip and **Readiness** screen use three dependency levels.  A
 missing item is not automatically a broken installation; its colour describes
 the scope of what is unavailable.

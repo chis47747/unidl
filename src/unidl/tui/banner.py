@@ -208,6 +208,8 @@ def _colorize_line(
             if run_style is not None:
                 _flush()
             run_chars.append(ch)
+        elif width == 0 and run_chars and unicodedata.category(ch) in ("Mn", "Me"):
+            run_chars.append(escape_markup(ch))
         else:
             midpoint = column + (0.5 if width > 1 else 0.0)
             style = f"{prefix}{interpolate_stops(stops, midpoint / denom)}"
@@ -444,11 +446,8 @@ def _load_font(pixel_height: int):
     return None
 
 
-def _mosaic_lines(text: str) -> list[str] | None:
-    """Rasterise ``text`` into three rows of the same half-blocks Latin uses."""
-    clean = " ".join(str(text or "").split())
-    if not clean:
-        return None
+@lru_cache(maxsize=64)
+def _mosaic_lines_cached(clean: str) -> tuple[str, ...] | None:
     try:
         from PIL import Image, ImageDraw
     except ImportError:
@@ -495,7 +494,16 @@ def _mosaic_lines(text: str) -> list[str] | None:
     if len(rows) != _MOSAIC_ROWS or not any(row.strip() for row in rows):
         return None
     width = max(len(row) for row in rows)
-    return [row.ljust(width) for row in rows]
+    return tuple(row.ljust(width) for row in rows)
+
+
+def _mosaic_lines(text: str) -> list[str] | None:
+    """Rasterise ``text`` into three rows of the same half-blocks Latin uses."""
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return None
+    cached = _mosaic_lines_cached(clean)
+    return list(cached) if cached is not None else None
 
 
 def _unicode_title_lines(text: str) -> list[str]:

@@ -131,7 +131,9 @@ class ChromeButton(Static):
             self._handled_up = True
             await self.app.run_action(self._action)
 
-    async def on_click(self) -> None:
+    async def on_click(self, event) -> None:
+        if getattr(event, "button", 1) != 1:
+            return
         if self._handled_up:
             self._handled_up = False
             return
@@ -444,8 +446,31 @@ def fit_modal_card(
             clampable.append(child)
         elif child.id == "storage-editor-preview":
             clampable.append(child)
-    for child in clampable:
-        child.styles.max_height = None
+
+    inner_width = card.content_size.width
+    if inner_width <= 0:
+        w_budget = viewport.width
+        if card.styles.width is not None:
+            w_budget = min(w_budget, int(card.styles.width.resolve(viewport, viewport)))
+        if card.styles.max_width is not None:
+            w_budget = min(w_budget, int(card.styles.max_width.resolve(viewport, viewport)))
+        inner_width = max(1, w_budget - card.styles.gutter.width)
+
+    container_size = type(viewport)(inner_width, inner_budget)
+    clampable_ids = {id(child) for child in clampable}
+
+    def _measure_child(child) -> int:
+        style_h = child.styles.height
+        if style_h is not None and style_h.is_cells:
+            return max(1, int(style_h.value))
+        if id(child) in clampable_ids or child.region.height <= 0:
+            child_w = max(1, inner_width - child.styles.gutter.width - child.styles.margin.width)
+            try:
+                content_h = child.get_content_height(container_size, viewport, child_w)
+                return max(1, int(content_h) + child.styles.gutter.height)
+            except Exception:
+                pass
+        return max(1, child.region.height) if child.region.height > 0 else 1
 
     if body is None:
         needed = 0
@@ -454,25 +479,25 @@ def fit_modal_card(
         for index, child in enumerate(visible_children):
             margin = child.styles.margin
             gap = margin.top if index == 0 else max(prev_bottom, margin.top)
-            child_h = child.region.height
-            if child_h <= 0:
-                style_h = child.styles.height
-                child_h = int(style_h.value) if style_h is not None and style_h.is_cells else 1
+            child_h = _measure_child(child)
             heights[id(child)] = child_h
             needed += gap + child_h
             prev_bottom = margin.bottom
         needed += prev_bottom
         excess = needed - inner_budget
-        if excess > 0 and clampable:
+        if clampable:
             # Shrink help and preview blocks down to at least 1 row each so
-            # Input and Save/Cancel action rows stay visible inside the card.
+            # Input and Save/Cancel action rows stay visible inside the card,
+            # without oscillating between clamped and unclamped heights.
             for child in clampable:
                 cur = heights.get(id(child), 1)
                 reducible = max(0, cur - 1)
-                if reducible > 0 and excess > 0:
+                if excess > 0 and reducible > 0:
                     take = min(reducible, excess)
                     child.styles.max_height = max(1, cur - take)
                     excess -= take
+                else:
+                    child.styles.max_height = None
         return
 
     min_h = body.styles.min_height
@@ -502,13 +527,7 @@ def fit_modal_card(
                     natural = min(natural, int(max_h.value))
             needed += natural
         else:
-            child_h = child.region.height
-            if child_h <= 0:
-                style_h = child.styles.height
-                if style_h is not None and style_h.is_cells:
-                    child_h = int(style_h.value)
-                else:
-                    child_h = 1
+            child_h = _measure_child(child)
             needed += child_h
             non_body_needed += gap + child_h
             if child is help_child:
@@ -519,11 +538,18 @@ def fit_modal_card(
 
     # Only clamp a long help label when it would starve the scrollable body
     # below its minimum height or push the action bar out of the card.
+    for child in clampable:
+        if child is not help_child:
+            child.styles.max_height = None
     if help_child is not None and help_h > 0:
         other_chrome = non_body_needed - help_h
         max_help = inner_budget - other_chrome - min_body
         if help_h > max_help:
-            help_child.styles.max_height = max(2, max_help)
+            clamped_help = max(2, max_help)
+            help_child.styles.max_height = clamped_help
+            needed -= max(0, help_h - clamped_help)
+        else:
+            help_child.styles.max_height = None
 
     clipped_now = (
         not card.has_class("modal-card-flex")

@@ -16,6 +16,7 @@ from urllib.request import getproxies, proxy_bypass
 from ..core.diagnostics import current_recorder
 from ..core.network import NetworkCancellation, SocketLease, network_checkpoint
 from .embedding import current_download_runtime, current_proxy_policy
+from .resume_versions import observe_media_response
 
 try:  # Optional fast path for environments that ship httpx with HTTP/2 support.
     import httpx as _httpx
@@ -316,6 +317,12 @@ class NativeHttpClient:
                     response.close()
                     raise HttpClientError(detail, http_status=response.status)
                 response.crossed_origin = crossed_origin
+                if method == "GET" and response.status in {200, 206}:
+                    try:
+                        observe_media_response(url, response.get_header("ETag"))
+                    except BaseException:
+                        response.close()
+                        raise
                 return response
             location = response.get_header("Location")
             response.close()
@@ -578,7 +585,6 @@ def http2_download_to_file(
     low_speed_min_bytes: int = 0,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int, Http2DownloadResponse]:
-    url = _encoded_http_url(url)
     if _httpx is not None:
         total, response = get_global_http_client().download_to_file(
             url,
@@ -595,6 +601,8 @@ def http2_download_to_file(
             http2=True,
         )
         return total, Http2DownloadResponse(response.status, response.reason, response.headers, response.url)
+    original_url = url
+    url = _encoded_http_url(url)
     if _request_proxy(url):
         raise HttpClientError("HTTP/2 through a proxy requires httpx.")
     parsed = urlsplit(url)
@@ -648,6 +656,8 @@ def http2_download_to_file(
                     response_headers.update(_hpack_decode_headers(bytes(block)))
                     pending_header_blocks.pop(frame_stream_id, None)
                     status = _status_from_headers(response_headers)
+                    if status in {200, 206} and not total:
+                        observe_media_response(original_url, _header_value(response_headers, "etag"))
                 if flags & 0x1:
                     break
                 continue
@@ -658,6 +668,8 @@ def http2_download_to_file(
                     response_headers.update(_hpack_decode_headers(bytes(block)))
                     pending_header_blocks.pop(frame_stream_id, None)
                     status = _status_from_headers(response_headers)
+                    if status in {200, 206} and not total:
+                        observe_media_response(original_url, _header_value(response_headers, "etag"))
                 continue
             if frame_type != 0x0:  # DATA
                 continue

@@ -1,5 +1,7 @@
 # Batches
 
+[English](batch.md) | [简体中文](zh-CN/batch.md)
+
 Picking ten episodes is one action with ten outcomes. The delivery screen can
 describe one title in its header; it cannot describe ten, and a serial run that
 says nothing until it is over is a run you cannot supervise.

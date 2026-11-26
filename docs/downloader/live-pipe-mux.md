@@ -1,5 +1,7 @@
 # Live Pipe Mux Notes
 
+[English](live-pipe-mux.md) | [简体中文](../zh-CN/downloader/live-pipe-mux.md)
+
 ## HLS live multi-KID fMP4
 
 For live HLS fMP4/CMAF streams that expose more than one KID, pipe mux verifies the KID on each downloaded media fragment before decryption. The fragment KID is treated as the source of truth for key selection, init patching, and key-rotation synchronization.

@@ -1,5 +1,7 @@
 # DRM systems
 
+[English](drm.md) | [简体中文](zh-CN/drm.md)
+
 UniDL supports Widevine, PlayReady and MonaLisa through one typed DRM
 boundary. A service declares the systems it can use and owns the complete
 licence request. Core loads a CDM, creates a challenge, parses the response and

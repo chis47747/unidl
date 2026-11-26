@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.7.6] - 2026-11-26
+
+### Scheduled downloads
+
+- Added one-time and recurring jobs by URL, content ID, or in-service search, with lookup dry runs, episode tracking, and retry windows for late releases.
+- Added Upcoming Radar with configurable release calendars, poster previews, and scheduling from JustWatch results.
+- Added optional `launchd`, `systemd --user`, and Windows Task Scheduler hosting for due jobs when the TUI is closed.
+
+### Background downloads
+
+- Added a background dock to minimize, monitor, and restore active downloads while continuing to browse.
+- Queued scheduled jobs during foreground work and prevented the TUI and the OS scheduler from starting the same job twice.
+
+### Fixes and documentation
+
+- Strengthened resume validation when a media source changes.
+- Refined interface navigation, layouts, and settings, and added a Simplified Chinese documentation set.
+
 ## [2.7.5] - 2026-11-25
 
 ### Startup and interface

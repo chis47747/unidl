@@ -1,5 +1,7 @@
 # AVS3 and Audio Vivid support
 
+[English](audio-vivid.md) | [简体中文](../zh-CN/downloader/audio-vivid.md)
+
 `UniDL-avs3` handles MPEG-TS inspection and elementary-stream extraction in
 Python. It does not call FFmpeg. Decoding is delegated to a native codec
 implementation because AVS3-P2 video and AVS3-P3/Audio Vivid are not practical

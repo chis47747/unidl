@@ -37,6 +37,7 @@ SETTINGS_GROUPS = {
             "layout_density",
             "semantic_colors",
             "completion_alert",
+            "poster_preview",
             "interface_locale",
             "beta_interface",
             "beta_auto_results",
@@ -50,6 +51,7 @@ class SettingsGroupScreen(Screen[None]):
     """Edit a small, named group while keeping each stored setting independent."""
 
     BINDINGS = [
+        Binding("b", "app.global_back", "Back", show=False),
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("enter", "activate", "Change", show=True),
@@ -79,7 +81,7 @@ class SettingsGroupScreen(Screen[None]):
         yield Static(tr(self.description, default=self.description), id="settings-group-help")
         with Vertical(id="body"):
             yield OptionList(id="settings-group-list")
-        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", "modified only"), ("^b", "back"), ("esc", "quit"))
+        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", tr("settings.modified_only")), ("^b", "back"), ("esc", "quit"))
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -194,6 +196,7 @@ class SettingsGroupScreen(Screen[None]):
                 self.scope.get(spec.key),
                 dark=dark,
                 accent=accent,
+                theme_mode=getattr(self.app, "theme_mode", ""),
             )
             if swatch:
                 value_markup = f"{swatch}  {value_markup}"
@@ -208,8 +211,17 @@ class SettingsGroupScreen(Screen[None]):
 
     def _show_help(self, spec: Setting | None) -> None:
         if spec is not None:
+            text = setting_help(spec) or tr(self.description, default=self.description)
+            if spec.key == "poster_preview":
+                from .poster import poster_capability_summary
+
+                cap_line = poster_capability_summary()
+                self.query_one("#settings-group-help", Static).update(
+                    f"[$muted]{escape_markup(text)}[/]\n[$accent]{escape_markup(cap_line)}[/]"
+                )
+                return
             self.query_one("#settings-group-help", Static).update(
-                f"[$muted]{escape_markup(setting_help(spec) or tr(self.description, default=self.description))}[/]"
+                f"[$muted]{escape_markup(text)}[/]"
             )
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:

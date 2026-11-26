@@ -1,5 +1,7 @@
 # Partner authorization
 
+[English](partner-authorization.md) | [简体中文](zh-CN/partner-authorization.md)
+
 `PartnerAuthorization` is the core contract for handing a short-lived sign-in
 URL from one installed service to another without displaying, serializing or
 persisting it. It is for an explicitly allowlisted provider relationship in

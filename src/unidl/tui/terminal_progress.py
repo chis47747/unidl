@@ -109,18 +109,20 @@ def parse_frame_metrics(rows: Sequence[str], *, spinner_chars: str = "") -> tupl
         row = str(raw or "")
         if spinner_chars and any(ch in spinner_chars for ch in row):
             spinning = True
-        if "━" in row or "─" in row or "%" in row:
+        completed = "✓" in row
+        if "━" in row or "─" in row:
             pct_match = _PERCENT_RE.search(row)
             if pct_match:
                 pct = int(pct_match.group(1))
                 if 0 <= pct <= 100:
                     percents.append(pct)
-        speed_match = _SPEED_RE.search(row)
-        if speed_match:
-            val = float(speed_match.group(1))
-            unit = (speed_match.group(2) or "").upper()
-            total_speed += val * _UNIT_SCALE.get(unit, 1.0)
-            found_speed = True
+        if not completed:
+            speed_match = _SPEED_RE.search(row)
+            if speed_match:
+                val = float(speed_match.group(1))
+                unit = (speed_match.group(2) or "").upper()
+                total_speed += val * _UNIT_SCALE.get(unit, 1.0)
+                found_speed = True
     percent = round(sum(percents) / len(percents)) if percents else None
     speed = total_speed if found_speed else None
     return percent, speed, spinning
@@ -176,7 +178,9 @@ def format_terminal_title(
     if batch_pos is not None and batch_pos[1] > 1:
         bits.append(f"{batch_pos[0]}/{batch_pos[1]}")
     if paused:
-        bits.append("Paused")
+        from ..core.i18n import tr
+
+        bits.append(tr("progress.paused", default="Paused"))
     if percent is not None:
         bits.append(f"{max(0, min(100, int(percent)))}%")
     speed_text = format_speed(speed_bps) if (speed_bps and not paused) else ""

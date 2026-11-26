@@ -41,12 +41,28 @@ _KEY_DISPLAY = {
     "right": "→",
 }
 
-_GLOBAL_KEYS = frozenset({"^p", "^f", "^s", "^b", "^t", "^q", "esc", "?"})
+_GLOBAL_KEYS = frozenset({"^p", "^f", "^s", "^b", "^t", "^q", "esc", "?", "f1"})
 
 
 def _format_binding_key(raw: str) -> str:
     first = raw.split(",", 1)[0].strip()
-    return _KEY_DISPLAY.get(first.lower(), first)
+    lower = first.lower()
+    if lower in _KEY_DISPLAY:
+        return _KEY_DISPLAY[lower]
+    if lower.startswith("ctrl+") and len(lower) == 6:
+        return f"^{lower[-1]}"
+    return first
+
+
+def _translate_label(label: str) -> str:
+    translated = phrase(label)
+    if translated != label:
+        return translated
+    lowered = label.lower()
+    translated_lower = phrase(lowered)
+    if translated_lower != lowered:
+        return translated_lower
+    return label
 
 
 def collect_screen_shortcuts(screen: Screen | None) -> list[tuple[str, str]]:
@@ -64,8 +80,12 @@ def collect_screen_shortcuts(screen: Screen | None) -> list[tuple[str, str]]:
         lower = norm.lower()
         if lower in seen_keys or lower in _GLOBAL_KEYS:
             return
+        if norm in {"↑", "↓"} and ("↑↓" in seen_keys or "↑↓←→" in seen_keys):
+            return
+        if norm in {"←", "→"} and "↑↓←→" in seen_keys:
+            return
         seen_keys.add(lower)
-        pairs.append((norm, phrase(text)))
+        pairs.append((norm, _translate_label(text)))
 
     for bar in screen.query(KeyBar):
         for key, label in getattr(bar, "_pairs", ()):
@@ -94,7 +114,7 @@ def _global_shortcuts() -> list[tuple[str, str]]:
         ("^s", tr("shortcuts.global.settings")),
         ("^b", tr("shortcuts.global.back")),
         ("^t", tr("shortcuts.global.theme")),
-        ("?", tr("shortcuts.global.help")),
+        ("? / F1", tr("shortcuts.global.help")),
         ("esc / ^q", tr("shortcuts.global.quit")),
     ]
 
@@ -110,6 +130,7 @@ def _slash_commands() -> list[tuple[str, str]]:
         ("/vault", tr("beta.mode.vault")),
         ("/addkeys", tr("beta.mode.add_keys")),
         ("/settings", tr("beta.mode.settings")),
+        ("/schedule", tr("schedule.title", default="Scheduled downloads")),
         ("/catalog", tr("beta.mode.catalog")),
     ]
 

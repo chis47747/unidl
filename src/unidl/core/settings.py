@@ -906,6 +906,58 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     _choice(
+        "poster_preview",
+        "Poster preview",
+        [
+            ("auto", "Auto (native image terminals)"),
+            ("always", "Always (include text-cell fallback)"),
+            ("off", "Off"),
+        ],
+        "auto",
+        "Show 2:3 movie and series posters beside scheduled downloads, upcoming radar, "
+        "and JustWatch results. Auto enables posters only on terminals with native "
+        "image protocols (Kitty, Ghostty, iTerm2, WezTerm) and hides them on macOS "
+        "Terminal.app or narrow windows.",
+        visible=False,
+    ),
+    Setting(
+        "upcoming_sources",
+        "Upcoming release sources",
+        "multi",
+        options=[
+            Option("justwatch", "JustWatch"),
+            Option("tvmaze", "TVMaze"),
+            Option("anilist", "AniList"),
+            Option("tmdb", "TMDB (API key)"),
+        ],
+        default=("justwatch", "tvmaze", "anilist"),
+        help=(
+            "Data sources queried by the Upcoming Radar. Pick one or combine several: "
+            "JustWatch covers global streaming platforms, TVMaze adds exact episode UTC times, "
+            "AniList adds anime schedules, and TMDB adds extra movie/TV metadata when an API key is set."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "tmdb_api_key",
+        "TMDB API key",
+        "text",
+        default="",
+        help=(
+            "Optional TMDB v3 API key or v4 Read Access Token used when TMDB is enabled "
+            "in Upcoming release sources. Stored privately in settings.json and never shown in logs."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "upcoming_installed_only",
+        "Installed services only",
+        "bool",
+        default=False,
+        help="Filter Upcoming radar to titles matching a service currently installed in UniDL.",
+        visible=False,
+    ),
+    _choice(
         "interface_locale",
         "Interface language",
         [
@@ -1340,14 +1392,13 @@ GLOBAL_SETTINGS: list[Setting] = [
     ),
     Setting(
         "justwatch_manager",
-        "JustWatch search",
+        "Search & scheduled downloads",
         "action",
         default="",
         picker="justwatch",
         help=(
-            "Set the one catalog used to find titles and the separate list of "
-            "countries checked for streaming availability. Both choices remain "
-            "available from the JustWatch search and results screens too."
+            "Configure JustWatch search and availability regions, upcoming release "
+            "sources, TMDB API key, and background scheduling."
         ),
     ),
     Setting(

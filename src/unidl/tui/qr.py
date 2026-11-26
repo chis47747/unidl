@@ -208,16 +208,57 @@ def _protocol_qr_image(image, canvas: tuple[int, int]):
     return output
 
 
-def prime_protocol_image() -> None:
-    """Load the native image widget and prime iTerm2 sizing before Textual."""
+def _probe_winsize_cell_size() -> tuple[int, int]:
+    """Read terminal cell pixels via TIOCGWINSZ without writing escape probes."""
+    try:
+        import fcntl
+        import struct
+        import termios as _termios
 
-    if _terminal_image_protocol() != "sixel":
+        for stream in (sys.__stdout__, sys.stdout):
+            if stream is None or not hasattr(stream, "fileno"):
+                continue
+            try:
+                if not stream.isatty():
+                    continue
+                packed = fcntl.ioctl(stream.fileno(), _termios.TIOCGWINSZ, b"\x00" * 8)
+                rows, cols, xpix, ypix = struct.unpack("HHHH", packed)
+                if rows > 0 and cols > 0 and xpix > 0 and ypix > 0:
+                    cw = max(1, round(xpix / cols))
+                    ch = max(1, round(ypix / rows))
+                    return (cw, ch)
+            except (OSError, ValueError, _termios.error):
+                continue
+    except ImportError:
+        pass
+    return (10, 20)
+
+
+def _prime_default_cell_size() -> None:
+    """Ensure textual_image never runs live \\x1b[16t / termios probes inside Textual."""
+    try:
+        from textual_image._terminal import CellSize, get_cell_size
+
+        if getattr(get_cell_size, "_result", None) is None:
+            cw, ch = _probe_winsize_cell_size()
+            get_cell_size._result = CellSize(cw, ch)  # type: ignore[attr-defined]
+    except (ImportError, OSError):
+        return
+
+
+def prime_protocol_image() -> None:
+    """Load the native image widget and prime terminal cell sizing before Textual."""
+
+    protocol = _terminal_image_protocol()
+    if not protocol:
         return
     # Importing textual-image fills its cache.  Set the queried value after the
     # import so it replaces the package's non-TTY fallback (10x20).
     if _load_protocol_image() is None:
         return
-    _set_textual_image_cell_size(_iterm_cell_size())
+    if protocol == "sixel":
+        _set_textual_image_cell_size(_iterm_cell_size())
+    _prime_default_cell_size()
 
 
 class _NoProbeOutput:
@@ -252,6 +293,7 @@ def _load_protocol_image():
     try:  # pragma: no cover - native protocol selected by the user's terminal
         from textual_image.widget import SixelImage, TGPImage
 
+        _prime_default_cell_size()
         return TGPImage if protocol == "tgp" else SixelImage
     except (ImportError, OSError):  # Python 3.11 or optional dependency absent
         return None
@@ -273,6 +315,7 @@ def _load_halfcell_image():
     try:
         from textual_image.renderable.halfcell import Image as halfcell_image
 
+        _prime_default_cell_size()
         return halfcell_image
     except (ImportError, OSError):  # pragma: no cover - optional dependency
         return None
@@ -439,7 +482,7 @@ class QrWidget(Vertical):
         from ..core.i18n import tr
 
         if self._remote_fetch:
-            yield Static(tr("audio.cover_loading"), classes="qr-loading", markup=False)
+            yield Static(tr("qr.loading", default="Loading QR code…"), classes="qr-loading", markup=False)
             return
         try:
             protocol_image = protocol_image_class()

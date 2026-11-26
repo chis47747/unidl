@@ -22,7 +22,7 @@ import re
 import time
 from bisect import bisect_left
 from collections import Counter, deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -249,6 +249,8 @@ class DownloadScreen(AskHost):
     BINDINGS = [
         *AskHost.BINDINGS,
         Binding("p", "pause_shortcut", "Pause / Resume", show=False),
+        Binding("minus", "minimize_shortcut", "Minimize", show=False),
+        Binding("ctrl+d", "minimize", "Minimize", show=False),
         Binding("R", "retry_all_shortcut", "Retry failed", show=False),
     ]
 
@@ -285,6 +287,8 @@ class DownloadScreen(AskHost):
         self._last_speed_bps: float | None = None
         self._last_percent: int | None = None
         self._last_spinning = False
+        self._terminal_finished = False
+        self._done_announced = False
 
     def compose_identity(self) -> ComposeResult:
         yield Static("", id="ident-line")
@@ -309,10 +313,11 @@ class DownloadScreen(AskHost):
         yield Static("", id="status-line")
 
     def chrome_widget(self) -> Chrome:
-        """Make pausing a visible control, not only a meaning hidden behind Back."""
+        """Make minimizing and pausing visible controls, not hidden behind Back."""
         return Chrome(
             can_go_back=self.CAN_GO_BACK,
             left_actions=(
+                ("⌄", "Minimize", "screen.minimize", "chrome-minimize"),
                 ("‖", "Pause", "screen.stop_resume", "chrome-stop"),
             ),
         )
@@ -330,6 +335,15 @@ class DownloadScreen(AskHost):
                 yield Static("", id="delivery-frame")
                 yield TailVerticalScroll(id="queue-list")
                 yield from self.compose_ask_area()
+
+    @property
+    def can_minimize_now(self) -> bool:
+        """Single guard shared by minimize shortcuts, chrome buttons, and dock restores."""
+        return (
+            not self.waiting
+            and getattr(self, "_current_ask", None) is None
+            and bool(getattr(self.controller, "can_minimize", False))
+        )
 
     def key_hints(self) -> list[tuple[str, str]]:
         """Show Back as navigation; stopping is a side effect while a job runs.
@@ -363,8 +377,14 @@ class DownloadScreen(AskHost):
                 or getattr(self.controller, "recording_stop_requested", False)
             ):
                 pause_hint = [("p", "resume" if self.controller.pause_requested else "pause")]
+        minimize_hint: list[tuple[str, str]] = (
+            [("-", "minimize")]
+            if self.can_minimize_now
+            else []
+        )
         return [
             ("^b", back),
+            *minimize_hint,
             *pause_hint,
             *self.queue_hints(),
             *self.chapter_hints(),
@@ -378,6 +398,9 @@ class DownloadScreen(AskHost):
     def refresh_keys(self) -> None:
         super().refresh_keys()
         self._refresh_queue_retry_chip()
+        min_found = self.query("#chrome-minimize")
+        if min_found:
+            min_found.first(ChromeButton).set_enabled(self.can_minimize_now)
         found = self.query("#chrome-stop")
         if not found:
             return
@@ -411,6 +434,20 @@ class DownloadScreen(AskHost):
         if self._current_ask is not None:
             return
         self.action_stop_resume()
+
+    def action_minimize_shortcut(self) -> None:
+        """Keyboard minimize ('m') only when no prompt owns the keyboard."""
+        if self._current_ask is not None:
+            return
+        self.action_minimize()
+
+    def action_minimize(self) -> None:
+        """Minimize this active download into the floating background mini-window."""
+        if not self.can_minimize_now:
+            return
+        minimizer = getattr(self.app, "minimize_session", None)
+        if callable(minimizer):
+            minimizer(self.controller, self)
 
     def action_retry_all_shortcut(self) -> None:
         """One-key retry of all failed/stopped rows when no prompt owns the keyboard."""
@@ -497,28 +534,28 @@ class DownloadScreen(AskHost):
             stop_pause = getattr(self.controller, "request_stop_and_pause_batch", None)
             delay_only = not self.controller.job_running
             if (delay_only or batch_paused or (callable(has_more) and has_more())) and callable(stop_pause):
-                if not stop_pause():
-                    return False
-                if delay_only:
-                    self.notify(tr("delivery.notify.paused_quit_again"), timeout=5)
+                if stop_pause():
+                    if delay_only:
+                        self.notify(tr("delivery.notify.paused_quit_again"), timeout=5)
+                        self.refresh_keys()
+                        return True
+                    self.notify(
+                        tr(
+                            "delivery.notify.stopped_batch_paused",
+                            default="Stopped current title and paused queue — ^r retry · p resume · Esc again to cancel batch & quit",
+                        ),
+                        timeout=5,
+                    )
                     self.refresh_keys()
                     return True
-                self.notify(
-                    tr(
-                        "delivery.notify.stopped_batch_paused",
-                        default="Stopped current title and paused queue — ^r retry · p resume · Esc again to cancel batch & quit",
-                    ),
-                    timeout=5,
-                )
-            else:
-                self.controller.request_cancel()
-                self.notify(
-                    tr(
-                        "delivery.notify.stopped_single_quit",
-                        default="Stopping current download — ^r to retry · press Esc again to quit",
-                    ),
-                    timeout=5,
-                )
+            self.controller.request_cancel()
+            self.notify(
+                tr(
+                    "delivery.notify.stopped_single_quit",
+                    default="Stopping current download — ^r to retry · press Esc again to quit",
+                ),
+                timeout=5,
+            )
             self.refresh_keys()
             return True
         if batch_paused:
@@ -545,6 +582,30 @@ class DownloadScreen(AskHost):
         retry_found = self.query("#queue-retry-all")
         if retry_found:
             retry_found.first(StatusChip).display = False
+        # Restore delivery timing, description, and pending asks when returning from minimized dock
+        if self._download_started_at is None and getattr(self.controller, "_delivery_started_at", None) is not None:
+            self._download_started_at = self.controller._delivery_started_at
+            self._download_finished_at = getattr(self.controller, "_delivery_finished_at", None)
+            self._paused_total = float(getattr(self.controller, "_delivery_paused_total", 0.0) or 0.0)
+            self._pause_started_at = getattr(self.controller, "_delivery_pause_started_at", None)
+            self._speed_samples = deque(
+                getattr(self.controller, "_delivery_speed_samples", ()) or (),
+                maxlen=16,
+            )
+            self._peak_speed_bps = float(getattr(self.controller, "_delivery_peak_speed_bps", 0.0) or 0.0)
+        if self._chapter_playback is None and getattr(self.controller, "_delivery_chapter_playback", None) is not None:
+            self._chapter_playback = self.controller._delivery_chapter_playback
+        if (
+            self._described is None
+            and getattr(self.controller, "_delivery_playback", None) is not None
+            and not (getattr(self.controller, "finished", False) and getattr(self.controller, "queue_complete", False))
+        ):
+            self.describe(
+                self.controller._delivery_playback,
+                getattr(self.controller, "_delivery_tracks", None),
+                reset_clock=False,
+            )
+
         self.refresh_keys()
         queue = getattr(self.controller, "queue_jobs", None)
         self.render_queue(queue() if callable(queue) else self.controller.jobs, self.controller.batch_total)
@@ -556,9 +617,18 @@ class DownloadScreen(AskHost):
         self._frame_rows = len(rows)
         self._render_elapsed()
         self._sync_terminal_progress()
+        pop_ask = getattr(self.controller, "pop_pending_minimized_ask", None)
+        if callable(pop_ask):
+            pending = pop_ask()
+            if pending is not None:
+                self.show_ask(*pending)
+        if getattr(self.controller, "finished", False) and getattr(self.controller, "queue_complete", False):
+            self.mark_done()
         self.set_interval(FRAME_SECONDS, self._flush_frame)
 
     def _on_host_unmount(self) -> None:
+        if getattr(self.controller, "minimized", False):
+            return
         clear = getattr(getattr(self, "app", None), "clear_terminal_progress", None)
         if callable(clear):
             clear()
@@ -575,7 +645,7 @@ class DownloadScreen(AskHost):
                 refresh_audio=False,
             )
         elif getattr(self.controller, "queue_complete", False):
-            self.mark_done()
+            self._render_done_header()
         queue = getattr(self.controller, "queue_jobs", None)
         self.render_queue(
             queue() if callable(queue) else self.controller.jobs,
@@ -599,7 +669,7 @@ class DownloadScreen(AskHost):
                 refresh_audio=False,
             )
         elif getattr(self.controller, "queue_complete", False):
-            self.mark_done()
+            self._render_done_header()
         queue = getattr(self.controller, "queue_jobs", None)
         self.render_queue(
             queue() if callable(queue) else self.controller.jobs,
@@ -612,15 +682,20 @@ class DownloadScreen(AskHost):
         self._render_elapsed()
 
     # ------------------------------------------------------------- UniDL's own
+    def _is_delivery_paused(self) -> bool:
+        controller = getattr(self, "controller", None)
+        job_running = bool(getattr(controller, "job_running", False))
+        delay_active = bool(getattr(controller, "title_delay_active", False))
+        pause_req = bool(getattr(controller, "pause_requested", False))
+        batch_paused = bool(getattr(controller, "batch_paused", False))
+        return bool(((job_running or delay_active) and pause_req) or (batch_paused and not job_running))
+
     def _record_frame_metrics(self, rows: list[str]) -> None:
         """Extract live percent and aggregate speed samples from Core's frame."""
         percent, speed_bps, spinning = parse_frame_metrics(rows, spinner_chars=SPINNER_FRAMES)
         self._last_percent = percent
         self._last_spinning = spinning
-        paused = bool(
-            getattr(self.controller, "job_running", False)
-            and getattr(self.controller, "pause_requested", False)
-        )
+        paused = self._is_delivery_paused()
         if speed_bps is not None and not paused:
             samples = getattr(self, "_speed_samples", None)
             if samples is None:
@@ -629,6 +704,8 @@ class DownloadScreen(AskHost):
             samples.append(speed_bps)
             self._last_speed_bps = speed_bps
             self._peak_speed_bps = max(float(getattr(self, "_peak_speed_bps", 0.0) or 0.0), speed_bps)
+        elif speed_bps is None and not paused:
+            self._last_speed_bps = None
 
     def _sync_terminal_progress(
         self,
@@ -646,6 +723,7 @@ class DownloadScreen(AskHost):
             return
         controller = getattr(self, "controller", None)
         if finished:
+            self._terminal_finished = True
             if failed_count > 0:
                 setter(
                     PROGRESS_ERROR,
@@ -672,13 +750,13 @@ class DownloadScreen(AskHost):
             getattr(controller, "job_running", False)
             or getattr(controller, "title_delay_active", False)
         )
-        paused = bool(
-            getattr(controller, "pause_requested", False)
-            or getattr(controller, "batch_paused", False)
-        )
+        paused = self._is_delivery_paused()
         if not running and not paused:
+            if getattr(self, "_terminal_finished", False):
+                return
             clearer()
             return
+        self._terminal_finished = False
 
         described = getattr(self, "_described", None)
         name = str(getattr(described, "save_name", "") or "")
@@ -695,6 +773,7 @@ class DownloadScreen(AskHost):
 
         pct = getattr(self, "_last_percent", None)
         speed_bps = getattr(self, "_last_speed_bps", None)
+        spinning = bool(getattr(self, "_last_spinning", False))
         if paused:
             setter(
                 PROGRESS_PAUSED,
@@ -706,7 +785,7 @@ class DownloadScreen(AskHost):
                     name=name,
                 ),
             )
-        elif pct is not None:
+        elif pct is not None and not (spinning and speed_bps is None):
             setter(
                 PROGRESS_NORMAL,
                 pct,
@@ -788,11 +867,8 @@ class DownloadScreen(AskHost):
         panel.update(body, layout=layout or not was_visible)
 
     def _sync_pause_clock(self) -> None:
-        """Freeze the elapsed clock while a transfer is paused in place."""
-        paused = bool(
-            getattr(self.controller, "job_running", False)
-            and getattr(self.controller, "pause_requested", False)
-        )
+        """Freeze the elapsed clock while a transfer or batch is paused."""
+        paused = self._is_delivery_paused()
         if paused:
             if getattr(self, "_pause_started_at", None) is None:
                 self._pause_started_at = time.monotonic()
@@ -830,17 +906,14 @@ class DownloadScreen(AskHost):
         if pause_started is not None:
             paused_total += max(0.0, time.monotonic() - pause_started)
         value = _elapsed_text(finished_at - started_at - paused_total)
-        paused = bool(
-            getattr(self.controller, "job_running", False)
-            and getattr(self.controller, "pause_requested", False)
-        )
+        paused = self._is_delivery_paused()
         samples = list(getattr(self, "_speed_samples", ()))
         last_speed = getattr(self, "_last_speed_bps", None)
         peak_speed = float(getattr(self, "_peak_speed_bps", 0.0) or 0.0)
         wide = getattr(getattr(self, "size", None), "width", 100) >= 96
         spark = render_sparkline(samples, width=14 if wide else 10) if samples else ""
         finished = getattr(self, "_download_finished_at", None) is not None
-        speed_label = format_speed(peak_speed if finished else last_speed) if spark else ""
+        speed_label = "" if paused else (format_speed(peak_speed if finished else last_speed) if spark else "")
         peak_label = (
             tr("delivery.peak_speed", speed=format_speed(peak_speed))
             if (spark and wide and not finished and peak_speed > 0)
@@ -1072,17 +1145,10 @@ class DownloadScreen(AskHost):
                 chip.display = False
         details = self.query("#delivery-details-body")
         if details:
-            body = Text()
+            detail_rows: list[tuple[str, str | Text, Any]] = []
 
             def field(label: str, value: str | Text, style) -> None:
-                if body:
-                    body.append("\n")
-                pad = max(2, 12 - cell_width(label)) if label else 12
-                body.append(f"{label}{' ' * pad}", style=palette.dim)
-                if isinstance(value, Text):
-                    body.append_text(value)
-                else:
-                    body.append(value, style=style)
+                detail_rows.append((label, value, style))
 
             engine = getattr(self.controller, "engine", None)
             try:
@@ -1177,6 +1243,17 @@ class DownloadScreen(AskHost):
                     ),
                     palette.muted,
                 )
+            col_width = max([12, *(cell_width(lbl) + 2 for lbl, _, _ in detail_rows if lbl)])
+            body = Text()
+            for lbl, val, sty in detail_rows:
+                if body:
+                    body.append("\n")
+                pad = max(2, col_width - cell_width(lbl)) if lbl else col_width
+                body.append(f"{lbl}{' ' * pad}", style=palette.dim)
+                if isinstance(val, Text):
+                    body.append_text(val)
+                else:
+                    body.append(val, style=sty)
             details.first(Static).update(body)
         # so a later resize is not left with a name cut for the old width
         self._described = playback
@@ -1195,6 +1272,8 @@ class DownloadScreen(AskHost):
             self._last_speed_bps = None
             self._last_percent = None
             self._last_spinning = False
+            self._terminal_finished = False
+            self._done_announced = False
         self._render_elapsed()
         self._sync_terminal_progress()
         self.refresh_keys()
@@ -1220,15 +1299,11 @@ class DownloadScreen(AskHost):
             if found:
                 found.first().display = wanted and not asking
 
-    def mark_done(self) -> None:
-        """Everything queued has been dealt with. Say so, and how to leave."""
-        if self._download_started_at is not None:
-            self._download_finished_at = time.monotonic()
-            self._render_elapsed()
-        self.clear_frame()
+    def _render_done_header(self) -> tuple[list[Any], int, int] | None:
+        """Pure visual repaint of the finished delivery headline."""
         found = self.query("#delivery-head")
         if not found:
-            return
+            return None
         palette = self.app.palette
         queue = getattr(self.controller, "queue_jobs", None)
         jobs = queue() if callable(queue) else list(self.controller.jobs)
@@ -1253,6 +1328,19 @@ class DownloadScreen(AskHost):
         head.append("  ·  ", style=palette.dim)
         head.append(tr("delivery.back_hint"), style=palette.muted)
         found.first(Static).update(head)
+        return jobs, failed, stopped
+
+    def mark_done(self) -> None:
+        """Everything queued has been dealt with. Say so, and how to leave."""
+        if self._download_started_at is not None:
+            if self._download_finished_at is None:
+                self._download_finished_at = time.monotonic()
+            self._render_elapsed()
+        self.clear_frame()
+        rendered = self._render_done_header()
+        if rendered is None:
+            return
+        jobs, failed, stopped = rendered
         # Keep the last playback's metadata chips clickable while the finished
         # delivery screen is being inspected.
         # the header is no longer about one title, so a resize must leave it alone
@@ -1265,7 +1353,8 @@ class DownloadScreen(AskHost):
             total_jobs=len(jobs),
         )
         emit_alert = getattr(self.app, "emit_completion_alert", None)
-        if callable(emit_alert):
+        if callable(emit_alert) and not getattr(self, "_done_announced", False):
+            self._done_announced = True
             if failed:
                 alert_title = tr("delivery.finished_errors")
                 alert_body = tr("delivery.failed_n", failed=failed, total=len(jobs))

@@ -42,7 +42,7 @@ from ..core.drm import all_systems
 from ..core.i18n import phrase, tr
 from ..core.remotecdm import parse_entry
 from ..core.settings import Settings
-from .bidi import visual_markup
+from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, refresh_locale_widgets
 from .input import ClipboardInput as Input
 from .input import ClipboardTextArea as TextArea
@@ -258,20 +258,26 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
                     placeholder=tr("resource.placeholder.address"),
                     id="resource-address",
                 )
+                existing_secret = _text(
+                    self.existing.get("secret")
+                    or self.existing.get("token")
+                    or self.existing.get("key")
+                )
                 yield Label(
-                    tr("resource.field.secret_cdm")
-                    + (tr("resource.field.secret_keep") if self.editing else ""),
+                    tr("resource.field.secret_cdm"),
                     classes="resource-field-label",
                 )
-                yield Input(
-                    password=True,
-                    placeholder=_secret_placeholder(
-                        self.existing,
-                        ("secret", "token", "key"),
-                        tr("resource.placeholder.secret"),
-                    ),
-                    id="resource-secret",
-                )
+                with Horizontal(id="resource-secret-row"):
+                    yield Input(
+                        value=existing_secret,
+                        password=True,
+                        placeholder=tr("resource.placeholder.secret"),
+                        id="resource-secret",
+                    )
+                    yield Button(
+                        tr("tmdb.key_modal.toggle_show", default="Show"),
+                        id="resource-secret-reveal",
+                    )
                 yield Label(tr("resource.field.device_type"), classes="resource-field-label")
                 yield Input(
                     value=_text(self.existing.get("device_type")),
@@ -317,8 +323,6 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
         if not _valid_url(address):
             self._fail(tr("resource.need_url"), "#resource-address")
             return
-        old_secret = _text(self.existing.get("secret") or self.existing.get("token") or self.existing.get("key"))
-        secret = secret or old_secret
         if not secret:
             self._fail(tr("resource.need_secret_cdm"), "#resource-secret")
             return
@@ -364,12 +368,20 @@ class _RemoteCdmEditor(ModalScreen[dict[str, Any] | None]):
         event.stop()
         if event.button.id == "resource-editor-save":
             self.action_save()
+        elif event.button.id == "resource-secret-reveal":
+            field = self.query_one("#resource-secret", Input)
+            field.password = not field.password
+            event.button.label = (
+                tr("tmdb.key_modal.toggle_hide", default="Hide")
+                if not field.password
+                else tr("tmdb.key_modal.toggle_show", default="Show")
+            )
         else:
             self.action_cancel()
 
 
 class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
-    """Add or edit one HTTP/API vault without ever rendering its token again."""
+    """Add or edit one HTTP/API vault with masked token entry and Show/Hide toggle."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
@@ -416,20 +428,27 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
                     placeholder=tr("resource.placeholder.vault_url"),
                     id="resource-address",
                 )
+                existing_secret = _text(
+                    self.existing.get("password")
+                    or self.existing.get("api_key")
+                    or self.existing.get("token")
+                    or self.existing.get("secret")
+                )
                 yield Label(
-                    tr("resource.field.secret_vault")
-                    + (tr("resource.field.secret_keep") if self.editing else ""),
+                    tr("resource.field.secret_vault"),
                     classes="resource-field-label",
                 )
-                yield Input(
-                    password=True,
-                    placeholder=_secret_placeholder(
-                        self.existing,
-                        ("password", "api_key", "token", "secret"),
-                        tr("resource.placeholder.token"),
-                    ),
-                    id="resource-secret",
-                )
+                with Horizontal(id="resource-secret-row"):
+                    yield Input(
+                        value=existing_secret,
+                        password=True,
+                        placeholder=tr("resource.placeholder.token"),
+                        id="resource-secret",
+                    )
+                    yield Button(
+                        tr("tmdb.key_modal.toggle_show", default="Show"),
+                        id="resource-secret-reveal",
+                    )
                 yield Label(tr("resource.field.api_mode"), classes="resource-field-label")
                 yield Select(
                     [(tr("resource.api.json"), "json"), (tr("resource.api.query"), "query")],
@@ -494,13 +513,6 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
         if not _valid_url(address):
             self._fail(tr("resource.need_url"), "#resource-address")
             return
-        old_secret = _text(
-            self.existing.get("password")
-            or self.existing.get("api_key")
-            or self.existing.get("token")
-            or self.existing.get("secret")
-        )
-        secret = secret or old_secret
         if not secret:
             self._fail(tr("resource.need_secret_vault"), "#resource-secret")
             return
@@ -567,6 +579,14 @@ class _RemoteVaultEditor(ModalScreen[dict[str, Any] | None]):
         event.stop()
         if event.button.id == "resource-editor-save":
             self.action_save()
+        elif event.button.id == "resource-secret-reveal":
+            field = self.query_one("#resource-secret", Input)
+            field.password = not field.password
+            event.button.label = (
+                tr("tmdb.key_modal.toggle_hide", default="Hide")
+                if not field.password
+                else tr("tmdb.key_modal.toggle_show", default="Show")
+            )
         else:
             self.action_cancel()
 
@@ -634,14 +654,12 @@ class VaultPolicyScreen(ModalScreen[bool]):
                             value=self.values["local_vault"],
                             id="resource-policy-local",
                         )
-                        yield Static(tr("resource.policy.local_note"), classes="resource-policy-gate-note")
                     with Vertical(classes="resource-policy-gate"):
                         yield VaultCheckbox(
                             tr("resource.policy.remote"),
                             value=self.values["remote_vault"],
                             id="resource-policy-remote",
                         )
-                        yield Static(tr("resource.policy.remote_note"), classes="resource-policy-gate-note")
                 yield Static(tr("resource.policy.remote_operations"), classes="resource-policy-section")
                 yield Static(tr("resource.policy.remote_operations_help"), id="resource-policy-remote-operations-help")
                 # Keep one operation per row.  The labels are intentionally
@@ -797,7 +815,7 @@ class ResourceManagerScreen(Screen[None]):
     BINDINGS = [
         Binding("ctrl+b", "app.global_back", "Back", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
-        Binding("enter", "activate", "Use / edit", show=True),
+        Binding("enter", "noop", "Use / edit", show=True),
         Binding("ctrl+n", "add", "Add remote", show=True),
         Binding("i", "add_local", "Import local DBs", show=True),
         Binding("ctrl+o", "add_local", "Import local DBs", show=False),
@@ -806,6 +824,9 @@ class ResourceManagerScreen(Screen[None]):
         Binding("ctrl+x", "delete", "Delete", show=True),
         Binding("p", "policy", "Vault policy", show=True),
     ]
+
+    def action_noop(self) -> None:
+        """Footer-only hint; Enter is handled by the focused list or button."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1035,7 +1056,7 @@ class ResourceManagerScreen(Screen[None]):
         active = f"  [$accent]{tr('resource.active')}[/]" if row.kind == "cdm-choice" else ""
         return setting_row(
             self.query_one("#resource-list", OptionList), row.name,
-            f"[$dim]{visual_markup(row.detail)}[/]  {enabled}{active}",
+            f"[$dim]{escape_markup(row.detail)}[/]  {enabled}{active}",
             label_width(item.name for item in self._rows if item is not None),
             indent=4,
         )

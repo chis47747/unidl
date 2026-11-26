@@ -690,6 +690,13 @@ class TextualPresenter:
 class SessionController:
     """Owns the worker, the log, and which screen an ask belongs on."""
 
+    _batch_paused = False
+    _batch_resume_requested = False
+    _batch_retry_job: Job | None = None
+    _remaining_retries = 0
+    _last_stopped_job: Job | None = None
+    _title_delay_active = False
+
     def __init__(self, app: App, service: Service, engine: Engine):
         self.app = app
         self.service = service
@@ -735,6 +742,24 @@ class SessionController:
         self._workers_done = threading.Event()
         self._workers_done.set()
         self._flow_worker_reserved = False
+        self._drive_thread: threading.Thread | None = None
+        self._drive_thread_started = False
+        #: Minimized / background PiP download state.
+        self.minimized = False
+        self.minimized_outcome: str = ""
+        self.needs_attention_text: str = ""
+        self._pending_minimized_ask: tuple[Ask, dict[str, Any], threading.Event] | None = None
+        self._minimized_notified_done = False
+        #: Delivery presentation snapshot preserved across minimize/restore.
+        self._delivery_playback: Playback | None = None
+        self._delivery_tracks: TrackSet | None = None
+        self._delivery_chapter_playback: Playback | None = None
+        self._delivery_started_at: float | None = None
+        self._delivery_finished_at: float | None = None
+        self._delivery_paused_total: float = 0.0
+        self._delivery_pause_started_at: float | None = None
+        self._delivery_speed_samples: list[float] = []
+        self._delivery_peak_speed_bps: float = 0.0
         #: Set before Textual has had a chance to start a retry worker. Without a
         #: pending state, two quick keypresses both observed job_running=False and
         #: put two workers through the same Engine and queue.
@@ -915,10 +940,110 @@ class SessionController:
         self._ensure_worker_state()
         with self._worker_lock:
             idle = self._worker_count == 0
-        if idle and (self.finished or self.aborted) and not self.hosts:
+        if idle and (self.finished or self.aborted) and not self.hosts and not self.minimized:
             unregister = getattr(self.app, "unregister_session", None)
             if callable(unregister):
                 unregister(self)
+
+    def start_drive_thread(self) -> None:
+        """Run :meth:`drive` on an app-lifetime daemon thread rather than a screen worker."""
+        self._ensure_worker_state()
+        with self._worker_lock:
+            if self._drive_thread_started:
+                return
+            self._drive_thread_started = True
+        thread = threading.Thread(
+            target=self.drive,
+            name=f"unidl-session-{getattr(self.service, 'ID', 'svc')}",
+            daemon=True,
+        )
+        self._drive_thread = thread
+        thread.start()
+
+    @property
+    def is_actively_working(self) -> bool:
+        """True while this session still has active, paused, delayed, or pending work."""
+        if self.aborted or self.finished:
+            return False
+        return bool(
+            self.job_running
+            or getattr(self, "_title_delay_active", False)
+            or getattr(self, "_batch_paused", False)
+            or self._retry_pending
+            or self._pending_minimized_ask is not None
+            or not self.queue_complete
+        )
+
+    @property
+    def can_minimize(self) -> bool:
+        """True when DownloadScreen can be minimized to background without losing work."""
+        if self.aborted or self.cancel_requested or getattr(self, "recording_stop_requested", False):
+            return False
+        return bool(
+            self.job_running
+            or getattr(self, "_title_delay_active", False)
+            or getattr(self, "_batch_paused", False)
+            or self._retry_pending
+            or (not self.queue_complete and not self.finished)
+        )
+
+    def capture_delivery_view(self, screen) -> None:
+        """Snapshot DownloadScreen presentation state so restore picks up seamlessly."""
+        if getattr(screen, "_described", None) is not None:
+            self._delivery_playback = screen._described
+            self._delivery_tracks = screen._described_tracks
+        if getattr(screen, "_chapter_playback", None) is not None:
+            self._delivery_chapter_playback = screen._chapter_playback
+        self._delivery_started_at = getattr(screen, "_download_started_at", None)
+        self._delivery_finished_at = getattr(screen, "_download_finished_at", None)
+        self._delivery_paused_total = float(getattr(screen, "_paused_total", 0.0) or 0.0)
+        self._delivery_pause_started_at = getattr(screen, "_pause_started_at", None)
+        self._delivery_speed_samples = list(getattr(screen, "_speed_samples", ()) or ())
+        self._delivery_peak_speed_bps = float(getattr(screen, "_peak_speed_bps", 0.0) or 0.0)
+
+    def release_minimized_ask(self, *, quit_flow: bool = False) -> None:
+        """Unblock a delivery ask held while minimized."""
+        pending = self._pending_minimized_ask
+        self._pending_minimized_ask = None
+        self.needs_attention_text = ""
+        if pending is None:
+            return
+        _ask, box, event = pending
+        if quit_flow:
+            box["quit"] = True
+        else:
+            box["value"] = BACK
+        event.set()
+
+    def pop_pending_minimized_ask(self) -> tuple[Ask, dict[str, Any], threading.Event] | None:
+        """Take any delivery ask queued while minimized so a restored DownloadScreen mounts it."""
+        pending = self._pending_minimized_ask
+        self._pending_minimized_ask = None
+        self.needs_attention_text = ""
+        return pending
+
+    def _mark_minimized_done(self) -> None:
+        """Record final outcome for a minimized background session and notify the app once."""
+        if self._delivery_started_at is not None and self._delivery_finished_at is None:
+            self._delivery_finished_at = time.monotonic()
+        jobs = self.queue_jobs()
+        failed = sum(1 for j in jobs if j.state == FAILED)
+        stopped = sum(1 for j in jobs if j.state == CANCELLED)
+        if failed or self.flow_error:
+            self.minimized_outcome = "failed"
+        elif stopped or self.aborted or self.batch_cancelled:
+            self.minimized_outcome = "stopped"
+        else:
+            self.minimized_outcome = "done"
+        self.finished = True
+        if not self._minimized_notified_done:
+            self._minimized_notified_done = True
+            hook = getattr(self.app, "on_minimized_session_finished", None)
+            if callable(hook):
+                try:
+                    hook(self)
+                except Exception:
+                    pass
 
     def release_reserved_worker(self) -> None:
         """Release a pre-reserved flow worker slot if drive() never started."""
@@ -971,6 +1096,7 @@ class SessionController:
         self._leave_when_read = False
         self._signal_event(getattr(self, "_card_read", None))
         self._signal_event(getattr(self, "_delivery_dismissed", None))
+        self.release_minimized_ask(quit_flow=True)
         for host in list(self.hosts):
             host.release()
         self.release_reserved_worker()
@@ -1534,6 +1660,7 @@ class SessionController:
             self.pause_event.clear()
             self.batch_cancelled = True
             self.batch_total = None
+            self._settle_pending(CANCELLED)
             self.post_log(tr("delivery.notify.finishing_recording"), "info")
             self.post_status(tr("delivery.status.finishing_recording"))
             self._on_ui(self._refresh_delivery_keys)
@@ -1553,6 +1680,7 @@ class SessionController:
                 return False
             self._cancel_batch_locked()
             self.batch_total = None
+        self.release_minimized_ask(quit_flow=False)
         self._interrupt_network()
         # Do not authorize/emit the rest of a cancelled batch just to fill its
         # counter. Once this job finishes, delivery can return to its parent.
@@ -1601,6 +1729,9 @@ class SessionController:
             self.cancel_event.set()
             self.pause_event.clear()
             self._skip_one = True
+            if self._batch_paused:
+                self._batch_resume_requested = True
+                self._batch_condition.notify_all()
         self._interrupt_network()
         self._shutdown_active_download()
         self._on_ui(self._cancel_delivery_asks)
@@ -1677,7 +1808,13 @@ class SessionController:
 
     def is_pending_skippable(self, job: Job) -> bool:
         """Whether ``job`` is a not-yet-started queue entry the user can skip or restore."""
-        if getattr(self, "aborted", False) or getattr(self, "leaving", False):
+        if (
+            getattr(self, "aborted", False)
+            or getattr(self, "leaving", False)
+            or getattr(self, "finished", False)
+            or getattr(self, "batch_cancelled", False)
+            or getattr(self, "batch_declined", False)
+        ):
             return False
         lock = getattr(self, "_state_lock", None)
         if lock is not None:
@@ -1697,6 +1834,14 @@ class SessionController:
         Returns ``True`` when newly skipped, ``False`` when restored to queued,
         or ``None`` if the job has already started or left the pending queue.
         """
+        if (
+            getattr(self, "aborted", False)
+            or getattr(self, "leaving", False)
+            or getattr(self, "finished", False)
+            or getattr(self, "batch_cancelled", False)
+            or getattr(self, "batch_declined", False)
+        ):
+            return None
         lock = getattr(self, "_state_lock", None)
 
         def _toggle() -> bool | None:
@@ -1800,11 +1945,13 @@ class SessionController:
         if lock is not None:
             with lock:
                 for job in getattr(self, "pending_jobs", ()):
+                    job.user_skipped = False
                     if job.state == QUEUED:
                         job.state = state
                         job.note = tr("job.not_started")
         else:
             for job in getattr(self, "pending_jobs", ()):
+                job.user_skipped = False
                 if job.state == QUEUED:
                     job.state = state
                     job.note = tr("job.not_started")
@@ -1950,6 +2097,24 @@ class SessionController:
             box["value"] = BACK
             event.set()
             return
+        if self.minimized:
+            scope = getattr(ask, "scope", SCOPE_FLOW)
+            if scope != SCOPE_DELIVERY:
+                self.awaiting_answer = True
+                self.run_boundary = True
+                self._after_job()
+                self._mark_minimized_done()
+                box["quit"] = True
+                event.set()
+                return
+            self._pending_minimized_ask = (ask, box, event)
+            self.needs_attention_text = str(
+                getattr(ask, "title", "") or tr("mini_dock.action_needed", default="Action needed")
+            )
+            notify_att = getattr(self.app, "notify_minimized_attention", None)
+            if callable(notify_att):
+                notify_att(self, self.needs_attention_text)
+            return
         self._status_all("")
         # Being asked something means the flow is not producing playbacks any
         # more, which is the queue's other way of knowing it is idle when the
@@ -2077,11 +2242,13 @@ class SessionController:
         return self.flow_screen
 
     async def delivery_screen(self) -> DownloadScreen | None:
+        if self.minimized:
+            return None
         if self.delivery is None:
             from .download_screen import DownloadScreen
 
             await self._wait_for_front()
-            if self.aborted:
+            if self.aborted or self.minimized:
                 return None
             screen = DownloadScreen(self)
             self.delivery = screen
@@ -2202,7 +2369,8 @@ class SessionController:
             if self.recording_stop_requested and not (box.get("quit") or self.aborted or self.cancel_requested):
                 raise LiveRecordingStopped()
             if box.get("quit") or value is BACK or self.aborted:
-                self.request_cancel()
+                if not (getattr(self, "_batch_paused", False) and not self.aborted and not box.get("quit")):
+                    self.request_cancel()
                 raise KeyboardInterrupt("live key entry canceled")
             raw = str(value or "").strip()
             pair = split_pair(raw) if ":" in raw or "=" in raw else None
@@ -2605,7 +2773,7 @@ class SessionController:
         Back always means the page that launched this title.
         """
         self.process(playback, presenter, ctx)
-        if self._batch_paused:
+        if getattr(self, "_batch_paused", False):
             self._wait_for_batch_action(presenter, ctx)
         if self.queue_complete:
             raise Back()
@@ -2618,7 +2786,7 @@ class SessionController:
         while self._batch_paused and not self._batch_stopping():
             self.post_status(
                 tr("delivery.status.title_delay_paused")
-                if self._title_delay_active
+                if (self._title_delay_active or not self.can_retry_stopped)
                 else tr(
                     "delivery.status.stopped_paused",
                     default="Paused — ^r retry stopped title · p resume queue · Esc again to cancel batch & quit",
@@ -2939,6 +3107,9 @@ class SessionController:
                     return
                 # A failed final mux must remain visible for inspection/retry.
         if self._batch_paused or not self.queue_complete:
+            return
+        if self.minimized:
+            self._mark_minimized_done()
             return
         if self.delivery is not None:
             self.delivery.mark_done()
@@ -3945,18 +4116,38 @@ class SessionController:
 
     async def _open_delivery(self, playback: Playback, tracks: TrackSet) -> None:
         """Bring UniDL's screen up, just before it has something to show."""
+        self._delivery_playback = playback
+        self._delivery_tracks = tracks
+        self._delivery_chapter_playback = playback
+        self._delivery_started_at = time.monotonic()
+        self._delivery_finished_at = None
+        self._delivery_paused_total = 0.0
+        self._delivery_pause_started_at = None
+        self._snapshot_job(playback, tracks)
+        if self.minimized:
+            refresh_dock = getattr(self.app, "refresh_mini_dock", None)
+            if callable(refresh_dock):
+                refresh_dock()
+            return
         screen = await self.delivery_screen()
         if screen is None:
             return
-        self._snapshot_job(playback, tracks)
         screen.describe(playback, tracks)
 
     async def _refresh_delivery(self, playback: Playback, tracks: TrackSet) -> None:
         """Refresh the delivery card after the selected-track probes finish."""
+        self._delivery_playback = playback
+        self._delivery_tracks = tracks
+        self._delivery_chapter_playback = playback
+        self._snapshot_job(playback, tracks)
+        if self.minimized:
+            refresh_dock = getattr(self.app, "refresh_mini_dock", None)
+            if callable(refresh_dock):
+                refresh_dock()
+            return
         screen = await self.delivery_screen()
         if screen is None:
             return
-        self._snapshot_job(playback, tracks)
         screen.describe(playback, tracks, reset_clock=False)
 
     async def _present_card(self, panel: Panel) -> None:

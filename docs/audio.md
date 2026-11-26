@@ -1,5 +1,7 @@
 # Audio-only services
 
+[English](audio.md) | [简体中文](zh-CN/audio.md)
+
 Radio and podcasts are not video with the picture missing. There is no quality
 ladder to rank, the native delivery core refuses `--audio-format` if a video track is selected, and
 the output wants ID3 tags that video has no use for. Treating audio as a special

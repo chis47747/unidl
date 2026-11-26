@@ -338,8 +338,13 @@ def _contain_image(
     from PIL import Image, ImageOps
 
     width, height = _contain_dimensions(image, max_width, max_height)
-    cell_width, cell_height = protocol_cell_size() or (1, 2)
-    scale = 8
+    cell_size = protocol_cell_size()
+    if cell_size is not None:
+        cell_width, cell_height = cell_size
+        scale = 1
+    else:
+        cell_width, cell_height = (1, 2)
+        scale = 8
     canvas = Image.new("RGB", (max(1, width * cell_width * scale), max(1, height * cell_height * scale)), background)
     fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
     canvas.paste(fitted, ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2))
@@ -356,8 +361,13 @@ def _letterbox_image(
     """Build a canvas matching a widget's exact terminal area."""
     from PIL import Image, ImageOps
 
-    cell_width, cell_height = protocol_cell_size() or (1, 2)
-    scale = 8
+    cell_size = protocol_cell_size()
+    if cell_size is not None:
+        cell_width, cell_height = cell_size
+        scale = 1
+    else:
+        cell_width, cell_height = (1, 2)
+        scale = 8
     canvas_size = (max(1, int(target_width) * cell_width * scale), max(1, int(target_height) * cell_height * scale))
     canvas = Image.new("RGB", canvas_size, background)
     fitted = ImageOps.contain(image.convert("RGB"), canvas.size, Image.Resampling.LANCZOS)
@@ -427,7 +437,14 @@ class AudioPreviewWidget(Vertical):
             self._paint_cover(self._raw_image)
 
     def on_resize(self) -> None:
+        old_size = getattr(self, "_cover_size", None)
         self._apply_layout()
+        if (
+            self._raw_image is not None
+            and getattr(self, "_cover_size", None) != old_size
+            and int(self.size.height or 0) >= MIN_COVER_HEIGHT + 2
+        ):
+            self._paint_cover(self._raw_image)
 
     def _tag_count(self) -> int:
         if self.preview is None:
@@ -565,9 +582,12 @@ class AudioPreviewWidget(Vertical):
     def _paint_cover(self, image: Image.Image) -> None:
         target = self.query_one("#audio-cover")
         status = self.query("#audio-cover-status")
+        compact = int(self.size.height or 0) < MIN_COVER_HEIGHT + 2
         if status:
             status.first().display = False
-            target.display = True
+            target.display = not compact
+        if compact:
+            return
         if protocol_image_class() is not None and not isinstance(target, Static):
             palette = getattr(self.app, "palette", None)
             on_recessed = any(getattr(ancestor, "id", None) == "delivery-audio-side" for ancestor in self.ancestors)

@@ -1,5 +1,7 @@
 # Troubleshooting
 
+[English](troubleshooting.md) | [简体中文](zh-CN/troubleshooting.md)
+
 Turn on `debug` first (`s` -> Interface & diagnostics -> Debug mode). It writes a
 timestamped session log and a separate timestamped per-task log under
 `paths.logs`, keeps temp files, and records the resolved UniDL command. Signed
@@ -121,11 +123,11 @@ such as `Strickland`. If a service uses different wording, extend the regex.
 
 ## The track picker is empty or missing tracks
 
-- HLS masters are parsed shallowly by default for speed. native delivery core's `--details`
+- HLS masters are parsed shallowly by default for speed. Native delivery core's `--details`
   equivalent is not yet exposed as a setting; the manifest may need it.
 - `drop_video` may be filtering too aggressively. Check the regex.
 - Some CDNs need the manifest's query parameters copied onto child playlists.
-  native delivery core does this automatically for hosts it recognises.
+  Native delivery core does this automatically for hosts it recognises.
 
 ## Downloads stall near the end
 
@@ -156,17 +158,40 @@ Also by design. A focused text input consumes printable keys, so `s`, `d` and
 `b` type instead of triggering. Move focus out of the input, or use the click
 targets in the top bar.
 
+## Scheduled job stops with `needs_auth` or `needs_review`
+
+- **`needs_auth`**: scheduled runs are headless and never block on an
+  interactive sign-in prompt. Open that service in the TUI, sign in again, then
+  select **Run now** (or `unidl schedule run --id <job-id> --force`).
+- **`needs_review`**: in-service search found multiple close candidates and
+  refused to guess. Edit the job to add a release year or switch **Lookup
+  mode** to **Direct URL / ID**, then test with **Test lookup (Dry-run)** or
+  `unidl schedule run --id <job-id> --dry-run`.
+- To inspect whether the OS background host is active, open **Scheduled
+  downloads → Settings → Background host scheduler** or run
+  `unidl schedule host status`.
+
+## Posters do not appear in macOS Terminal.app
+
+By design. macOS's built-in `Terminal.app` does not support Kitty Graphics
+Protocol or Sixel, so `poster_preview = auto` hides the poster panel with zero
+image requests. Use Ghostty, Kitty, iTerm2, or WezTerm for native crisp
+posters, or switch **Poster preview** to **Always** (or press `p` on screen) to
+enable solid-cell colour previews.
+
 ## Where things are
 
 | | |
 |---|---|
 | config | Checkout-root `unidl.yaml`, current-directory `unidl.yaml` for a packaged install, or the explicit `--config PATH` |
 | settings | `<paths.home>/settings.json` |
+| schedules | `<paths.home>/schedules.json` (and lock `<paths.home>/schedules.lock`) |
 | tokens | `<paths.tokens>/<service>/` |
 | key vault | `paths.keys_db` |
 | exported commands | `<paths.commands>/<service>/` |
 | task logs | `paths.logs` |
 | segment cache | `paths.temp` |
+| poster cache | `<paths.cache>/posters/` |
 | finished media | The effective download folder, shown in Readiness, with one folder per service. The bundled configuration defaults to project-relative `downloads/`. |
 
 ## Reproducing outside the interface

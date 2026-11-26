@@ -47,6 +47,18 @@ def _build_parser() -> argparse.ArgumentParser:
     keys.add_argument("kid", nargs="?", help="look up a single KID")
     keys.add_argument("--service", help="limit to one service")
 
+    sched = sub.add_parser("schedule", help="manage and run scheduled downloads")
+    sched_sub = sched.add_subparsers(dest="schedule_action", metavar="{list,run,daemon,host}")
+    sched_sub.add_parser("list", help="list scheduled jobs and exit")
+    sched_run = sched_sub.add_parser("run", help="run due scheduled jobs (or one --id) and exit")
+    sched_run.add_argument("--id", dest="job_id", help="run one specific job ID regardless of time")
+    sched_run.add_argument("--dry-run", action="store_true", help="verify login, title match and episodes without downloading")
+    sched_daemon = sched_sub.add_parser("daemon", help="keep checking and running scheduled jobs in the background")
+    sched_daemon.add_argument("--interval", type=int, default=60, help="polling interval in seconds (default: 60)")
+    sched_host = sched_sub.add_parser("host", help="install or inspect OS background scheduling (launchd / systemd / Task Scheduler)")
+    sched_host.add_argument("host_action", choices=("status", "install", "uninstall"))
+    sched_host.add_argument("--interval", type=int, default=5, help="check interval in minutes (default: 5)")
+
     return parser
 
 
@@ -74,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         return _list_cdm(config, check=args.check)
     if args.command == "keys":
         return _keys(config, args)
+    if args.command == "schedule":
+        return _schedule(config, args)
 
     from .tui.app import run
 
@@ -174,6 +188,97 @@ def _keys(config, args) -> int:
         return 0
     finally:
         collection.close()
+
+
+def _schedule(config, args) -> int:
+    import signal
+    import time
+
+    from .core import schedule_host, scheduler
+
+    action = getattr(args, "schedule_action", None) or "list"
+    if action == "host":
+        host_action = getattr(args, "host_action", "status")
+        interval = max(1, int(getattr(args, "interval", 5) or 5))
+        if host_action == "install":
+            status = schedule_host.install_host_scheduler(config, interval_minutes=interval)
+        elif host_action == "uninstall":
+            status = schedule_host.uninstall_host_scheduler(config)
+        else:
+            status = schedule_host.get_host_status(config)
+        state = "active" if status.active else ("installed" if status.installed else "off")
+        print(f"backend={status.backend}  state={state}  interval={status.interval_minutes}m")
+        if status.target_path:
+            print(f"target: {status.target_path}")
+        if status.detail:
+            print(f"detail: {status.detail}")
+        return 0 if status.supported else 1
+
+    store = scheduler.ScheduleStore(scheduler.schedule_store_path(config.paths.home))
+    if action == "list":
+        jobs = store.list_jobs()
+        if not jobs:
+            print("No scheduled jobs.")
+            return 0
+        for job in jobs:
+            due = scheduler.format_local_time(job.next_attempt_at or job.run_at)
+            state = job.status if job.enabled else "paused"
+            extra = f" [{job.episode_expr}]" if job.episode_expr else ""
+            print(f"{job.id:<10} {state:<16} {due:<18} {job.service_id:<14} {job.name}{extra}")
+        return 0
+
+    from . import services
+    from .core.service import registry
+
+    config.paths.ensure()
+    services.load_all(config)
+
+    if action == "run":
+        results = scheduler.run_due_jobs(
+            config=config,
+            job_id=getattr(args, "job_id", None),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            service_registry=registry,
+            on_log=lambda line: print(line),
+        )
+        if not results:
+            print("No due scheduled jobs.")
+            return 0
+        failed = 0
+        for item in results:
+            print(f"{item.job.id}  {item.record.status:<16} {item.record.summary}")
+            if not item.ok:
+                failed += 1
+        return 1 if failed else 0
+
+    if action == "daemon":
+        interval = max(5, int(getattr(args, "interval", 60) or 60))
+        stopping = False
+
+        def _stop(_sig, _frame) -> None:
+            nonlocal stopping
+            stopping = True
+
+        signal.signal(signal.SIGINT, _stop)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, _stop)
+        print(f"UniDL scheduler daemon running (poll every {interval}s)...")
+        while not stopping:
+            results = scheduler.run_due_jobs(
+                config=config,
+                service_registry=registry,
+                on_log=lambda line: print(line),
+            )
+            for item in results:
+                print(f"{item.job.id}  {item.record.status:<16} {item.record.summary}")
+            for _ in range(interval):
+                if stopping:
+                    break
+                time.sleep(1)
+        print("UniDL scheduler daemon stopped.")
+        return 0
+
+    return 1
 
 
 if __name__ == "__main__":

@@ -24,6 +24,12 @@ class UnidlCommands(Provider):
         entries: list[tuple[str, str, object, tuple[str, ...]]] = [
             (tr("palette.search"), tr("palette.search_help"), app.action_global_search, ()),
             (
+                tr("palette.schedule", default="Scheduled downloads"),
+                tr("palette.schedule_help", default="Manage timed downloads, upcoming radar, and background host"),
+                app.action_open_schedule,
+                ("schedule", "timer", "upcoming", "radar", "cron", "launchd"),
+            ),
+            (
                 tr("palette.add_keys"),
                 tr("palette.add_keys_help"),
                 app.action_add_keys,
@@ -33,8 +39,8 @@ class UnidlCommands(Provider):
             (
                 tr("palette.shortcuts"),
                 tr("palette.shortcuts_help"),
-                app.action_show_shortcuts,
-                ("?", "keys", "help", "hotkeys"),
+                partial(app.open_shortcuts, ignore_input_focus=True),
+                ("?", "f1", "keys", "help", "hotkeys"),
             ),
             (
                 tr("palette.theme"),
@@ -48,9 +54,24 @@ class UnidlCommands(Provider):
                 (),
             ),
             (tr("palette.back"), tr("palette.back_help"), app.action_global_back, ()),
-            (tr("palette.quit"), tr("palette.quit_help"), app.action_global_quit, ()),
+            (tr("palette.quit"), tr("palette.quit_help"), app.action_palette_quit, ()),
         ]
-        if not app.has_active_session():
+        if getattr(app, "dock_items", None) or getattr(app, "minimized_sessions", ()):
+            entries.insert(
+                0,
+                (
+                    tr("palette.restore_download", default="Restore background download"),
+                    tr("palette.restore_download_help", default="Reopen the minimized download screen"),
+                    app.action_restore_minimized_download,
+                    ("minimize", "download", "background", "pip", "restore"),
+                ),
+            )
+        has_fg = (
+            app.has_foreground_session()
+            if hasattr(app, "has_foreground_session")
+            else app.has_active_session()
+        )
+        if not has_fg:
             for service in app.services:
                 features = ", ".join(
                     name

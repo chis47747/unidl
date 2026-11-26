@@ -1,5 +1,7 @@
 # Experimental home
 
+[English](home-interface.md) | [简体中文](zh-CN/home-interface.md)
+
 The classic service-list home remains the default. To try the search-first
 layout, open **Settings → Interface & diagnostics → Beta interface** and enable
 it. The change takes effect when you return home; it never replaces an active
@@ -23,8 +25,8 @@ Export-path imports in Auto follow the export-files checkbox; explicit Open
 link and Search export files keep their existing import behavior. Classic Home,
 global search, manual Add keys and remote-vault policy are unchanged.
 
-The UniDL banner and the CDM, DRM, after-picking, configuration, readiness and
-import controls are unchanged. The experimental layout replaces the persistent
+The UniDL banner and the CDM, DRM, after-picking, readiness, import and
+schedule controls are unchanged. The experimental layout replaces the persistent
 service grid with a single outlined search bar and a local result list.
 In Auto, each result starts with a short category label, such as **[Service]**,
 **[Export]**, **[Vault]**, **[Setting]**, **[JustWatch]**, **[Service search]** or
@@ -148,6 +150,8 @@ You can also paste a command with its query, then press Enter:
 - `/vault 0123456789abcdef0123456789abcdef`
 - `/addkeys` (optionally followed by a `KID:KEY` pair)
 - `/settings default_subtitle`
+- `/schedule` (opens Scheduled downloads)
+- `/radar` (opens Upcoming Radar)
 - `/auto BBC`
 
 These aliases are stable English commands; the visible menus and help follow

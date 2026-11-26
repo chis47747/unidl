@@ -1,5 +1,7 @@
 # Key vault
 
+[English](key-vault.md) | [简体中文](zh-CN/key-vault.md)
+
 An ordered set of content-key stores. With no `key_vaults` configuration this
 is one local SQLite database at `paths.keys_db`; it can also include more SQLite
 files and HTTP API vaults. **Settings → DRM & vaults** manages the definitions and

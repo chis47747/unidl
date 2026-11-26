@@ -2,6 +2,8 @@
 
 # Interface
 
+[English](interface.md) | [简体中文](zh-CN/interface.md)
+
 Four core screens carry a session: Home, the service menu, the service flow,
 and delivery. Settings, search, availability and the CDM picker are overlays on
 top of that sequence.
@@ -11,7 +13,7 @@ top of that sequence.
 ```
    esc Quit                                             ^f Search  ^s Settings
    UNIDL
-   cdm samsung_l3 · drm Widevine · after picking download · config unidl.yaml
+   cdm samsung_l3 · drm Widevine · after picking download · ready · import · schedule
 
    SERVICES  available services
      1  BBC iPlayer
@@ -223,16 +225,30 @@ Multi-selects arrive with the automatic choice already ticked, so `enter`
 accepts it. That is how the track picker starts on whatever the track settings
 resolved to.
 
-## Command palette
+## Command palette and shortcuts reference
 
-`ctrl+p` opens a searchable list of every global action and every registered
-service. This avoids memorising either service names or shortcuts.
+- `ctrl+p` opens a searchable command palette covering global actions
+  (including **Scheduled downloads**, **Add keys**, **Settings**, **Theme**,
+  and **Shortcuts**) and every registered service.
+- `?` opens the keyboard shortcuts reference modal scoped to the current
+  context.
+- On Settings screens, `m` toggles the **Modified only** filter to inspect
+  non-default choices quickly.
+- On Scheduled downloads, Upcoming Radar, and JustWatch screens, `p` toggles
+  the 2:3 poster and metadata inspector rail.
 
-## Colour
+## Colour and appearance
 
-The default palette is dark: a near-black `#141414` base with a violet
-`#bb9af7` accent. Light is the counterpart. Switch with `ctrl+t`, the command
-palette, or the `theme` setting.
+Seven built-in themes are available under **Settings → Interface & diagnostics**:
+`Dark` (default), `Light`, `Tokyo Night`, `Catppuccin Mocha`, `Nord`, `Gruvbox`,
+and `High Contrast`. You can also customize the system accent (9 presets), Home
+banner color (12 gradient/solid presets), layout density (`Auto`, `Comfortable`,
+`Compact`), and status colors (`Default` or colorblind-friendly Okabe–Ito).
+Every appearance picker previews changes live as you move the highlight;
+press `Enter` or **Apply** to save, or `Esc` to restore. `ctrl+t` quickly
+toggles between dark and light themes.
+
+Default Dark role colours:
 
 | Meaning | Colour |
 |---------|--------|

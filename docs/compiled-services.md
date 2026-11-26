@@ -1,5 +1,7 @@
 # Compiled-only services
 
+[English](compiled-services.md) | [简体中文](zh-CN/compiled-services.md)
+
 UniDL accepts two service package forms:
 
 * **source** (the default): a Python package containing a `Service` subclass;

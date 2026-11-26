@@ -390,7 +390,7 @@ class GlobalSearchScreen(Screen):
                     [_Row("key", record=record) for record in self._remote_records],
                     heading=tr(
                         "search.section.remote_result",
-                        vault=f"{self._remote_vault}{self._remote_scope_note()}",
+                        vault=visual_markup(f"{self._remote_vault}{self._remote_scope_note()}"),
                     ),
                 )
             self._add_section(option_list, "local_keys", key_rows)
@@ -623,7 +623,7 @@ class GlobalSearchScreen(Screen):
         event.stop()
         option_list = self.query_one("#service-table", OptionList)
         row = self._row_at(option_list.highlighted)
-        if row is None or row.kind == "more":
+        if row is None:
             row = self._first_actionable()
         if row is not None:
             self._activate(row)

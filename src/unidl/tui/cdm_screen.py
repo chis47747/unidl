@@ -263,6 +263,8 @@ class CdmScreen(Screen[str | None]):
             option_list.add_option(
                 Option(f"  [$dim]{tr('cdm.no_match', query=_esc(needle))}[/]", disabled=True)
             )
+            if self.allow_default:
+                option_list.highlighted = 0
             return
 
         # every registered system, not a hardcoded pair: a newly registered

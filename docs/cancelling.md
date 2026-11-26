@@ -1,5 +1,7 @@
 # Pausing and stopping a download
 
+[English](cancelling.md) | [简体中文](zh-CN/cancelling.md)
+
 The delivery chrome **Pause** control holds the native transfer in place. The
 download/record screen does not change, workers wait between segments, and the
 same control becomes **Resume** so you can continue the same job. It is not a

@@ -1,8 +1,14 @@
 # Settings
 
+[English](settings.md) | [简体中文](zh-CN/settings.md)
+
 Three tiers, kept apart on purpose. Click Settings or press `ctrl+s` anywhere
 to edit them; plain `s` is the shorter form when no text field has focus.
-Changes persist immediately and apply to the next request without a restart.
+Press `m` on a settings screen or manager group to filter down to modified
+settings only, and `r` to reset the highlighted row to its default (or back to
+global inheritance on a service override). Text editors warn before discarding
+unsaved edits on `Esc` or Cancel. Changes persist immediately and apply to the
+next request without a restart.
 
 The experimental Home's **Find settings** mode and enabled Auto setting results
 include both ordinary preferences and actions inside settings managers. Search
@@ -147,7 +153,7 @@ A write that fails - read-only home, full disk - is recorded rather than raised,
 so it can be reported instead of looking like a setting that would not stick.
 
 ```
-Global                six concise managers for download, DRM/vault, files, proxy, interface and JustWatch
+Global                seven concise managers: Download behavior, Services, DRM & vaults, Files & naming, Proxy & VPN, JustWatch search, and Interface & diagnostics
 <Service>             that service's own vocabulary
 Tracks and output     the shared quality vocabulary
 ```
@@ -242,16 +248,22 @@ heartbeat interval is part of the shared settings contract.
 | `resource_manager` | manager screen | — | Opens **DRM & vaults**, the single place to choose the app-wide DRM/CDM, edit CDM rules, add/edit/delete remote CDMs and vaults, enable/disable backends, choose local vaults, and open vault policy. |
 | `storage_manager` | manager screen | — | Opens **Files & naming**, the single place to edit ordinary output folders and file-name templates, preview a sample release name, and inspect sensitive runtime paths without moving them. |
 | `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints and HTTPS proxy providers are managed together. |
-| `justwatch_manager` | manager screen | — | Opens **JustWatch search**, where the one title-catalogue country and the separate availability-country list are edited together. The two underlying values remain independent. |
-| `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns `theme`, `interface_locale`, `beta_interface`, `beta_auto_results` and `debug`. |
-| `after_resolve` | `download` / `command` / `ask` | `download` | Compatibility key controlled by **Download behavior**. `command` reproduces the old scripts' behaviour of only emitting a command; the main screen shortcut `d` still cycles it. |
+| `justwatch_manager` | manager screen | — | Opens **JustWatch search**, where the title-catalogue country, availability-country list, Upcoming Radar data sources, and optional TMDB API key are edited together. Each underlying value remains independent. |
+| `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns `theme`, `accent_color`, `title_color`, `layout_density`, `semantic_colors`, `completion_alert`, `poster_preview`, `interface_locale`, `beta_interface`, `beta_auto_results` and `debug`. |
+| `after_resolve` | `download` / `command` / `list` / `export` / `ask` | `download` | Compatibility key controlled by **Download behavior**. `command` writes a reproducible command file; `list` prints the parsed ladder without licensing; `export` writes a portable JSON bundle. The Home shortcut `d` cycles all five modes. |
 | `fetch_actual_bitrate` | on / off | **on** | Controlled by **Settings → Services → Actual video bitrate by service** or the individual service's settings. Unconfigured services inherit the global default; saved service overrides are independent. Press `r` on a service row to resume inheritance. Existing global preferences are preserved. After the final video tracks are selected and the download details screen is visible, UniDL samples distributed media segments to show an actual bitrate beside the manifest estimate. During that same probe it may read the selected video's bounded MP4 initialization metadata to correct a missing HLG/HDR label before final naming. A probe is accepted only when the complete segment size is known; unreliable CDN responses are omitted. Off skips all of this and keeps manifest metadata only. |
 | `drm_system` | registered DRM systems | first registered system | Compatibility key controlled by **DRM & vaults → DRM system**. A service that declares exactly one system pins that system; a multi-system service may expose its own override. |
 | `cdm_rules` | resolution-to-device rules | empty | Compatibility key controlled by **DRM & vaults → CDM rules**. Rules choose the app-wide CDM by output resolution and never replace a service's own CDM setting. |
-| `theme` | `dark` / `light` | `dark` | Compatibility key controlled by **Interface & diagnostics**. Also switch with `ctrl+t`; changes repaint the current screen immediately. |
+| `theme` | `dark` / `light` / `tokyo_night` / `catppuccin` / `nord` / `gruvbox` / `high_contrast` | `dark` | Controlled by **Interface & diagnostics → Theme**. Supports live real-time preview while navigating choices (`Enter` / **Apply** saves; `Esc` restores). `ctrl+t` cycles dark and light; changes repaint immediately. |
+| `accent_color` | `violet` / `colorful` / `blue` / `cyan` / `green` / `amber` / `orange` / `rose` / `mono` | `violet` | Controlled by **Interface & diagnostics → Accent color** with live real-time preview. |
+| `title_color` | `accent` / `rainbow` / `aurora` / `sunset` / `ocean` / `violet` / `blue` / `cyan` / `green` / `amber` / `orange` / `rose` / `mono` | `accent` | Controlled by **Interface & diagnostics → Home title color** with live real-time preview; `accent` follows the system accent color. |
+| `layout_density` | `auto` / `comfortable` / `compact` | `auto` | Controlled by **Interface & diagnostics → Layout density** with live real-time preview. `auto` adapts spacing to terminal height; `compact` tightens spacing on tall windows too. |
+| `semantic_colors` | `default` / `colorblind` | `default` | Controlled by **Interface & diagnostics → Status colors** with live preview. `colorblind` uses an Okabe–Ito high-distinction status palette for OK/warning/error indicators. |
+| `completion_alert` | `off` / `auto` / `bell` | `off` | Controlled by **Interface & diagnostics → Completion alert**. `auto` sends a desktop notification when a download finishes; `bell` rings the terminal bell. |
+| `poster_preview` | `auto` / `always` / `off` | `auto` | Controlled by **Interface & diagnostics → Poster preview** (and **Scheduled downloads → Settings**). `auto` enables native Kitty/Sixel posters on supported terminals (`>= 104×20`) and hides them with zero HTTP fetches on macOS `Terminal.app` or narrow windows; `always` adds text-cell/solid-cell fallback; `off` disables posters everywhere. |
 | `beta_interface` | on / off | **off** | **Interface & diagnostics → Beta interface** enables the experimental search-first home. Applies on returning home without interrupting active sessions; off retains the classic service list. See [Experimental home](home-interface.md). |
 | `beta_auto_results` | multiple selection: `services`, `exports`, `vault`, `settings`, `justwatch`, `catalog`, `url` | **all selected** | **Interface & diagnostics → Beta home Auto result types** controls automatic searches, results and action rows in the experimental home's Auto mode. Unchecked types remain available through explicit modes and slash commands. An empty selection disables all Auto results; it does not restore defaults. Hidden Vault and export sources are not automatically queried. Remote vault lookup remains explicit. |
-| `interface_locale` | `system` / `en` / `zh-Hans` / `zh-Hant` / `es` / `fr` / `pt` / `it` / `ja` / `ko` / `ru` / `de` | `system` | Compatibility key controlled by **Interface & diagnostics**. Language of UniDL's own labels and settings. German is shown as Deutsch. Service names, titles, URLs and API locales are not translated. |
+| `interface_locale` | `system` / `en` / `zh-Hans` / `zh-Hant` / `es` / `fr` / `pt` / `it` / `ja` / `ko` / `ru` / `de` / `ar` | `system` | Compatibility key controlled by **Interface & diagnostics**. Language of UniDL's own labels and settings (12 shipped catalogues, including RTL Arabic `ar` and German shown as `Deutsch`). Service names, titles, URLs and API locales are not translated. |
 | `local_vault` | on / off | on | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden under **License and vaults**. It governs automatic local lookup; it is not a duplicate backend-enable switch. |
 | `remote_vault` | on / off | off | Global **DRM & vaults → Vault policy** value, inherited by each service until explicitly overridden. It remains the master network/write safety gate for remote-vault operations. |
 | `remote_vault_home_search` | on / off | on | Compatibility key controlled by **Vault policy → Remote operations**. Offers an explicit remote KID search row on the Home/search screen; it never searches while typing and requires a selected searchable backend. This explicit action is independent from the automatic playback/write `remote_vault` gate. |
@@ -285,8 +297,10 @@ heartbeat interval is part of the shared settings contract.
 | `live_keep_segments` | on / off | off | Compatibility key controlled by **Download behavior**. Keep per-segment live files. |
 | `live_pipe_mux` | on / off | on | Compatibility key controlled by **Download behavior**. Mux compatible live audio/video while recording into a visible, growing file in the download directory. When unavailable/disabled, tracks are muxed after recording stops normally. Audio conversion may disable pipe mux. |
 | `fetch_chapters` | on / off | on | Legacy global default for services without an explicit chapter policy. Edit each service under **Services → Chapter metadata by service**, or in its own settings. Acquisition and **Embed chapters in the final file** are independent. |
-| `justwatch_search_region` | one ISO country code | first built-in region | Compatibility key controlled by **JustWatch search → Title catalogue**. The JustWatch search screen can edit it directly. |
+| `justwatch_search_region` | one ISO country code | first built-in region | Compatibility key controlled by **JustWatch search → Title catalogue**. The JustWatch search screen and Upcoming Radar also use it. |
 | `justwatch_regions` | comma-separated ISO country codes | built-in region list | Availability lookup order. Each region is a separate request; edit it from Settings or the region picker. See [availability.md](availability.md). |
+| `upcoming_sources` | multi-select: `justwatch`, `tvmaze`, `anilist`, `tmdb` | `justwatch, tvmaze, anilist` | Controlled by **JustWatch search → Upcoming release sources** and **Scheduled downloads → Settings**. Supports multi-select (`space`) or single-select (`o`). Selecting `tmdb` without a key immediately prompts for one. |
+| `tmdb_api_key` | string (v3 API key or v4 Bearer token) | empty | Controlled by **JustWatch search → TMDB API key** and **Scheduled downloads → Settings**. Stored privately (`0600`) in `settings.json` and masked/redacted in UI, logs, and readiness diagnostics. |
 
 ### Ending a live recording
 
@@ -308,22 +322,30 @@ heartbeat interval is part of the shared settings contract.
 - Ordinary VOD cancellation and live replay taken **as VOD** keep their existing
   cancellation/resume behaviour.
 
-### JustWatch search
+### JustWatch search & Upcoming Radar sources
 
-The manager presents two deliberately different choices:
+The **JustWatch search** manager groups four related discovery settings:
 
 - **Title catalogue** (`justwatch_search_region`) is one country. It decides which
-  catalogue supplies title matches and localized names.
+  catalogue supplies title matches, localized names, and regional Upcoming Radar
+  streaming availability.
 - **Availability regions** (`justwatch_regions`) is a list. JustWatch makes one
   offer lookup per country to answer where the selected title is available.
+- **Upcoming release sources** (`upcoming_sources`) chooses one or more sources
+  (`JustWatch`, `TVMaze`, `AniList`, `TMDB`) for the Upcoming Radar tab inside
+  **Scheduled downloads**.
+- **TMDB API key** (`tmdb_api_key`) stores an optional masked TMDB v3 API key or
+  v4 Read Access Token.
 
-The JustWatch search screen and the availability results screen keep their own
-`Ctrl+R` pickers, so a one-off lookup does not require opening global Settings.
+The JustWatch search and availability screens keep their own `Ctrl+R` region
+pickers, and **Scheduled downloads → Settings** exposes the radar sources, TMDB
+key, region, and poster preview controls in one place.
 
-The first-level menu deliberately contains only these six managers: **Download
-behavior**, **DRM & vaults**, **Files & naming**, **Proxy & VPN**, **JustWatch
-search**, and **Interface & diagnostics**. The rows below that table are compatibility
-keys and are not duplicated in the main menu.
+The first-level Global Settings menu deliberately contains only these seven
+managers: **Download behavior**, **Services**, **DRM & vaults**, **Files &
+naming**, **Proxy & VPN**, **JustWatch search**, and **Interface & diagnostics**.
+The rows below them in the table above are persisted compatibility keys and are
+not duplicated on the top-level menu.
 
 ### Files & naming
 

@@ -33,8 +33,10 @@ _PHRASES: dict[str, str] = {
     "Settings": "chrome.settings",
     "Pause": "chrome.pause",
     "Resume": "chrome.resume",
+    "Minimize": "chrome.minimize",
     "pause": "chrome.pause",
     "resume": "chrome.resume",
+    "minimize": "chrome.minimize",
     "Stopping": "chrome.stopping",
     "Starting": "chrome.starting",
     "Done": "chrome.done",
@@ -136,6 +138,7 @@ _PHRASES: dict[str, str] = {
     "register": "keys.register",
     "use default": "keys.use_default",
     "Enabled": "value.enabled",
+    "Close": "common.close",
     "Cancel": "common.cancel",
     "Delete": "common.delete",
     "Apply": "common.apply",
@@ -1001,11 +1004,18 @@ def setting_value(spec: Any, scope: Any) -> str:
     if getattr(spec, "key", "") == "title_delay":
         value = str(scope.get(spec.key) or "off").strip()
         return tr("value.off") if value.casefold() == "off" else value
+    if getattr(spec, "key", "") == "tmdb_api_key":
+        raw = str(scope.get(spec.key) or "").strip()
+        if not raw:
+            return tr("value.not_set", default="not set")
+        tail = raw[-4:] if len(raw) >= 6 else ""
+        return f"••••••{tail}" if tail else "••••••"
     if getattr(spec, "picker", "") in {
         "resources",
         "storage",
         "proxy_manager",
         "justwatch",
+        "services_manager",
         "download_behavior",
         "interface",
     }:

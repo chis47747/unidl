@@ -18,6 +18,8 @@ worker and the screen says which region it is on. Nothing here blocks the loop.
 
 from __future__ import annotations
 
+import json
+
 from rich.cells import set_cell_size
 from textual import work
 from textual.app import ComposeResult
@@ -32,8 +34,18 @@ from textual.widgets.selection_list import Selection
 from ..core import justwatch as jw
 from ..core.i18n import cell_width, tr
 from ..core.terminal_cells import crop as crop_cells
+from .bidi import escape_markup
 from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
 from .filterbox import FILTER_MIN, FilterBox, as_number, matches
+from .poster import (
+    DEFAULT_POSTER_PREVIEW,
+    POSTER_MIN_SCREEN_HEIGHT,
+    POSTER_MIN_SCREEN_WIDTH,
+    PosterItem,
+    PosterPreviewWidget,
+    normalize_poster_preview,
+    should_show_poster,
+)
 
 #: how many search results to ask for
 RESULT_COUNT = 12
@@ -348,6 +360,70 @@ class RegionScreen(Screen[list]):
         return True
 
 
+def _poster_mode_for(app, override: str | None = None) -> str:
+    if override is not None:
+        return normalize_poster_preview(override)
+    return normalize_poster_preview(
+        app.globals.get("poster_preview", DEFAULT_POSTER_PREVIEW)
+    )
+
+
+def _poster_chip_text(mode: str, visible: bool, renderer: str) -> str:
+    label = tr(f"poster.mode.{mode}", default=mode)
+    if not visible:
+        return tr("poster.chip_hidden", mode=label, default=f"posters: {label} (hidden)")
+    if renderer == "protocol":
+        return tr("poster.chip_on", mode=label, default=f"posters: {label}")
+    return tr("poster.chip_fallback", mode=label, default=f"posters: {label} (cells)")
+
+
+def _cycle_poster_override(app, current_override: str | None, width: int, height: int) -> tuple[str | None, str]:
+    """Toggle poster visibility in-screen without breaking macOS Terminal.app defaults."""
+    if width < POSTER_MIN_SCREEN_WIDTH:
+        return current_override, tr(
+            "poster.notify_narrow",
+            default=f"Terminal is too narrow for the poster rail (need >= {POSTER_MIN_SCREEN_WIDTH} cols).",
+        )
+    if height < POSTER_MIN_SCREEN_HEIGHT:
+        return current_override, tr(
+            "poster.notify_short",
+            default=f"Terminal is too short for the poster rail (need >= {POSTER_MIN_SCREEN_HEIGHT} rows).",
+        )
+    mode = _poster_mode_for(app, current_override)
+    visible, _renderer, reason = should_show_poster(mode, width=width, height=height)
+    if visible:
+        return "off", ""
+    if reason == "dumb":
+        return current_override, tr("poster.notify_unsupported", default="Posters are unavailable in a dumb terminal.")
+    # Currently hidden due to off or auto-no-protocol -> enable (auto if native works, else always fallback).
+    auto_ok, _auto_r, _auto_reason = should_show_poster("auto", width=width, height=height)
+    if auto_ok:
+        return "auto", ""
+    return "always", tr(
+        "poster.notify_fallback",
+        default="Terminal has no native image protocol; enabled text-cell poster preview (press p to hide).",
+    )
+
+
+def _title_poster_item(title: jw.Title, *, footer: str = "") -> PosterItem:
+    meta: list[tuple[str, str]] = []
+    if title.original_name and title.original_name != title.name:
+        meta.append((tr("poster.meta.original", default="Original"), title.original_name))
+    if title.genres:
+        meta.append((tr("poster.meta.genres", default="Genres"), ", ".join(title.genres[:4])))
+    if title.imdb_id:
+        meta.append(("IMDb", title.imdb_id))
+    subtitle_bits = [part for part in (title.year, title.kind_label) if part]
+    return PosterItem(
+        title=title.name,
+        subtitle=" · ".join(subtitle_bits),
+        poster_url=title.poster_url,
+        meta_lines=tuple(meta),
+        synopsis=title.synopsis,
+        footer_hint=footer,
+    )
+
+
 class JustWatchScreen(Screen):
     """Search results from JustWatch, for one term."""
 
@@ -357,6 +433,8 @@ class JustWatchScreen(Screen):
         Binding("ctrl+s", "app.global_settings", "Settings", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "regions", "Regions", show=False),
+        Binding("p", "toggle_poster", "Toggle poster", show=False),
+        Binding("t", "schedule", "Schedule", show=False),
         Binding("up", "cursor(-1)", "Up", show=False),
         Binding("down", "cursor(1)", "Down", show=False),
         Binding("pageup", "cursor(-10)", "Page up", show=False),
@@ -371,6 +449,7 @@ class JustWatchScreen(Screen):
         self._generation = 0
         self._last_search_region = ""
         self._last_regions: tuple[str, ...] = ()
+        self._poster_override: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Chrome()
@@ -378,28 +457,54 @@ class JustWatchScreen(Screen):
         with Horizontal(id="statusline"):
             yield StatusChip("regions", id="region-chip")
             yield Static("·", classes="chip-sep")
+            yield StatusChip("toggle_poster", id="poster-chip")
+            yield Static("·", classes="chip-sep")
             yield Static("", id="subhead", classes="pill chip-static")
         with Vertical(id="body"):
-            yield OptionList(id="result-list")
+            with Horizontal(id="jw-split", classes="poster-split"):
+                yield OptionList(id="result-list")
+                yield PosterPreviewWidget(id="poster-rail")
             yield FilterBox(hint=tr("filter.hint.results"))
-        yield KeyBar(("enter", "open"), ("^r", "regions"), ("^b", "back"), ("esc", "quit"))
+        yield KeyBar(
+            ("enter", "open"),
+            ("t", "schedule.action.schedule"),
+            ("p", "poster.key_toggle"),
+            ("^r", "regions"),
+            ("^b", "back"),
+            ("esc", "quit"),
+        )
 
     def on_mount(self) -> None:
         self._last_search_region = self.search_region
         self._last_regions = tuple(self.regions)
         self._render_chips()
+        self._sync_poster_layout()
         self.query_one("#result-list", OptionList).add_option(
             Option(f"  [$dim]{tr('justwatch.searching')}[/]", disabled=True)
         )
         self.query_one(FilterBox).display = False
         self.search()
 
+    def on_resize(self) -> None:
+        self._render_chips()
+        self._sync_poster_layout()
+
+    def on_screen_suspend(self, _event) -> None:
+        found = self.query("#poster-rail")
+        if found:
+            found.first(PosterPreviewWidget).suspend_graphics()
+
     def on_screen_resume(self, _event) -> None:
         current_search = self.search_region
         current_regions = tuple(self.regions)
+        self._sync_poster_layout()
+        found = self.query("#poster-rail")
+        if found:
+            found.first(PosterPreviewWidget).resume_graphics()
         if current_search != self._last_search_region:
             self._last_search_region = current_search
             self._last_regions = current_regions
+            self._clear_filter_and_poster()
             self._render_chips()
             option_list = self.query_one("#result-list", OptionList)
             option_list.clear_options()
@@ -441,6 +546,15 @@ class JustWatchScreen(Screen):
         self._generation += 1
         self.workers.cancel_group(self, "justwatch-search")
 
+    def _clear_filter_and_poster(self) -> None:
+        filter_box = self.query(FilterBox)
+        if filter_box:
+            fb = filter_box.first(FilterBox)
+            with fb.prevent(FilterBox.Changed):
+                fb.value = ""
+            fb.display = False
+        self._update_poster_for_index(None)
+
     def relocalize(self) -> None:
         from .chrome import refresh_locale_widgets
 
@@ -452,6 +566,7 @@ class JustWatchScreen(Screen):
         if filter_box:
             filter_box.first(FilterBox).placeholder = tr("filter.hint.results")
         self._render_chips()
+        self._sync_poster_layout()
         if self._titles or self._error:
             needle = filter_box.first(FilterBox).value if filter_box else ""
             self._render_rows(needle)
@@ -511,6 +626,8 @@ class JustWatchScreen(Screen):
 
         if self._error:
             option_list.add_option(Option(f"  [$bad]{_safe(self._error)}[/]", disabled=True))
+            self.query_one(FilterBox).display = False
+            self._update_poster_for_index(None)
             self.query_one("#subhead", Static).update(
                 f"[$bad]{tr('justwatch.fetch_failed')}[/]"
             )
@@ -519,6 +636,8 @@ class JustWatchScreen(Screen):
             option_list.add_option(
                 Option(f"  [$dim]{tr('justwatch.nothing', query=_safe(self._query))}[/]", disabled=True)
             )
+            self.query_one(FilterBox).display = False
+            self._update_poster_for_index(None)
             self.query_one("#subhead", Static).update(
                 f"[$dim]{tr('justwatch.results', count=0, region=self.search_region, count2=len(self.regions))}[/]"
             )
@@ -533,16 +652,132 @@ class JustWatchScreen(Screen):
         filter_box.display = len(self._titles) >= FILTER_MIN
         if not self._visible:
             option_list.add_option(Option(f"  [$dim]{tr('justwatch.no_match')}[/]", disabled=True))
+            self._update_poster_for_index(None)
             return
         for position, index in enumerate(self._visible, 1):
             option_list.add_option(Option(self._row(position, self._titles[index])))
         option_list.highlighted = 0
+        self._update_poster_for_index(0)
         # Both regions again, because this is the moment they differ: these titles
         # came out of one catalogue, and picking one asks a different, longer list
         # of regions who carries it.
         self.query_one("#subhead", Static).update(
             f"[$dim]{tr('justwatch.results', count=len(self._titles), region=self.search_region, count2=len(self.regions))}[/]"
         )
+
+    def _highlighted_title(self, index: int | None = None) -> jw.Title | None:
+        if not self._titles:
+            return None
+        visible = getattr(self, "_visible", list(range(len(self._titles))))
+        idx = index if index is not None else self.query_one("#result-list", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(visible)):
+            return None
+        return self._titles[visible[idx]]
+
+    def _sync_poster_layout(self) -> None:
+        found = self.query("#poster-rail")
+        if not found:
+            return
+        rail = found.first(PosterPreviewWidget)
+        width = int(self.size.width or self.app.size.width or 80)
+        height = int(self.size.height or self.app.size.height or 24)
+        mode = _poster_mode_for(self.app, self._poster_override)
+        visible, renderer, _reason = should_show_poster(mode, width=width, height=height)
+        chip = self.query("#poster-chip")
+        if chip:
+            chip.first(StatusChip).update(_poster_chip_text(mode, visible, renderer))
+        if not visible:
+            focused = self.focused
+            if focused is rail or (focused is not None and rail in focused.ancestors):
+                self.query_one("#result-list", OptionList).focus()
+            rail.clear_graphics()
+            rail.display = False
+            return
+        rail.display = True
+        self._update_poster_for_index(self.query_one("#result-list", OptionList).highlighted, renderer=renderer)
+
+    def _update_poster_for_index(self, index: int | None, *, renderer: str | None = None) -> None:
+        found = self.query("#poster-rail")
+        if not found:
+            return
+        rail = found.first(PosterPreviewWidget)
+        if not rail.display:
+            return
+        if renderer is None:
+            width = int(self.size.width or self.app.size.width or 80)
+            height = int(self.size.height or self.app.size.height or 24)
+            mode = _poster_mode_for(self.app, self._poster_override)
+            visible, renderer, _reason = should_show_poster(mode, width=width, height=height)
+            if not visible:
+                rail.clear_graphics()
+                rail.display = False
+                return
+        title = self._highlighted_title(index)
+        proxy = self.app.config.proxy_url(self.app.globals.get("proxy", "")) if hasattr(self.app.config, "proxy_url") else None
+        if title is None:
+            rail.set_item(None, renderer=renderer, proxy=proxy)
+            return
+        footer = tr("poster.hint.justwatch", default="Enter: availability · t: schedule")
+        rail.set_item(_title_poster_item(title, footer=footer), renderer=renderer, proxy=proxy)
+
+    def action_toggle_poster(self) -> None:
+        width = int(self.size.width or self.app.size.width or 80)
+        height = int(self.size.height or self.app.size.height or 24)
+        nxt, notice = _cycle_poster_override(self.app, self._poster_override, width, height)
+        self._poster_override = nxt
+        self._sync_poster_layout()
+        if notice:
+            self.notify(notice, timeout=4)
+
+    def action_schedule(self) -> None:
+        title = self._highlighted_title()
+        if title is None:
+            return
+        svc_index = jw.service_index(getattr(self.app, "services", ()) or ())
+        platform_urls: dict[str, str] = {}
+        first_service_id = ""
+        first_direct_url = ""
+        for tech, clear, url in getattr(title, "offer_links", ()) or ():
+            if not url:
+                continue
+            if not first_direct_url:
+                first_direct_url = url
+            sid = jw.resolve_service(tech, clear, svc_index) if svc_index else None
+            if sid:
+                platform_urls.setdefault(sid, url)
+                if not first_service_id:
+                    first_service_id = sid
+                    first_direct_url = url
+        source_meta: dict[str, str] = {
+            "source": "justwatch",
+            "justwatch_id": title.node_id,
+            "search_target": title.name,
+            "synopsis": title.synopsis[:240],
+        }
+        if first_direct_url:
+            source_meta["direct_url"] = first_direct_url
+        if platform_urls:
+            source_meta["platform_urls_json"] = json.dumps(platform_urls, ensure_ascii=False)
+        self.app.open_schedule_editor(
+            prefill={
+                "name": title.name,
+                "service_id": first_service_id,
+                "input_mode": "search",
+                "target": title.name,
+                "direct_url": first_direct_url,
+                "search_target": title.name,
+                "platform_urls": platform_urls,
+                "media_kind": "show" if title.is_show else "movie",
+                "match_year": title.year,
+                "selection_mode": "episodes" if title.is_show else "movie",
+                "poster_url": title.poster_url,
+                "source_meta": source_meta,
+            }
+        )
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        event.stop()
+        self._update_poster_for_index(event.option_index)
 
     @staticmethod
     def _row(position: int, title: jw.Title) -> str:
@@ -608,6 +843,7 @@ class JustWatchScreen(Screen):
             self.app.globals.set("justwatch_search_region", code)
             self._last_search_region = self.search_region
             self._last_regions = tuple(self.regions)
+            self._clear_filter_and_poster()
             self._render_chips()
             self.query_one("#result-list", OptionList).clear_options()
             self.query_one("#result-list", OptionList).add_option(
@@ -631,6 +867,8 @@ class AvailabilityScreen(Screen):
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "regions", "Regions", show=False),
         Binding("ctrl+y", "copy_link", "Copy link", show=False),
+        Binding("p", "toggle_poster", "Toggle poster", show=False),
+        Binding("t", "schedule", "Schedule", show=False),
     ]
 
     def __init__(self, title: jw.Title):
@@ -642,6 +880,7 @@ class AvailabilityScreen(Screen):
         self._error = ""
         self._generation = 0
         self._last_regions: tuple[str, ...] = ()
+        self._poster_override: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Chrome()
@@ -649,11 +888,20 @@ class AvailabilityScreen(Screen):
         with Horizontal(id="statusline"):
             yield StatusChip("regions", id="region-chip")
             yield Static("·", classes="chip-sep")
+            yield StatusChip("toggle_poster", id="poster-chip")
+            yield Static("·", classes="chip-sep")
             yield Static("", id="subhead", classes="pill chip-static")
         with Vertical(id="body"):
-            yield OptionList(id="offer-list")
+            with Horizontal(id="avail-split", classes="poster-split"):
+                yield OptionList(id="offer-list")
+                yield PosterPreviewWidget(id="poster-rail")
         yield KeyBar(
-            ("enter", "open in a service"), ("^y", "copy link"), ("^r", "regions"), ("^b", "back")
+            ("enter", "open in a service"),
+            ("t", "schedule.action.schedule"),
+            ("p", "poster.key_toggle"),
+            ("^y", "copy link"),
+            ("^r", "regions"),
+            ("^b", "back"),
         )
 
     def on_mount(self) -> None:
@@ -664,13 +912,29 @@ class AvailabilityScreen(Screen):
         self.query_one("#masthead", Static).update(f"{head}  [$dim]{title.kind_label}[/]")
         self._last_regions = tuple(self.regions)
         self._render_chips()
+        self._sync_poster_layout()
         self.query_one("#offer-list", OptionList).add_option(
             Option(f"  [$dim]{tr('justwatch.asking')}[/]", disabled=True)
         )
         self.fetch()
 
+    def on_resize(self) -> None:
+        self._render_chips()
+        self._sync_poster_layout()
+        if self._found or self._error:
+            self._render_rows()
+
+    def on_screen_suspend(self, _event) -> None:
+        found = self.query("#poster-rail")
+        if found:
+            found.first(PosterPreviewWidget).suspend_graphics()
+
     def on_screen_resume(self, _event) -> None:
         current_regions = tuple(self.regions)
+        self._sync_poster_layout()
+        found = self.query("#poster-rail")
+        if found:
+            found.first(PosterPreviewWidget).resume_graphics()
         if current_regions != self._last_regions:
             self._last_regions = current_regions
             self._render_chips()
@@ -690,7 +954,9 @@ class AvailabilityScreen(Screen):
         # ran in one region of its own, and two controls both called ^r regions
         # would look like the same setting seen twice.
         regions = self.regions
-        shown = ", ".join(regions[:6]) + ("..." if len(regions) > 6 else "")
+        width = int(getattr(self.size, "width", 0) or getattr(self.app.size, "width", 0) or 100)
+        limit = 2 if width < 96 else 6
+        shown = ", ".join(regions[:limit]) + ("..." if len(regions) > limit else "")
         self.query_one("#region-chip", StatusChip).update(
             tr("justwatch.chip_availability", count=len(regions), shown=shown)
         )
@@ -704,6 +970,7 @@ class AvailabilityScreen(Screen):
 
         refresh_locale_widgets(self)
         self._render_chips()
+        self._sync_poster_layout()
         if self._found or self._error:
             self._render_rows()
 
@@ -787,7 +1054,7 @@ class AvailabilityScreen(Screen):
                 option_list.add_option(
                     Option(
                         f"     [${jw.MONETIZATION_ROLE.get(monetization, 'muted')}]"
-                        f"{jw.MONETIZATION.get(monetization, monetization)}[/]",
+                        f"{_safe(jw.MONETIZATION.get(monetization, monetization))}[/]",
                         disabled=True,
                     )
                 )
@@ -799,7 +1066,7 @@ class AvailabilityScreen(Screen):
                     if service_id:
                         openable += 1
                     self._rows.append((offer, service_id))
-                    option_list.add_option(Option(self._offer_row(offer, service_id)))
+                    option_list.add_option(Option(self._offer_row_for_width(offer, service_id, option_list)))
 
         if not self._found:
             option_list.add_option(Option(f"  [$dim]{tr('justwatch.nothing_back')}[/]", disabled=True))
@@ -809,7 +1076,7 @@ class AvailabilityScreen(Screen):
             )
         self._focus_first(option_list)
         link = self.title_ref.web_url
-        extra = tr("justwatch.copies", link=link) if link else ""
+        extra = tr("justwatch.copies", link=_safe(link)) if link else ""
         self._status(
             tr(
                 "justwatch.status_summary",
@@ -832,9 +1099,9 @@ class AvailabilityScreen(Screen):
         elif not availability.offers:
             body = f"[$gutter]{tr('justwatch.nothing_here')}[/]"
         else:
-            body = f"[$dim]{availability.summary()}[/]"
+            body = f"[$dim]{_safe(availability.summary())}[/]"
         option_list.add_option(
-            Option(f"  [$accent]{availability.label}[/]  {body}", disabled=True)
+            Option(f"  [$accent]{_safe(availability.label)}[/]  {body}", disabled=True)
         )
 
     #: plain-text column widths. Padding has to be applied before the markup
@@ -843,8 +1110,30 @@ class AvailabilityScreen(Screen):
     PROVIDER_WIDTH = 30
     DETAIL_WIDTH = 32
 
+    def _offer_row_for_width(
+        self, offer: jw.Offer, service_id: str | None, option_list: OptionList
+    ) -> str:
+        avail = int(option_list.content_region.width or 0)
+        if avail <= 0:
+            total = int(self.size.width or self.app.size.width or 80)
+            rail = self.query("#poster-rail")
+            rail_w = 36 if (rail and rail.first(PosterPreviewWidget).display) else 0
+            avail = max(48, total - rail_w - 6)
+        # Indent (8) + gaps (4) + target column (~14) = 26 cells fixed overhead.
+        budget = max(24, avail - 26)
+        prov_w = min(self.PROVIDER_WIDTH, max(14, int(budget * 0.48)))
+        det_w = min(self.DETAIL_WIDTH, max(10, budget - prov_w))
+        return self._offer_row(offer, service_id, provider_width=prov_w, detail_width=det_w)
+
     @classmethod
-    def _offer_row(cls, offer: jw.Offer, service_id: str | None) -> str:
+    def _offer_row(
+        cls,
+        offer: jw.Offer,
+        service_id: str | None,
+        *,
+        provider_width: int | None = None,
+        detail_width: int | None = None,
+    ) -> str:
         bits = [offer.quality] if offer.quality else []
         seasons = offer.season_summary()
         if seasons:
@@ -853,10 +1142,10 @@ class AvailabilityScreen(Screen):
             # already carries its own currency symbol - "$3.99", "£3.49" - so
             # prefixing one turned every price into "$$3.99"
             bits.append(offer.price)
-        provider = _fit(offer.provider, cls.PROVIDER_WIDTH)
-        detail = _fit("  ·  ".join(bits), cls.DETAIL_WIDTH)
+        provider = _fit(offer.provider, provider_width or cls.PROVIDER_WIDTH)
+        detail = _fit("  ·  ".join(bits), detail_width or cls.DETAIL_WIDTH)
         if service_id:
-            target = f"[$ok]{service_id}[/]"
+            target = f"[$ok]{_safe(service_id)}[/]"
         elif offer.physical:
             target = f"[$gutter]{tr('justwatch.disc')}[/]"
         else:
@@ -935,6 +1224,79 @@ class AvailabilityScreen(Screen):
 
         self.app.push_screen(RegionScreen(self.regions), _chosen)
 
+    def _sync_poster_layout(self) -> None:
+        found = self.query("#poster-rail")
+        if not found:
+            return
+        rail = found.first(PosterPreviewWidget)
+        width = int(self.size.width or self.app.size.width or 80)
+        height = int(self.size.height or self.app.size.height or 24)
+        mode = _poster_mode_for(self.app, self._poster_override)
+        visible, renderer, _reason = should_show_poster(mode, width=width, height=height)
+        chip = self.query("#poster-chip")
+        if chip:
+            chip.first(StatusChip).update(_poster_chip_text(mode, visible, renderer))
+        if not visible:
+            focused = self.focused
+            if focused is rail or (focused is not None and rail in focused.ancestors):
+                self.query_one("#offer-list", OptionList).focus()
+            rail.clear_graphics()
+            rail.display = False
+            return
+        rail.display = True
+        proxy = self.app.config.proxy_url(self.app.globals.get("proxy", "")) if hasattr(self.app.config, "proxy_url") else None
+        footer = tr("poster.hint.availability", default="Enter: open service · t: schedule")
+        rail.set_item(_title_poster_item(self.title_ref, footer=footer), renderer=renderer, proxy=proxy)
+
+    def action_toggle_poster(self) -> None:
+        width = int(self.size.width or self.app.size.width or 80)
+        height = int(self.size.height or self.app.size.height or 24)
+        nxt, notice = _cycle_poster_override(self.app, self._poster_override, width, height)
+        self._poster_override = nxt
+        self._sync_poster_layout()
+        if notice:
+            self.notify(notice, timeout=4)
+
+    def action_schedule(self) -> None:
+        idx = self.query_one("#offer-list", OptionList).highlighted
+        row = self._rows[idx] if (idx is not None and 0 <= idx < len(self._rows)) else None
+        service_id = row[1] if row is not None else ""
+        offer = row[0] if row is not None else None
+        platform_urls: dict[str, str] = {}
+        for item in self._rows:
+            if item is None:
+                continue
+            row_offer, row_sid = item[0], item[1]
+            if row_sid and row_offer.url and row_sid not in platform_urls:
+                platform_urls[row_sid] = row_offer.url
+        direct_url = offer.url if (offer and offer.url) else platform_urls.get(service_id or "", "")
+        source_meta: dict[str, str] = {
+            "source": "justwatch",
+            "justwatch_id": self.title_ref.node_id,
+            "platform_label": offer.provider if offer else "",
+            "search_target": self.title_ref.name,
+            "synopsis": self.title_ref.synopsis[:240],
+        }
+        if direct_url:
+            source_meta["direct_url"] = direct_url
+        if platform_urls:
+            source_meta["platform_urls_json"] = json.dumps(platform_urls, ensure_ascii=False)
+        prefill: dict[str, object] = {
+            "name": self.title_ref.name,
+            "service_id": service_id or "",
+            "input_mode": "url" if (direct_url and service_id) else "search",
+            "target": (direct_url if (direct_url and service_id) else self.title_ref.name),
+            "direct_url": direct_url,
+            "search_target": self.title_ref.name,
+            "platform_urls": platform_urls,
+            "media_kind": "show" if self.title_ref.is_show else "movie",
+            "match_year": self.title_ref.year,
+            "selection_mode": "episodes" if self.title_ref.is_show else "movie",
+            "poster_url": self.title_ref.poster_url,
+            "source_meta": source_meta,
+        }
+        self.app.open_schedule_editor(prefill=prefill)
+
     def go_back(self) -> bool:
         return False
 
@@ -955,13 +1317,8 @@ def _fit(text: str, width: int) -> str:
 
 
 def _safe(text: str) -> str:
-    """Markup-proof a value that came off the network.
-
-    Backslashes first: escaping only the bracket turned ``foo\\[bar`` into an
-    escaped backslash followed by an *opening tag*, which is the thing this is
-    supposed to prevent.
-    """
-    return str(text or "").replace("\\", "\\\\").replace("[", "\\[")
+    """Markup-proof a value that came off the network."""
+    return escape_markup(str(text or ""))
 
 
 __all__ = [

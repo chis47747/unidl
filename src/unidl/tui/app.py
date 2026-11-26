@@ -40,7 +40,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
-from ..core import i18n, playready, service_catalog, vaults
+from ..core import i18n, playready, scheduler, service_catalog, vaults
 from ..core.brands import service_tag
 from ..core.config import Config
 from ..core.credentials import mask_in
@@ -66,10 +66,14 @@ from .terminal_progress import (
     DEFAULT_TERMINAL_TITLE,
     OSC_PROGRESS_CLEAR,
     PROGRESS_HIDDEN,
+    PROGRESS_INDETERMINATE,
+    PROGRESS_NORMAL,
+    format_terminal_title,
     normalize_completion_alert,
     osc_notify_sequence,
     osc_progress_sequence,
     osc_title_sequence,
+    parse_frame_metrics,
     supports_osc_progress,
     supports_osc_title,
 )
@@ -320,6 +324,7 @@ class UnidlApp(App):
             show=False,
         ),
         Binding("question_mark", "show_shortcuts", "Shortcuts", show=False),
+        Binding("f1", "show_shortcuts_force", "Shortcuts", show=False),
     ]
     def __init__(self, config: Config | None = None):
         super().__init__()
@@ -335,6 +340,19 @@ class UnidlApp(App):
         )
         self.vault = KeyVault(self.config.paths.keys_db)
         self.vaults = vaults.build(self.config, local=self.vault)
+        self.schedule_store = scheduler.ScheduleStore(
+            scheduler.schedule_store_path(self.config.paths.home)
+        )
+        self._scheduler_running = False
+        self._scheduler_active_job_id: str | None = None
+        self._scheduler_queued_ids: list[str] = []
+        self._scheduler_queued_force_ids: set[str] = set()
+        self._scheduler_cancel = threading.Event()
+        self._scheduler_job_cancel: threading.Event | None = None
+        self._scheduler_dismissed_stops: set[str] = set()
+        self._scheduler_progress_lock = threading.Lock()
+        self._scheduler_progress: dict[str, scheduler.ScheduleProgress] = {}
+        self._scheduled_dock_items: list[object] = []
         self._helper_cache: dict[str, tuple[str, bool]] = {}
         self._account_cache: dict[str, tuple[str, bool]] = {}
         # Created lazily because the small headless checks replace ``registry``
@@ -347,6 +365,9 @@ class UnidlApp(App):
         # active, so shutdown follows controller ownership rather than the UI
         # stack alone.
         self._session_controllers: dict[int, object] = {}
+        self._minimized_sessions: list[object] = []
+        self._mini_dock_collapsed = False
+        self._mini_dock_index = 0
         # a device chosen in a previous run lives in settings.json, not the
         # config file, so it has to be handed to the resolver on the way up
         self.apply_device_choice()
@@ -375,12 +396,40 @@ class UnidlApp(App):
 
     def unregister_session(self, controller) -> None:
         self._session_controllers.pop(id(controller), None)
+        if not self.has_active_session() and self._scheduler_queued_ids:
+            try:
+                self.call_later(self._drain_queued_schedules)
+            except Exception:
+                pass
 
-    def has_active_session(self) -> bool:
+    def has_foreground_session(self) -> bool:
+        """True when a service/flow/delivery session is actively mounted on screen."""
         return any(
             getattr(screen, "controller", None) is not None
             for screen in getattr(self, "screen_stack", ())
         )
+
+    def has_active_session(self) -> bool:
+        if self.has_foreground_session():
+            return True
+        for ctrl in list(self._session_controllers.values()):
+            if not getattr(ctrl, "minimized", False):
+                return True
+            if getattr(ctrl, "is_actively_working", False):
+                return True
+        return False
+
+    @property
+    def minimized_sessions(self) -> list[object]:
+        return list(self._minimized_sessions)
+
+    @property
+    def scheduled_dock_items(self) -> list[object]:
+        return list(self._scheduled_dock_items)
+
+    @property
+    def dock_items(self) -> list[object]:
+        return [*self._minimized_sessions, *self._scheduled_dock_items]
 
     def _sync_terminal_bidi(self, *, enable_explicit: bool = True) -> None:
         """Toggle ECMA-48 explicit BiDi mode on interactive terminals.
@@ -471,8 +520,8 @@ class UnidlApp(App):
         except Exception:
             return False
 
-    def action_show_shortcuts(self) -> None:
-        """Toggle the contextual shortcut cheat sheet unless typing in a field."""
+    def open_shortcuts(self, *, ignore_input_focus: bool = False) -> None:
+        """Toggle the contextual shortcut cheat sheet."""
         from textual.widgets import Input as TextualInput
         from textual.widgets import TextArea as TextualTextArea
 
@@ -481,9 +530,17 @@ class UnidlApp(App):
         if isinstance(self.screen, ShortcutsScreen):
             self.pop_screen()
             return
-        if isinstance(self.focused, (TextualInput, TextualTextArea)):
+        if not ignore_input_focus and isinstance(self.focused, (TextualInput, TextualTextArea)):
             return
         self.push_screen(ShortcutsScreen(self.screen))
+
+    def action_show_shortcuts(self) -> None:
+        """Toggle the contextual shortcut cheat sheet unless typing in a field."""
+        self.open_shortcuts(ignore_input_focus=False)
+
+    def action_show_shortcuts_force(self) -> None:
+        """Toggle the contextual shortcut cheat sheet even while an input has focus."""
+        self.open_shortcuts(ignore_input_focus=True)
 
     def on_mount(self) -> None:
         # Keep initial composition on Textual's get_default_screen path, which
@@ -494,6 +551,10 @@ class UnidlApp(App):
         self._sync_terminal_bidi(enable_explicit=True)
         self.apply_layout_density()
         self.add_mode(self.DEFAULT_MODE, self.get_default_screen)
+        self._recover_stale_schedules()
+        if not getattr(self, "is_headless", False):
+            self.set_interval(20.0, self._scheduler_tick)
+        self.set_interval(0.35, self._sync_mini_dock_and_terminal_progress)
 
     def on_app_focus(self) -> None:
         self._sync_terminal_bidi(enable_explicit=True)
@@ -515,6 +576,9 @@ class UnidlApp(App):
         helper thread while the loop remains able to drain those callbacks.
         """
         self.clear_terminal_progress()
+        self._scheduler_cancel.set()
+        if self._scheduler_job_cancel is not None:
+            self._scheduler_job_cancel.set()
         self._sync_terminal_bidi(enable_explicit=False)
         self.abort_sessions()
         await asyncio.to_thread(self.wait_for_sessions, SESSION_SHUTDOWN_TIMEOUT)
@@ -737,6 +801,8 @@ class UnidlApp(App):
     ) -> bool:
         from .session import SessionController
 
+        if getattr(self, "screen_stack", ()) and isinstance(getattr(self, "screen", None), ModalScreen):
+            return False
         if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
             self.notify(
                 tr("notify.session_active", default="Leave the current session before opening another."),
@@ -771,6 +837,7 @@ class UnidlApp(App):
         if replace_screen is not None and self.screen is replace_screen:
             self.pop_screen()
         self.push_screen(controller.start_screen())
+        self.call_after_refresh(self.sync_mini_dock)
         return True
 
     def open_import(self, document) -> bool:
@@ -783,6 +850,8 @@ class UnidlApp(App):
         """
         from .session import SessionController
 
+        if getattr(self, "screen_stack", ()) and isinstance(getattr(self, "screen", None), ModalScreen):
+            return False
         if any(getattr(screen, "controller", None) is not None for screen in getattr(self, "screen_stack", ())):
             self.notify(
                 tr("notify.session_active", default="Leave the current session before opening another."),
@@ -865,9 +934,864 @@ class UnidlApp(App):
         screen = self.screen
         handler = getattr(screen, "go_back", None)
         if callable(handler) and handler():
+            self.call_after_refresh(self.sync_mini_dock)
             return
         if len(self.screen_stack) > 1:
             self.pop_screen()
+            self.call_after_refresh(self.sync_mini_dock)
+
+    # ------------------------------------------------------- minimized downloads
+    def _screen_has_active_prompt(self, screen) -> bool:
+        """True while an AskHost screen owns an unanswered interactive prompt."""
+        return bool(
+            getattr(screen, "waiting", False)
+            or getattr(screen, "_current_ask", None) is not None
+        )
+
+    def can_minimize_download_screen(self, screen) -> bool:
+        """Shared guard for whether a DownloadScreen can safely move into MiniDownloadDock."""
+        controller = getattr(screen, "controller", None)
+        if controller is None:
+            return False
+        if self._screen_has_active_prompt(screen):
+            return False
+        return bool(getattr(controller, "can_minimize", False))
+
+    def minimize_session(self, controller, download_screen) -> bool:
+        """Send an active DownloadScreen to the floating MiniDownloadDock."""
+        if self._screen_has_active_prompt(download_screen) or not getattr(controller, "can_minimize", False):
+            return False
+        capture = getattr(controller, "capture_delivery_view", None)
+        if callable(capture):
+            capture(download_screen)
+        controller.minimized = True
+        controller.minimized_outcome = ""
+        controller._minimized_notified_done = False
+        if controller not in self._minimized_sessions:
+            self._minimized_sessions.append(controller)
+        self._mini_dock_index = self._minimized_sessions.index(controller)
+        self._mini_dock_collapsed = False
+
+        flow_screen = getattr(controller, "flow_screen", None)
+        service_screen = getattr(controller, "root", None)
+        self.run_worker(
+            self._unwind_minimized_screens(download_screen, flow_screen, service_screen),
+            exit_on_error=False,
+        )
+        self.notify(
+            tr(
+                "mini_dock.notify.minimized",
+                default="Minimized to background — click the mini-window to restore.",
+            ),
+            timeout=3,
+        )
+        return True
+
+    async def _unwind_minimized_screens(
+        self,
+        download_screen,
+        flow_screen,
+        service_screen,
+    ) -> None:
+        if self.screen is download_screen and len(self.screen_stack) > 1:
+            await self.pop_screen()
+        if (
+            flow_screen is not None
+            and self.screen is flow_screen
+            and not getattr(flow_screen, "panel_showing", False)
+            and len(self.screen_stack) > 1
+        ):
+            await self.pop_screen()
+        if service_screen is not None and self.screen is service_screen:
+            reset_fn = getattr(service_screen, "reset_after_minimize", None)
+            if callable(reset_fn):
+                reset_fn()
+        self.sync_mini_dock()
+
+    def restore_minimized_session(self, controller) -> bool:
+        """Reopen a minimized background session as a full DownloadScreen."""
+        from textual.screen import ModalScreen
+
+        from .download_screen import DownloadScreen
+
+        if isinstance(self.screen, ModalScreen):
+            return False
+        if isinstance(self.screen, DownloadScreen) and self.screen.controller is controller:
+            return True
+
+        # If another DownloadScreen is currently open, never pop it while it owns
+        # an interactive prompt (unmounting AskHost calls release() with quit=True
+        # and would abort that session's track picker or question).
+        if isinstance(self.screen, DownloadScreen):
+            other = self.screen.controller
+            if self._screen_has_active_prompt(self.screen):
+                self.notify(
+                    tr(
+                        "mini_dock.notify.finish_prompt_first",
+                        default="Finish or cancel the current prompt before switching downloads.",
+                    ),
+                    severity="warning",
+                    timeout=4,
+                )
+                return False
+            if self.can_minimize_download_screen(self.screen):
+                capture = getattr(other, "capture_delivery_view", None)
+                if callable(capture):
+                    capture(self.screen)
+                other.minimized = True
+                if other not in self._minimized_sessions:
+                    self._minimized_sessions.append(other)
+                if len(self.screen_stack) > 1:
+                    self.pop_screen()
+            elif getattr(other, "is_actively_working", False):
+                self.notify(
+                    tr(
+                        "mini_dock.notify.busy_cannot_switch",
+                        default="Wait for the current download action to finish before switching.",
+                    ),
+                    severity="warning",
+                    timeout=4,
+                )
+                return False
+            elif len(self.screen_stack) > 1:
+                self.pop_screen()
+
+        self._minimized_sessions = [c for c in self._minimized_sessions if c is not controller]
+        if self._minimized_sessions:
+            self._mini_dock_index = min(self._mini_dock_index, len(self._minimized_sessions) - 1)
+        else:
+            self._mini_dock_index = 0
+        controller.minimized = False
+        screen = DownloadScreen(controller)
+        controller.delivery = screen
+        self.push_screen(screen)
+        self.call_after_refresh(self.sync_mini_dock)
+        return True
+
+    def action_restore_minimized_download(self) -> None:
+        """Command-palette helper to restore or open the active dock item."""
+        from .mini_dock import ScheduledDockItem
+
+        items = self.dock_items
+        if not items:
+            return
+        idx = max(0, min(self._mini_dock_index, len(items) - 1))
+        chosen = items[idx]
+        if isinstance(chosen, ScheduledDockItem):
+            self.open_scheduled_dock_item(chosen)
+        else:
+            self.restore_minimized_session(chosen)
+
+    def _find_scheduled_dock_item(self, job_id: str):
+        for item in self._scheduled_dock_items:
+            if getattr(item, "job_id", "") == job_id:
+                return item
+        return None
+
+    def _clamp_mini_dock_index(self) -> None:
+        items = self.dock_items
+        if items:
+            self._mini_dock_index = max(0, min(self._mini_dock_index, len(items) - 1))
+        else:
+            self._mini_dock_index = 0
+
+    def _on_scheduled_job_started(self, job_id: str, job_name: str, service_id: str) -> None:
+        from .mini_dock import ScheduledDockItem
+
+        self._scheduler_dismissed_stops.discard(job_id)
+        had_items = bool(self.dock_items)
+        self._scheduled_dock_items = [
+            it for it in self._scheduled_dock_items if getattr(it, "job_id", "") != job_id
+        ]
+        item = ScheduledDockItem(
+            job_id=job_id,
+            job_name=job_name,
+            service_id=service_id,
+            started_at=time.monotonic(),
+            state="running",
+            stage="lookup",
+            version=1,
+        )
+        self._scheduled_dock_items.append(item)
+        if not had_items:
+            self._mini_dock_index = len(self.dock_items) - 1
+            self._mini_dock_collapsed = False
+        self.refresh_schedule_indicators()
+        self.sync_mini_dock()
+
+    def _sync_scheduled_dock_progress(self, job_id: str, job_name: str, snap) -> None:
+        from .mini_dock import ScheduledDockItem
+
+        if job_id in self._scheduler_dismissed_stops:
+            return
+        item = self._find_scheduled_dock_item(job_id)
+        if item is None:
+            job = self.schedule_store.get_job(job_id)
+            svc_id = job.service_id if job is not None else ""
+            item = ScheduledDockItem(
+                job_id=job_id,
+                job_name=job.name if job is not None else job_name,
+                service_id=svc_id,
+                started_at=snap.started_at or time.monotonic(),
+                state="running",
+            )
+            self._scheduled_dock_items.append(item)
+        item.state = "running"
+        item.stage = str(getattr(snap, "stage", "downloading") or "downloading")
+        item.detail = str(getattr(snap, "last_log", "") or "")
+        item.rows = tuple(getattr(snap, "rows", ()) or ())
+        item.item_index = int(getattr(snap, "item_index", 0) or 0)
+        item.item_total = int(getattr(snap, "item_total", 0) or 0)
+        item.item_name = str(getattr(snap, "item_name", "") or "")
+        if getattr(snap, "started_at", 0.0):
+            item.started_at = float(snap.started_at)
+        item.version += 1
+
+    async def _unwind_to_schedule_screen(self, target_screen, job_id: str) -> None:
+        while (
+            self.screen is not target_screen
+            and len(self.screen_stack) > 1
+            and getattr(self.screen, "controller", None) is None
+        ):
+            await self.pop_screen()
+        focus_fn = getattr(target_screen, "focus_job", None)
+        if callable(focus_fn):
+            focus_fn(job_id)
+        self.sync_mini_dock()
+
+    def open_scheduled_dock_item(self, item) -> bool:
+        """Open Scheduled Downloads and focus the job represented by ``item``."""
+        from .schedule_screen import ScheduleManagerScreen
+
+        if isinstance(self.screen, ModalScreen):
+            return False
+        job_id = str(getattr(item, "job_id", "") or "")
+        if isinstance(self.screen, ScheduleManagerScreen):
+            self.screen.focus_job(job_id)
+            return True
+        existing = next(
+            (scr for scr in self.screen_stack if isinstance(scr, ScheduleManagerScreen)),
+            None,
+        )
+        if existing is not None:
+            idx = self.screen_stack.index(existing)
+            above = list(self.screen_stack[idx + 1 :])
+            if all(getattr(scr, "controller", None) is None for scr in above):
+                self.run_worker(
+                    self._unwind_to_schedule_screen(existing, job_id),
+                    exit_on_error=False,
+                )
+                return True
+        self.push_screen(ScheduleManagerScreen(initial_tab="tab-jobs", focus_job_id=job_id))
+        self.call_after_refresh(self.sync_mini_dock)
+        return True
+
+    def dismiss_scheduled_dock_item(self, item) -> None:
+        """Remove a finished scheduled download card from the floating mini dock."""
+        job_id = str(getattr(item, "job_id", "") or "")
+        self._scheduled_dock_items = [
+            it for it in self._scheduled_dock_items if it is not item and getattr(it, "job_id", "") != job_id
+        ]
+        self._clamp_mini_dock_index()
+        self.sync_mini_dock()
+
+    def stop_and_dismiss_scheduled_dock_item(self, item) -> None:
+        """Cancel a running scheduled download and dismiss its mini-dock card."""
+        job_id = str(getattr(item, "job_id", "") or "")
+        name = str(getattr(item, "job_name", "") or job_id or "Scheduled")
+        if job_id:
+            self._scheduler_dismissed_stops.add(job_id)
+        if self._scheduler_active_job_id == job_id and self._scheduler_job_cancel is not None:
+            self._scheduler_job_cancel.set()
+        self.dismiss_scheduled_dock_item(item)
+        self.notify(
+            tr(
+                "mini_dock.schedule_stopped",
+                name=name,
+                default=f"Stopped scheduled download ({name}).",
+            ),
+            timeout=3,
+        )
+
+    def dismiss_minimized_session(self, controller) -> None:
+        """Remove a finished or stopped session card from the mini dock and clean up."""
+        self._minimized_sessions = [c for c in self._minimized_sessions if c is not controller]
+        if self._minimized_sessions:
+            self._mini_dock_index = min(self._mini_dock_index, len(self._minimized_sessions) - 1)
+        else:
+            self._mini_dock_index = 0
+        controller.minimized = False
+        maybe_unreg = getattr(controller, "_maybe_unregister", None)
+        if callable(maybe_unreg):
+            maybe_unreg()
+        self.sync_mini_dock()
+        if not self.has_active_session():
+            self.clear_terminal_progress()
+            if self._scheduler_queued_ids:
+                self.call_later(self._drain_queued_schedules)
+
+    def stop_and_dismiss_minimized_session(self, controller) -> None:
+        """Cancel an active minimized download and remove its card from the mini dock."""
+        controller.abort()
+        self.dismiss_minimized_session(controller)
+        svc = str(getattr(getattr(controller, "service", None), "NAME", "") or "Download")
+        self.notify(
+            tr("mini_dock.notify.stopped", name=svc, default=f"Stopped background download ({svc})."),
+            timeout=3,
+        )
+
+    def notify_minimized_attention(self, controller, message: str) -> None:
+        """Alert the user that a background download needs interactive input."""
+        if controller in self._minimized_sessions:
+            self._mini_dock_index = self._minimized_sessions.index(controller)
+        self._mini_dock_collapsed = False
+        self.sync_mini_dock()
+        svc = str(getattr(getattr(controller, "service", None), "NAME", "") or "")
+        self.notify(
+            tr(
+                "mini_dock.notify.attention",
+                service=svc,
+                detail=message,
+                default=f"{svc} needs input: {message} — click mini-window to respond",
+            ),
+            severity="warning",
+            timeout=6,
+        )
+
+    def on_minimized_session_finished(self, controller) -> None:
+        """Notify completion and release any queued scheduled jobs once background work ends."""
+        outcome = str(getattr(controller, "minimized_outcome", "done") or "done")
+        svc = str(getattr(getattr(controller, "service", None), "NAME", "") or "Download")
+        if outcome == "failed":
+            msg = tr("mini_dock.notify.failed", service=svc, default=f"Background download finished with errors ({svc}).")
+            sev = "error"
+        elif outcome == "stopped":
+            msg = tr("mini_dock.notify.stopped", name=svc, default=f"Stopped background download ({svc}).")
+            sev = "warning"
+        else:
+            msg = tr("mini_dock.notify.done", service=svc, default=f"Background download complete ({svc}).")
+            sev = "information"
+        self.notify(msg, severity=sev, timeout=5)
+        self.emit_completion_alert(svc, msg)
+        self.sync_mini_dock()
+        if not self.has_active_session():
+            self.clear_terminal_progress()
+            if self._scheduler_queued_ids:
+                self.call_later(self._drain_queued_schedules)
+
+    def refresh_mini_dock(self) -> None:
+        """Redraw the currently mounted MiniDownloadDock, if any."""
+        try:
+            screen = self.screen
+        except Exception:
+            return
+        found = screen.query("#mini-download-dock")
+        if found:
+            found.first().refresh_dock(force=True)
+
+    def sync_mini_dock(self) -> None:
+        """Ensure the active non-modal screen mounts or hides MiniDownloadDock cleanly."""
+        from textual.screen import ModalScreen
+
+        from .mini_dock import MiniDownloadDock
+
+        try:
+            current = self.screen
+        except Exception:
+            return
+
+        if not self.dock_items:
+            for scr in list(getattr(self, "screen_stack", ())):
+                for dock in list(scr.query("#mini-download-dock")):
+                    dock.display = False
+            return
+
+        # Keep docks hidden on covered screens and modals so only the active view paints it.
+        for scr in list(getattr(self, "screen_stack", ())):
+            if scr is current:
+                continue
+            for dock in list(scr.query("#mini-download-dock")):
+                dock.display = False
+
+        if isinstance(current, ModalScreen):
+            for dock in list(current.query("#mini-download-dock")):
+                dock.display = False
+            return
+
+        existing = list(current.query("#mini-download-dock"))
+        if existing:
+            existing[0].refresh_dock(force=True)
+        elif current.is_mounted:
+            try:
+                current.mount(MiniDownloadDock())
+            except Exception:
+                pass
+
+    def _sync_mini_dock_and_terminal_progress(self) -> None:
+        if not self.dock_items:
+            return
+        self.sync_mini_dock()
+        # Drive terminal OSC 9;4 progress bar when no foreground DownloadScreen owns it.
+        from .download_screen import DownloadScreen
+
+        try:
+            if isinstance(self.screen, DownloadScreen):
+                return
+        except Exception:
+            return
+        running = [c for c in self._minimized_sessions if getattr(c, "is_actively_working", False)]
+        if running:
+            active = running[0]
+            _ver, rows = active.frame_snapshot() if hasattr(active, "frame_snapshot") else (0, [])
+            percent, speed_bps, _ = parse_frame_metrics(rows)
+            svc = str(getattr(getattr(active, "service", None), "NAME", "") or "Download")
+            if percent is not None:
+                self.set_terminal_progress(
+                    PROGRESS_NORMAL,
+                    percent,
+                    title=format_terminal_title(percent=percent, speed_bps=speed_bps, name=svc),
+                )
+            else:
+                self.set_terminal_progress(
+                    PROGRESS_INDETERMINATE,
+                    0,
+                    title=format_terminal_title(name=svc),
+                )
+            return
+        running_sched = [
+            it for it in self._scheduled_dock_items if getattr(it, "state", "") == "running"
+        ]
+        if running_sched:
+            active_sched = running_sched[0]
+            percent, speed_bps, _ = parse_frame_metrics(getattr(active_sched, "rows", ()))
+            name = str(getattr(active_sched, "job_name", "") or "Scheduled")
+            if percent is not None:
+                self.set_terminal_progress(
+                    PROGRESS_NORMAL,
+                    percent,
+                    title=format_terminal_title(percent=percent, speed_bps=speed_bps, name=name),
+                )
+            else:
+                stage = str(getattr(active_sched, "stage", "downloading") or "downloading")
+                stage_text = tr(f"schedule.stage.{stage}", default=stage)
+                self.set_terminal_progress(
+                    PROGRESS_INDETERMINATE,
+                    0,
+                    title=format_terminal_title(name=name, status_tag=stage_text),
+                )
+
+    # -------------------------------------------------------- scheduled downloads
+    def action_open_schedule(
+        self,
+        *,
+        initial_tab: str = "tab-jobs",
+        focus_job_id: str | None = None,
+    ) -> None:
+        """Open the Scheduled Downloads & Upcoming Radar manager."""
+        from .schedule_screen import ScheduleManagerScreen
+
+        if isinstance(self.screen, ModalScreen):
+            return
+        if isinstance(self.screen, ScheduleManagerScreen):
+            if focus_job_id:
+                self.screen.focus_job(focus_job_id)
+            else:
+                self.screen.action_switch_tab(initial_tab)
+            return
+        if any(isinstance(screen, ScheduleManagerScreen) for screen in self.screen_stack):
+            return
+        self.push_screen(ScheduleManagerScreen(initial_tab=initial_tab, focus_job_id=focus_job_id))
+        self.call_after_refresh(self.sync_mini_dock)
+
+    def open_schedule_editor(
+        self,
+        *,
+        job=None,
+        prefill: dict[str, object] | None = None,
+        on_saved=None,
+    ) -> None:
+        """Open the schedule editor modal and persist any saved job."""
+        from .schedule_screen import ScheduleEditorModal
+
+        def _done(saved) -> None:
+            if saved is None:
+                return
+            if job is None:
+                self.schedule_store.upsert_job(saved)
+            else:
+                try:
+                    saved = self.schedule_store.save_edits(job, saved)
+                except scheduler.ScheduleError as exc:
+                    self.notify(str(exc), severity="warning")
+                    return
+                if saved is None:
+                    self.notify(tr("schedule.notify.job_deleted", name=job.name), severity="warning")
+                    return
+            self.refresh_schedule_indicators()
+            if callable(on_saved):
+                on_saved(saved)
+            else:
+                self.notify(
+                    tr("schedule.notify.saved", name=saved.name, default=f"Scheduled: {saved.name}"),
+                    timeout=4,
+                )
+
+        self.push_screen(ScheduleEditorModal(job=job, prefill=prefill), _done)
+
+    def refresh_schedule_indicators(self) -> None:
+        """Refresh Home's schedule chip and any open ScheduleManagerScreen."""
+        for screen in getattr(self, "screen_stack", ()):
+            refresh_chip = getattr(screen, "_refresh_schedule_chip", None)
+            if callable(refresh_chip):
+                try:
+                    refresh_chip()
+                    fit = getattr(screen, "_fit_statusline", None)
+                    if callable(fit):
+                        fit()
+                except Exception:
+                    pass
+            refresh_data = getattr(screen, "refresh_data", None)
+            if callable(refresh_data) and type(screen).__name__ == "ScheduleManagerScreen":
+                try:
+                    refresh_data()
+                except Exception:
+                    pass
+
+    def _recover_stale_schedules(self) -> bool:
+        """Recover jobs stuck in ``running`` after an unclean exit, once the runner lock is free."""
+        if self._scheduler_running or self._scheduler_active_job_id is not None:
+            return False
+        try:
+            if not any(job.status == "running" for job in self.schedule_store.list_jobs()):
+                return False
+        except Exception:
+            return False
+        try:
+            with scheduler.try_runner_lock(self.config.paths.home) as acquired:
+                if not acquired:
+                    return False
+                recovered = self.schedule_store.recover_stale_running()
+        except Exception:
+            return False
+        if recovered:
+            self.refresh_schedule_indicators()
+            return True
+        return False
+
+    def unqueue_scheduled_job(self, job_id: str) -> None:
+        """Drop ``job_id`` from the pending in-app queue (e.g. after pause or delete)."""
+        if job_id in self._scheduler_queued_ids:
+            self._scheduler_queued_ids = [jid for jid in self._scheduler_queued_ids if jid != job_id]
+        self._scheduler_queued_force_ids.discard(job_id)
+
+    def trigger_scheduled_job(self, job_id: str) -> bool:
+        """Queue or start one scheduled job immediately, respecting active downloads."""
+        job = self.schedule_store.get_job(job_id)
+        if job is None:
+            return False
+        if (
+            job.status == "running"
+            and self._scheduler_active_job_id != job.id
+            and not self._scheduler_running
+        ):
+            if self._recover_stale_schedules():
+                job = self.schedule_store.get_job(job_id)
+                if job is None:
+                    return False
+        if job.status == "running" or self._scheduler_active_job_id == job.id:
+            self.notify(
+                tr("schedule.notify.already_running", name=job.name, default=f"'{job.name}' is already running."),
+                timeout=3,
+            )
+            return False
+        if self.has_active_session() or self._scheduler_running:
+            if job.id not in self._scheduler_queued_ids:
+                self._scheduler_queued_ids.append(job.id)
+            self._scheduler_queued_force_ids.add(job.id)
+
+            def _mark_queued(current: scheduler.ScheduledJob) -> None:
+                current.status = "queued"
+                current.enabled = True
+
+            self.schedule_store.update_job(job.id, _mark_queued)
+            self.refresh_schedule_indicators()
+            self.notify(
+                tr(
+                    "schedule.notify.queued",
+                    name=job.name,
+                    default=f"Queued '{job.name}' — will start after the current download finishes.",
+                ),
+                timeout=5,
+            )
+            return True
+        self._start_scheduled_batch([job.id], force_ids={job.id})
+        self.notify(
+            tr("schedule.notify.started", name=job.name, default=f"Started: {job.name}"),
+            timeout=3,
+        )
+        return True
+
+    def _scheduler_tick(self) -> None:
+        """Periodic in-app scheduler check with foreground conflict queueing."""
+        if self._scheduler_running:
+            return
+        self._recover_stale_schedules()
+        try:
+            due = self.schedule_store.due_jobs()
+        except Exception:
+            return
+        if not due:
+            return
+        if self.has_active_session():
+            newly_queued = 0
+            for job in due:
+                if job.id not in self._scheduler_queued_ids:
+                    self._scheduler_queued_ids.append(job.id)
+                    newly_queued += 1
+                if job.status != "queued":
+                    def _queue_if_pending(current: scheduler.ScheduledJob) -> None:
+                        if current.is_active_pending():
+                            current.status = "queued"
+
+                    self.schedule_store.update_job(job.id, _queue_if_pending)
+            if newly_queued:
+                self.refresh_schedule_indicators()
+                self.notify(
+                    tr(
+                        "schedule.notify.queued_count",
+                        count=newly_queued,
+                        default=f"{newly_queued} scheduled job(s) queued until active download finishes.",
+                    ),
+                    timeout=5,
+                )
+            return
+        ids = [job.id for job in due]
+        self._start_scheduled_batch(ids)
+
+    def _drain_queued_schedules(self) -> None:
+        if self._scheduler_running or self.has_active_session() or not self._scheduler_queued_ids:
+            return
+        batch = list(self._scheduler_queued_ids)
+        self._scheduler_queued_ids.clear()
+        forced = {jid for jid in batch if jid in self._scheduler_queued_force_ids}
+        self._scheduler_queued_force_ids.difference_update(batch)
+        if forced:
+            self._start_scheduled_batch(batch, force_ids=forced)
+        else:
+            self._start_scheduled_batch(batch)
+
+    def _start_scheduled_batch(self, job_ids: list[str], *, force_ids: set[str] | None = None) -> None:
+        if not job_ids or self._scheduler_running:
+            return
+        self._scheduler_running = True
+        thread = threading.Thread(
+            target=self._run_scheduled_worker,
+            args=(list(job_ids), set(force_ids or ())),
+            name="unidl-scheduler",
+            daemon=True,
+        )
+        thread.start()
+
+    def get_schedule_progress(self, job_id: str) -> scheduler.ScheduleProgress | None:
+        """Return the latest live progress snapshot for an active scheduled job."""
+        with self._scheduler_progress_lock:
+            return self._scheduler_progress.get(job_id)
+
+    def _notify_schedule_progress(self, job_id: str, job_name: str) -> None:
+        snap = self.get_schedule_progress(job_id)
+        if snap is not None:
+            self._sync_scheduled_dock_progress(job_id, job_name, snap)
+            self.sync_mini_dock()
+        for screen in getattr(self, "screen_stack", ()):
+            updater = getattr(screen, "refresh_live_progress", None)
+            if callable(updater) and type(screen).__name__ == "ScheduleManagerScreen":
+                try:
+                    updater(job_id)
+                except Exception:
+                    pass
+        if not self.has_active_session():
+            if snap is not None:
+                percent, speed_bps, _ = parse_frame_metrics(snap.rows)
+                if percent is not None:
+                    self.set_terminal_progress(
+                        PROGRESS_NORMAL,
+                        percent,
+                        title=format_terminal_title(
+                            percent=percent,
+                            speed_bps=speed_bps,
+                            name=job_name,
+                        ),
+                    )
+                else:
+                    stage_text = tr(f"schedule.stage.{snap.stage}", default=snap.stage)
+                    self.set_terminal_progress(
+                        PROGRESS_INDETERMINATE,
+                        0,
+                        title=format_terminal_title(name=job_name, status_tag=stage_text),
+                    )
+
+    def _run_scheduled_worker(self, job_ids: list[str], force_ids: set[str] = frozenset()) -> None:
+        results: list[scheduler.JobExecutionResult] = []
+        lock_busy = False
+
+        try:
+            with scheduler.try_runner_lock(self.config.paths.home) as acquired:
+                if not acquired:
+                    lock_busy = True
+                    return
+                self.schedule_store.recover_stale_running()
+                for jid in job_ids:
+                    if self._scheduler_cancel.is_set():
+                        break
+                    job = self.schedule_store.get_job(jid)
+                    if job is None:
+                        continue
+                    if jid not in force_ids and not job.is_due():
+                        continue
+                    job_cancel = threading.Event()
+                    self._scheduler_job_cancel = job_cancel
+                    if self._scheduler_cancel.is_set():
+                        job_cancel.set()
+                    self._scheduler_active_job_id = jid
+                    last_push = 0.0
+                    last_stage = ""
+
+                    def _on_job_start(
+                        _jid: str = jid,
+                        _name: str = job.name,
+                        _svc: str = job.service_id,
+                    ) -> None:
+                        try:
+                            self.call_from_thread(self._on_scheduled_job_started, _jid, _name, _svc)
+                        except RuntimeError:
+                            pass
+
+                    def _on_progress(
+                        snap: scheduler.ScheduleProgress,
+                        *,
+                        _jid: str = jid,
+                        _name: str = job.name,
+                    ) -> None:
+                        nonlocal last_push, last_stage
+                        with self._scheduler_progress_lock:
+                            self._scheduler_progress[_jid] = snap
+                        now_mono = time.monotonic()
+                        stage_changed = snap.stage != last_stage
+                        if not stage_changed and (now_mono - last_push) < 0.2:
+                            return
+                        last_push = now_mono
+                        last_stage = snap.stage
+                        try:
+                            self.call_from_thread(self._notify_schedule_progress, _jid, _name)
+                        except RuntimeError:
+                            pass
+
+                    try:
+                        res = scheduler.execute_scheduled_job(
+                            job,
+                            config=self.config,
+                            settings_store=self.settings_store,
+                            globals_scope=self.globals,
+                            store=self.schedule_store,
+                            vault=self.vault,
+                            vault_collection=self.vaults,
+                            service_registry=self.registry,
+                            cancel=job_cancel,
+                            on_start=_on_job_start,
+                            on_progress=_on_progress,
+                        )
+                    finally:
+                        self._scheduler_active_job_id = None
+                        self._scheduler_job_cancel = None
+                        with self._scheduler_progress_lock:
+                            self._scheduler_progress.pop(jid, None)
+                    results.append(res)
+        finally:
+            self._scheduler_active_job_id = None
+            self._scheduler_job_cancel = None
+            self._scheduler_running = False
+            with self._scheduler_progress_lock:
+                self._scheduler_progress.clear()
+            try:
+                self.call_from_thread(self._on_scheduled_batch_done, results, lock_busy)
+            except RuntimeError:
+                pass
+
+    def _on_scheduled_batch_done(
+        self,
+        results: list[scheduler.JobExecutionResult],
+        lock_busy: bool = False,
+    ) -> None:
+        from .mini_dock import ScheduledDockItem
+
+        if not self.has_active_session():
+            self.clear_terminal_progress()
+        self.refresh_schedule_indicators()
+        if lock_busy and not results:
+            self.notify(
+                tr("schedule.notify.lock_busy", default="Another scheduler run is already in progress."),
+                severity="warning",
+                timeout=4,
+            )
+            return
+        focus_attention_item = None
+        for res in results:
+            jid = res.job.id
+            if jid in self._scheduler_dismissed_stops:
+                self._scheduler_dismissed_stops.discard(jid)
+                self._scheduled_dock_items = [
+                    it for it in self._scheduled_dock_items if getattr(it, "job_id", "") != jid
+                ]
+                continue
+            rec_status = str(res.record.status or "")
+            if rec_status == "done":
+                dock_state = "done"
+            elif rec_status in {"needs_auth", "needs_review"}:
+                dock_state = "attention"
+            elif rec_status == "waiting_release":
+                dock_state = "waiting"
+            elif rec_status == "paused":
+                dock_state = "stopped"
+            else:
+                dock_state = "failed"
+            item = self._find_scheduled_dock_item(jid)
+            if item is None:
+                item = ScheduledDockItem(
+                    job_id=jid,
+                    job_name=res.job.name,
+                    service_id=res.job.service_id,
+                    started_at=time.monotonic(),
+                )
+                self._scheduled_dock_items.append(item)
+            item.state = dock_state
+            item.finished_at = time.monotonic()
+            item.summary = str(res.record.summary or "")
+            item.record_id = str(res.record.id or "")
+            item.attention_code = rec_status if rec_status in {"needs_auth", "needs_review"} else ""
+            item.version += 1
+            if dock_state == "attention":
+                focus_attention_item = item
+
+            sev = (
+                "information"
+                if res.ok
+                else ("warning" if rec_status in {"needs_auth", "needs_review", "paused"} else "error")
+            )
+            self.notify(
+                f"{res.job.name}: {res.record.summary}",
+                title=tr("schedule.title", default="Scheduled downloads"),
+                severity=sev,
+                timeout=6,
+            )
+            self.emit_completion_alert(res.job.name, res.record.summary)
+
+        if focus_attention_item is not None and focus_attention_item in self.dock_items:
+            self._mini_dock_index = self.dock_items.index(focus_attention_item)
+            self._mini_dock_collapsed = False
+        self._clamp_mini_dock_index()
+        self.sync_mini_dock()
+        if self._scheduler_queued_ids and not self.has_active_session():
+            self._drain_queued_schedules()
 
     @property
     def playready_ready(self) -> bool:
@@ -1071,13 +1995,15 @@ class UnidlApp(App):
 
     def apply_layout_density(self, *, height: int | None = None) -> None:
         """Apply compact/comfortable/auto spacing across the app and mounted screens."""
+        rows = height if height is not None else getattr(self.size, "height", 0)
         mode = self.density_mode
         if mode == "compact":
             is_short = True
         elif mode == "comfortable":
-            is_short = False
+            # Enforce a minimum viewport floor so a 24-row terminal never loses
+            # the bottom filter or results behind a 6-row banner.
+            is_short = bool(rows and rows < 26)
         else:
-            rows = height if height is not None else getattr(self.size, "height", 0)
             is_short = bool(rows and rows < ROOMY_ROWS)
         self.set_class(is_short, "short")
         if not self.is_running:
@@ -1094,6 +2020,12 @@ class UnidlApp(App):
             if callable(resize_spacing):
                 try:
                     resize_spacing()
+                except Exception:
+                    pass
+            render_setup = getattr(screen, "_render_setup_note", None)
+            if callable(render_setup):
+                try:
+                    render_setup()
                 except Exception:
                     pass
             refresh_banner = getattr(screen, "refresh_banner", None)
@@ -1113,6 +2045,7 @@ class UnidlApp(App):
             self.title_color_mode,
             dark=self.palette.dark,
             accent=self.accent_mode,
+            palette=self.palette,
         )
         if self.title_color_mode == DEFAULT_TITLE_COLOR and len(stops) == 1:
             return "$accent"
@@ -1285,6 +2218,7 @@ class UnidlApp(App):
         if palette_for(current).dark:
             self._last_dark_theme = current
         wanted = self.next_toggle_theme()
+        self._preview_theme = None
         self.globals.set("theme", wanted)
         self.apply_theme()
         self.notify(
@@ -1378,13 +2312,43 @@ class UnidlApp(App):
         if not custom_notice:
             from textual.screen import ModalScreen
 
-            if isinstance(self.screen, ModalScreen):
+            running_bg_count = sum(
+                1
+                for ctrl in self._minimized_sessions
+                if getattr(ctrl, "is_actively_working", False)
+            ) + sum(
+                1
+                for item in self._scheduled_dock_items
+                if getattr(item, "state", "") == "running"
+            )
+            if running_bg_count == 0 and self._scheduler_running:
+                running_bg_count = 1
+            if running_bg_count:
+                self.notify(
+                    tr(
+                        "mini_dock.quit_guard",
+                        count=running_bg_count,
+                        default=f"{running_bg_count} background download(s) still running — press Esc again to stop and quit",
+                    ),
+                    severity="warning",
+                    timeout=max(QUIT_CONFIRM_WINDOW, 3.0),
+                )
+            elif isinstance(self.screen, ModalScreen):
                 self.notify(
                     tr("notify.quit_again_modal", default="Press ^q again to quit"),
                     timeout=QUIT_CONFIRM_WINDOW,
                 )
             else:
                 self.notify(tr("notify.quit_again"), timeout=QUIT_CONFIRM_WINDOW)
+
+    def action_palette_quit(self) -> None:
+        """Exit directly from an explicit Command Palette Quit when idle."""
+        if self.has_active_session() or self._scheduler_running or any(
+            getattr(item, "state", "") == "running" for item in self._scheduled_dock_items
+        ):
+            self.action_global_quit()
+            return
+        self.exit()
 
     def disarm_quit(self) -> None:
         """A resumed queue must not confirm an earlier Escape."""
@@ -1451,7 +2415,7 @@ class UnidlApp(App):
         """
         from .search import GlobalSearchScreen
 
-        if isinstance(self.screen, GlobalSearchScreen):
+        if isinstance(self.screen, (GlobalSearchScreen, ModalScreen)):
             return
         self.push_screen(GlobalSearchScreen(service=getattr(self.screen, "service", None)))
 
@@ -1519,7 +2483,7 @@ class UnidlApp(App):
         from .search import GlobalSearchScreen
         from .vault_screen import AddKeysResult, AddKeysScreen
 
-        if isinstance(self.screen, AddKeysScreen):
+        if isinstance(self.screen, (AddKeysScreen, ModalScreen)):
             return
         current = self.screen
         service = getattr(current, "service", None)

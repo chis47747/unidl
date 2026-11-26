@@ -2,6 +2,8 @@
 
 # UI design rules
 
+[English](ui-design.md) | [简体中文](zh-CN/ui-design.md)
+
 Binding rules for every screen in unidl. If a screen breaks one of these, the
 screen is wrong, not the rule.
 
@@ -17,16 +19,18 @@ one question.
 | 3 | Flow | the service's actual work: which title, season, track | `tui/flow_screen.py:FlowScreen` |
 | 4 | Delivery | download it, or show the command | `tui/download_screen.py:DownloadScreen` |
 
-The Home platform list can be cycled with `v` or the `view` control at the far
-right of the `SERVICES … available` heading. It has three deterministic views:
-A–Z, country, and media type. Country is metadata, not a live location check: a
-service's first `GEOFENCE` code is its primary market and an empty declaration
-is International. Media type is declared by the service as audio, video, or
-both; the combined value gets its own “Audio + video” section so a platform that
-supports both modes is not hidden from either audience. Filtering, keyboard navigation
+The Home platform list can be cycled with `ctrl+g`, `v`, or the `view` control
+at the far right of the `SERVICES … available` heading. It has three
+deterministic views: A–Z, country, and media type. Country is metadata, not a
+live location check: a service's first `GEOFENCE` code is its primary market and
+an empty declaration is International. Media type is declared by the service as
+audio, video, or both; the combined value gets its own “Audio + video” section
+so a platform that supports both modes is not hidden from either audience.
+Recently opened services appear in a compact **Recently used** bar (up to five
+entries) above the grid when the filter is empty. Filtering, keyboard navigation
 and numeric addresses continue to work in every view. The status line is
-reserved for run state and entry points: CDM, DRM, after-picking action, config,
-readiness, and import.
+reserved for run state and entry points: CDM, DRM, after-picking action,
+readiness, import, and schedule.
 
 The two caption values below the Home wordmark are controls as well. Clicking
 the copyright opens the in-app open-source acknowledgements; clicking the
@@ -158,15 +162,16 @@ smaller the title.
 | 4 Delivery | service name as bold text | 1 row |
 
 Below the title, one row of state and parameters. On screen 1 that is the CDM,
-the DRM system, what happens after a pick, and the config file. On screens 2 to 4
-it is the signed-in account, the CDM, and the active track preferences.
+the DRM system, what happens after a pick, readiness, imports, and scheduled
+downloads. On screens 2 to 4 it is the signed-in account, the CDM, and the
+active track preferences.
 
 Service names are data, not interface messages. They are kept in their original
 Unicode form and rendered through the bidi-safe boundary; CJK/wide characters
 use terminal-cell widths, and scripts without the hand-drawn Latin glyph table
 are drawn as a six-row half-block mosaic of the real glyphs. A framed tile is
-only the last resort when no font can rasterise the name. A future interface-language setting must
-translate only UniDL-owned labels and prompts, never service names, title data,
+only the last resort when no font can rasterise the name. Interface localization
+translates only UniDL-owned labels and prompts, never service names, title data,
 URLs, filenames, KIDs or API locale settings. See [i18n.md](i18n.md).
 
 ### Log band
@@ -272,8 +277,10 @@ Every item on the main screen's status row is a control, not a label:
 |------|-------------|
 | `cdm <name>` | open the device picker |
 | `drm <system>` | cycle through registered DRM systems |
-| `after picking <action>` | cycle download / command only / ask |
-| `config <file>` | open the config file in the system default editor |
+| `after picking <action>` | cycle download / command only / list / export / ask |
+| `ready` / status | open the readiness & diagnostics report |
+| `import [count]` | open the export import queue |
+| `schedule [summary]` | open the Scheduled downloads & Upcoming Radar manager |
 
 Each is its own widget rather than a span of markup, because a widget can have a
 `:hover` style and a span cannot. The hover highlight *is* the affordance.
@@ -364,7 +371,7 @@ each screen keeps to one question.
 | | Screen 1 | Screens 2 to 4 |
 |---|----------|----------------|
 | Search | services, titles, whole key vault | that service's keys |
-| Settings | six concise global managers: Download behavior, DRM & vaults, Files & naming, Proxy & VPN, JustWatch search, and Interface & diagnostics | that service's own options, License and vaults policy, and track preferences |
+| Settings | seven concise global managers: Download behavior, Services, DRM & vaults, Files & naming, Proxy & VPN, JustWatch search, and Interface & diagnostics | that service's own options, License and vaults policy, and track preferences |
 
 Service settings apply to that service alone.
 
@@ -410,17 +417,31 @@ Apply this at the shared picker/table/header renderer, not inside an individual
 service. Exercise mixed Hebrew or Arabic, Latin, numbers, combining marks and
 CJK with the interface test suite.
 
-## Colour
+## Colour and appearance
 
-Two palettes, dark and light. Dark is the default,
-chosen there because it quantizes cleanly on 256-colour and 16-colour terminals
-rather than requiring truecolor. Light exists because a dark interface is
-unreadable in a light terminal, and that is not a preference we get to have on
-the user's behalf.
+UniDL ships seven themes built on semantic role tokens: **Dark** (default),
+**Light**, **Tokyo Night**, **Catppuccin Mocha**, **Nord**, **Gruvbox**, and
+**High Contrast**. Dark remains the default because it quantizes cleanly even on
+256-colour terminals; Light and High Contrast cover bright terminals and
+accessibility needs without requiring custom stylesheets.
 
-Colours are named by **role**, not by hue, so the light palette can pick a
-different hue for the same job without any call site lying about it: `#9ece6a` on
-white is barely legible, so `ok` is a deeper green there while staying green.
+On top of the base theme, **Settings → Interface & diagnostics** exposes four
+orthogonal appearance controls, all with **real-time live preview** (highlighting
+a choice repaints immediately; `Enter` / **Apply** saves and `Esc` restores the
+previous value):
+
+- **Accent color** (`accent_color`): 9 presets (`violet`, `colorful`, `blue`,
+  `cyan`, `green`, `amber`, `orange`, `rose`, `mono`).
+- **Home title color** (`title_color`): follow accent, or 12 gradient/solid
+  banner presets (`rainbow`, `aurora`, `sunset`, `ocean`, plus solid hues).
+- **Layout density** (`layout_density`): `auto` (adapts to terminal height),
+  `comfortable`, or `compact`.
+- **Status colors** (`semantic_colors`): `default` or `colorblind` (Okabe–Ito
+  high-distinction OK / warning / error roles).
+
+Colours are named by **role**, not by hue, so every theme can choose appropriate
+contrast for its own background (for example, `ok` is a bright green on Dark and
+a deeper forest green on Light). Baseline Dark and Light tokens:
 
 | Role | Used for | Dark | Light |
 |------|----------|------|-------|

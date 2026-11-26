@@ -1,5 +1,7 @@
 # Third-party exports
 
+[English](third-party-exports.md) | [简体中文](zh-CN/third-party-exports.md)
+
 UniDL has two deliberately separate export paths:
 
 * **UniDL native exports** (`kind: unidl-export`) are read by UniDL's versioned

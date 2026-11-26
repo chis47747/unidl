@@ -1,5 +1,7 @@
 # Requirements and installation
 
+[English](requirements.md) | [简体中文](zh-CN/requirements.md)
+
 ## Supported runtime
 
 UniDL requires **Python 3.11 or newer** and runs on supported releases of
@@ -11,10 +13,9 @@ ships `requirements.txt` as a convenient, minimum-version installation list and
 `requirements-dev.txt` for the test and lint toolchain. `pip` resolves the
 transitive dependencies automatically.
 
-## Install from a published package
+## Install from PyPI
 
-When a UniDL release is published to PyPI, install it into a virtual environment
-with:
+Install the published package into a virtual environment:
 
 ~~~console
 python3 -m venv .venv
@@ -23,13 +24,12 @@ python -m pip install --upgrade pip
 python -m pip install unidl
 ~~~
 
-The `unidl` command is installed by the package entry point. The package name is
-also available to tools that use `python -m pip`; using the interpreter's pip
-avoids accidentally installing into a different Python environment.
+Using `python -m pip` ensures the `unidl` entry point is installed into the
+active interpreter's environment.
 
 ## Install from a source checkout
 
-For a normal user install from a checked-out release:
+For a regular install from a local checkout:
 
 ~~~console
 python3 -m venv .venv
@@ -38,7 +38,7 @@ python -m pip install --upgrade pip
 python -m pip install .
 ~~~
 
-For development, install the editable package and its checks:
+For development, install editable mode with test and lint tools:
 
 ~~~console
 python -m pip install -e '.[dev]'
@@ -50,15 +50,11 @@ The equivalent requirements-file form is:
 python -m pip install -r requirements-dev.txt
 ~~~
 
-`uv` users can create the same environment with:
+With `uv`:
 
 ~~~console
 uv sync --extra dev
 ~~~
-
-The current source checkout is therefore package-installable now; a plain
-`pip install unidl` command becomes the shortest route once the project is
-published to the Python package index.
 
 ## Required external tools
 
@@ -77,6 +73,10 @@ the normal `.exe`/`.cmd` extension.
   system; a `.mld` device still needs its referenced WebAssembly module.
 - **mkvmerge** is optional. It is used when selected or when it gives a better
   Matroska result; FFmpeg remains the fallback where possible.
+- **MP4Box** (GPAC) is optional and is used when MP4Box muxing is selected or
+  for stereoscopic 3D VOD outputs.
+- **dovi_tool** is optional and is only needed for Dolby Vision + HDR10 hybrid
+  output.
 - **aria2c** is optional and is used only when the user selects that segment
   backend.
 - **curl** is optional for services that explicitly declare it as a helper or
@@ -114,4 +114,5 @@ Read-only checks are useful before opening a service:
 ~~~console
 unidl --config ./unidl.yaml services
 unidl --config ./unidl.yaml cdm --check
+unidl --config ./unidl.yaml schedule list
 ~~~

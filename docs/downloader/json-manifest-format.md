@@ -1,5 +1,7 @@
 # UniDL JSON Manifest Format
 
+[English](json-manifest-format.md) | [简体中文](../zh-CN/downloader/json-manifest-format.md)
+
 This file defines the stable JSON input format accepted by `UniDL` for direct URL track lists.
 
 ## Root

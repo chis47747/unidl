@@ -541,11 +541,66 @@ class MultiPickWidget(_Filterable, _NumberJump):
         keys = tr("ask.multi.keys", enter=enter) + tr("ask.multi.invert_hint")
         if self.filterable:
             keys += tr("ask.multi.tab_filter")
-        counted = f"[$accent]{tr('ask.multi.selected', picked=picked, total=total)}[/]"
+        if self._is_track_pick():
+            summary_parts = self._track_summary_parts()
+            counted_text = (
+                tr("ask.multi.track_selected", summary=summary_parts, total=total)
+                if summary_parts
+                else tr("ask.multi.track_none", total=total)
+            )
+            counted = f"[$accent]{visual_markup(counted_text)}[/]"
+        else:
+            counted = f"[$accent]{tr('ask.multi.selected', picked=picked, total=total)}[/]"
         if self._filtered and (self._chosen - set(self._visible)):
             counted += f"[$dim]{tr('ask.multi.hidden')}[/]"
         self.query_one("#multi-hint", Label).update(f"[$dim]{keys}[/]   {counted}")
         self._render_summary()
+
+    def _is_track_pick(self) -> bool:
+        return any(getattr(choice.value, "media_type", "") for choice in self.ask.choices)
+
+    def _track_summary_parts(self) -> str:
+        chosen = sorted(index for index in self._chosen if 0 <= index < len(self.ask.choices))
+        if not chosen:
+            return ""
+        values = [self.ask.choices[index].value for index in chosen]
+        videos: list[object] = []
+        audios: list[object] = []
+        subs: list[object] = []
+        others = 0
+        for item in values:
+            kind = str(getattr(item, "media_type", "") or "").lower()
+            if kind == "video":
+                videos.append(item)
+            elif kind == "audio":
+                audios.append(item)
+            elif kind in {"subtitle", "subtitles", "text"}:
+                subs.append(item)
+            else:
+                others += 1
+        parts: list[str] = []
+        if videos:
+            res = next(
+                (
+                    str(getattr(v, "resolution", "") or "").rsplit("x", 1)[-1]
+                    for v in videos
+                    if getattr(v, "resolution", None)
+                ),
+                "",
+            )
+            suffix = f" ({res}p)" if res.isdigit() else ""
+            parts.append(f"{tr('ask.multi.summary_video', count=len(videos))}{suffix}")
+        if audios:
+            langs = list(dict.fromkeys(str(getattr(a, "language", "") or "") for a in audios if getattr(a, "language", None)))
+            suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
+            parts.append(f"{tr('ask.multi.summary_audio', count=len(audios))}{suffix}")
+        if subs:
+            langs = list(dict.fromkeys(str(getattr(s, "language", "") or "") for s in subs if getattr(s, "language", None)))
+            suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
+            parts.append(f"{tr('ask.multi.summary_sub', count=len(subs))}{suffix}")
+        if others:
+            parts.append(tr("ask.multi.summary_other", count=others))
+        return " · ".join(parts)
 
     @staticmethod
     def _format_spans(indexes: list[int]) -> str:
@@ -567,51 +622,11 @@ class MultiPickWidget(_Filterable, _NumberJump):
         return ", ".join(spans)
 
     def _selection_summary(self) -> str:
-        if not self._chosen:
+        if not self._chosen or self._is_track_pick():
             return ""
         chosen = sorted(index for index in self._chosen if 0 <= index < len(self.ask.choices))
         if not chosen:
             return ""
-        values = [self.ask.choices[index].value for index in chosen]
-        media_items = [val for val in values if getattr(val, "media_type", "")]
-        if media_items:
-            videos: list[object] = []
-            audios: list[object] = []
-            subs: list[object] = []
-            others = 0
-            for item in values:
-                kind = str(getattr(item, "media_type", "") or "").lower()
-                if kind == "video":
-                    videos.append(item)
-                elif kind == "audio":
-                    audios.append(item)
-                elif kind in {"subtitle", "subtitles", "text"}:
-                    subs.append(item)
-                else:
-                    others += 1
-            parts: list[str] = []
-            if videos:
-                res = next(
-                    (
-                        str(getattr(v, "resolution", "") or "").rsplit("x", 1)[-1]
-                        for v in videos
-                        if getattr(v, "resolution", None)
-                    ),
-                    "",
-                )
-                suffix = f" ({res}p)" if res.isdigit() else ""
-                parts.append(f"{tr('ask.multi.summary_video', count=len(videos))}{suffix}")
-            if audios:
-                langs = list(dict.fromkeys(str(getattr(a, "language", "") or "") for a in audios if getattr(a, "language", None)))
-                suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
-                parts.append(f"{tr('ask.multi.summary_audio', count=len(audios))}{suffix}")
-            if subs:
-                langs = list(dict.fromkeys(str(getattr(s, "language", "") or "") for s in subs if getattr(s, "language", None)))
-                suffix = f" ({', '.join(langs[:4])}{'…' if len(langs) > 4 else ''})" if langs else ""
-                parts.append(f"{tr('ask.multi.summary_sub', count=len(subs))}{suffix}")
-            if others:
-                parts.append(tr("ask.multi.summary_other", count=others))
-            return f"[$dim]{tr('ask.multi.summary_prefix')}[/]  [$foreground]{visual_markup(' · '.join(parts))}[/]"
         spans = self._format_spans(chosen)
         return (
             f"[$dim]{tr('ask.multi.summary_prefix')}[/]  "
@@ -898,7 +913,7 @@ class TextWidget(ManualStep, AskWidget):
             )
         yield Input(
             value=self.ask.default,
-            placeholder=visual_text(self.ask.placeholder or tr("ask.placeholder")),
+            placeholder=self.ask.placeholder or tr("ask.placeholder"),
             password=self.ask.password,
             classes="ask-input",
         )
@@ -1033,7 +1048,7 @@ class FormWidget(ManualStep, AskWidget):
             )
             yield Input(
                 value=spec.default,
-                placeholder=visual_text(spec.placeholder),
+                placeholder=spec.placeholder,
                 password=spec.password,
                 classes="ask-input form-input",
                 id=f"field-{spec.key}",

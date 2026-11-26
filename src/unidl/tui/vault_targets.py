@@ -78,7 +78,7 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
         self.title = title or tr("targets.title")
         self._boxes: list[Checkbox] = []
         self._all: Checkbox | None = None
-        self._syncing = False
+        self._has_excluded_disabled = False
 
     def compose(self) -> ComposeResult:
         has_remote = any(descriptor.remote for descriptor in self.descriptors)
@@ -157,14 +157,21 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
         selected = None if self.current is None else {
             name.casefold() for name in self.current
         }
-        for box, descriptor in zip(self._boxes, self.descriptors, strict=True):
-            box.value = descriptor.enabled and (
-                selected is None or descriptor.name.casefold() in selected
-            )
-        enabled_boxes = [box for box, descriptor in zip(self._boxes, self.descriptors, strict=True) if descriptor.enabled]
-        self._all.value = bool(enabled_boxes) and (
-            selected is None or all(box.value for box in enabled_boxes)
+        self._has_excluded_disabled = selected is not None and any(
+            (not descriptor.enabled) and descriptor.name.casefold() not in selected
+            for descriptor in self.descriptors
         )
+        for box, descriptor in zip(self._boxes, self.descriptors, strict=True):
+            with box.prevent(Checkbox.Changed):
+                box.value = descriptor.enabled and (
+                    selected is None or descriptor.name.casefold() in selected
+                )
+        enabled_boxes = [box for box, descriptor in zip(self._boxes, self.descriptors, strict=True) if descriptor.enabled]
+        with self._all.prevent(Checkbox.Changed):
+            self._all.value = bool(enabled_boxes) and (
+                selected is None
+                or (all(box.value for box in enabled_boxes) and not self._has_excluded_disabled)
+            )
         self._update_count()
         focusable = next(
             (box for box, descriptor in zip(self._boxes, self.descriptors, strict=True) if descriptor.enabled),
@@ -189,29 +196,29 @@ class VaultTargetScreen(ModalScreen[VaultTargetResult | None]):
         )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if self._syncing:
-            return
         if event.checkbox is self._all:
-            self._syncing = True
-            try:
-                for box, descriptor in zip(self._boxes, self.descriptors, strict=True):
-                    if descriptor.enabled:
-                        box.value = bool(event.value)
-            finally:
-                self._syncing = False
+            checked = bool(event.value)
+            if checked:
+                self._has_excluded_disabled = False
+            for box, descriptor in zip(self._boxes, self.descriptors, strict=True):
+                if descriptor.enabled:
+                    with box.prevent(Checkbox.Changed):
+                        box.value = checked
             self._update_count()
             return
         if event.checkbox in self._boxes and self._all is not None:
-            self._syncing = True
-            try:
-                enabled_boxes = [
-                    box
-                    for box, descriptor in zip(self._boxes, self.descriptors, strict=True)
-                    if descriptor.enabled
-                ]
-                self._all.value = bool(enabled_boxes) and all(box.value for box in enabled_boxes)
-            finally:
-                self._syncing = False
+            enabled_boxes = [
+                box
+                for box, descriptor in zip(self._boxes, self.descriptors, strict=True)
+                if descriptor.enabled
+            ]
+            all_checked = (
+                bool(enabled_boxes)
+                and all(box.value for box in enabled_boxes)
+                and not self._has_excluded_disabled
+            )
+            with self._all.prevent(Checkbox.Changed):
+                self._all.value = all_checked
             self._update_count()
 
     def action_cancel(self) -> None:

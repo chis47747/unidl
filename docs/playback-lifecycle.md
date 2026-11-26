@@ -1,5 +1,7 @@
 # Playback session lifecycle
 
+[English](playback-lifecycle.md) | [简体中文](zh-CN/playback-lifecycle.md)
+
 Service code owns any provider playback/concurrency session. The native
 downloader and shared DRM layer must not invent, refresh, or close a provider
 session.

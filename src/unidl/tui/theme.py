@@ -104,10 +104,10 @@ DARK = Palette(
     fg="#e1e1e1",
     fg2="#c8c8c8",
     muted="#9c9c9c",
-    dim="#929292",
+    dim="#999999",
     # the row numbers live here, and a number you are asked to type has to be as
     # readable as the name beside it - on the page and on the row under the pointer
-    gutter="#8c8c8c",
+    gutter="#969696",
     accent="#bb9af7",
     manifest="#7aa2f7",
     ok="#9ece6a",
@@ -134,7 +134,7 @@ DARK = Palette(
     panel="#1c1c1c",
     highlight="#242424",
     hover="#2c2c2c",
-    visual="#363636",
+    visual="#2f2f2f",
     scroll_bg="#111111",
     # a thumb you can find: the old #242424 was a ratio of 1.2 against the trough
     scroll_fg="#616161",
@@ -204,8 +204,8 @@ TOKYO_NIGHT = Palette(
     fg="#c0caf5",
     fg2="#a9b1d6",
     muted="#9aa5ce",
-    dim="#8e98c2",
-    gutter="#8a95bf",
+    dim="#96a0c9",
+    gutter="#949ec7",
     accent="#bb9af7",
     manifest="#7aa2f7",
     ok="#9ece6a",
@@ -231,8 +231,8 @@ TOKYO_NIGHT = Palette(
     bg="#1a1b26",
     panel="#1f2335",
     highlight="#262b3d",
-    hover="#31374f",
-    visual="#3b4261",
+    hover="#282d42",
+    visual="#2e344c",
     scroll_bg="#16161e",
     scroll_fg="#565f89",
 )
@@ -243,8 +243,8 @@ CATPPUCCIN = Palette(
     fg="#cdd6f4",
     fg2="#bac2de",
     muted="#a6adc8",
-    dim="#969cb5",
-    gutter="#9197b0",
+    dim="#9ea4bd",
+    gutter="#9ca2bb",
     accent="#cba6f7",
     manifest="#89b4fa",
     ok="#a6e3a1",
@@ -270,8 +270,8 @@ CATPPUCCIN = Palette(
     bg="#1e1e2e",
     panel="#181825",
     highlight="#2b2c3d",
-    hover="#36384d",
-    visual="#45475a",
+    hover="#2f3143",
+    visual="#333547",
     scroll_bg="#11111b",
     scroll_fg="#6c7086",
 )
@@ -285,10 +285,10 @@ NORD = Palette(
     dim="#9ca8be",
     gutter="#96a3ba",
     accent="#88c0d0",
-    manifest="#81a1c1",
+    manifest="#96b7d8",
     ok="#a3be8c",
     warn="#ebcb8b",
-    error="#ee8490",
+    error="#f2919c",
     dv="#b48ead",
     hdr10="#ebcb8b",
     hdr10plus="#e39d7a",
@@ -309,8 +309,8 @@ NORD = Palette(
     bg="#21262f",
     panel="#272d38",
     highlight="#2e3440",
-    hover="#3b4252",
-    visual="#434c5e",
+    hover="#2c3340",
+    visual="#303746",
     scroll_bg="#1b2028",
     scroll_fg="#616e88",
 )
@@ -321,13 +321,13 @@ GRUVBOX = Palette(
     fg="#ebdbb2",
     fg2="#d5c4a1",
     muted="#bdae93",
-    dim="#a89984",
-    gutter="#a3947f",
+    dim="#afa08b",
+    gutter="#ad9e89",
     accent="#fabd2f",
-    manifest="#83a598",
+    manifest="#93b7aa",
     ok="#b8bb26",
     warn="#fabd2f",
-    error="#fb6b58",
+    error="#fc8472",
     dv="#d3869b",
     hdr10="#fabd2f",
     hdr10plus="#fe8019",
@@ -348,8 +348,8 @@ GRUVBOX = Palette(
     bg="#1d2021",
     panel="#262524",
     highlight="#2f2d2b",
-    hover="#3c3836",
-    visual="#504945",
+    hover="#34302d",
+    visual="#3a3532",
     scroll_bg="#181a1b",
     scroll_fg="#665c54",
 )
@@ -660,6 +660,7 @@ def title_color_stops(
     *,
     dark: bool,
     accent: str = DEFAULT_ACCENT,
+    palette: Palette | None = None,
 ) -> tuple[str, ...]:
     """Concrete hex stop(s) for rendering the ``unidl`` and service titles."""
     mode = normalize_title_color(title_color)
@@ -668,6 +669,8 @@ def title_color_stops(
         preset = ACCENT_PRESETS[accent_key]
         if preset.colorful:
             return TITLE_COLOR_PRESETS["rainbow"].stops_for(dark)
+        if palette is not None:
+            return (palette.accent,)
         return (preset.accent_for(dark),)
     return TITLE_COLOR_PRESETS[mode].stops_for(dark)
 
@@ -813,6 +816,7 @@ Screen {
     background: $base;
     color: $foreground;
     layout: vertical;
+    layers: base dock;
 }
 
 * {
@@ -1275,7 +1279,8 @@ AttachmentsScreen {
     min-width: 0;
     padding: 0 1;
 }
-.audio-track-controls .ask-hint {
+.audio-track-controls .ask-hint,
+.audio-track-controls #multi-hint {
     /* One status line is enough; shared hint padding can consume the only
        row available to a short audio batch picker. */
     height: 1;
@@ -2111,6 +2116,10 @@ TextWidget {
     color: $dim;
     padding: 0 1 1 1;
 }
+#multi-hint {
+    width: 1fr;
+    height: auto;
+}
 #multi-summary {
     display: none;
     height: 1;
@@ -2882,7 +2891,7 @@ ModalScreen {
 }
 
 /* ------------------------------------------------------- CDM / vault manager */
-#resource-manager-help, #storage-manager-help, #proxy-manager-help, #justwatch-settings-help, #settings-group-help {
+#resource-manager-help, #storage-manager-help, #proxy-manager-help, #justwatch-settings-help, #settings-group-help, #schedule-help {
     width: 1fr;
     max-width: 100%;
     box-sizing: border-box;
@@ -2895,15 +2904,15 @@ ModalScreen {
     padding: 0 3 1 3;
     color: $muted;
 }
-#resource-tabs, #storage-tabs, #proxy-tabs {
+#resource-tabs, #storage-tabs, #proxy-tabs, #schedule-tabs {
     height: 2;
     margin: 0 2;
     background: $base;
 }
-#resource-tabs Tab, #storage-tabs Tab, #proxy-tabs Tab {
+#resource-tabs Tab, #storage-tabs Tab, #proxy-tabs Tab, #schedule-tabs Tab {
     color: $muted;
 }
-#resource-tabs Tab.-active, #storage-tabs Tab.-active, #proxy-tabs Tab.-active {
+#resource-tabs Tab.-active, #storage-tabs Tab.-active, #proxy-tabs Tab.-active, #schedule-tabs Tab.-active {
     background: $highlight;
     color: $accent;
     text-style: bold;
@@ -2929,7 +2938,7 @@ ModalScreen {
 #storage-preview {
     width: 100%;
     height: auto;
-    max-height: 3;
+    max-height: 4;
     margin: 0 0 1 0;
     padding: 0 1;
     background: $recessed;
@@ -2938,7 +2947,7 @@ ModalScreen {
 #storage-editor-preview {
     width: 100%;
     height: auto;
-    max-height: 3;
+    max-height: 4;
     margin: 1 0 0 0;
     padding: 0 1;
     color: $fg2;
@@ -3099,22 +3108,40 @@ ModalScreen {
     background: $base;
     scrollbar-size-horizontal: 0;
 }
-#resource-manager-actions Button, #proxy-manager-actions Button {
+#schedule-manager-actions {
+    width: 100%;
+    height: 2;
+    margin: 1 0 0 0;
+    background: $base;
+    scrollbar-size-horizontal: 0;
+}
+#resource-manager-actions Button, #proxy-manager-actions Button, #schedule-manager-actions Button {
     width: auto;
     min-width: 10;
     height: 1;
     min-height: 1;
     margin: 0 1 0 0;
-    padding: 0 1;
+    padding: 0 2;
     border: none;
     background: $recessed;
     color: $fg2;
 }
-#resource-manager-actions Button:focus, #proxy-manager-actions Button:focus {
+#schedule-manager-actions Button.-primary {
+    background: $accent;
+    color: $base;
+    text-style: bold;
+}
+#schedule-manager-actions Button.-primary:focus,
+#schedule-manager-actions Button.-primary:hover {
+    background: $accent;
+    color: $base;
+    text-style: bold underline;
+}
+#resource-manager-actions Button:focus, #proxy-manager-actions Button:focus, #schedule-manager-actions Button:focus {
     background: $visual;
     color: $foreground;
 }
-#resource-manager-actions Button:disabled, #proxy-manager-actions Button:disabled {
+#resource-manager-actions Button:disabled, #proxy-manager-actions Button:disabled, #schedule-manager-actions Button:disabled {
     color: $gutter;
     background: transparent;
 }
@@ -3180,6 +3207,29 @@ ModalScreen {
 #resource-editor-fields Input:focus {
     border-left: solid $accent;
     background: $visual;
+}
+#resource-secret-row {
+    width: 100%;
+    height: 1;
+}
+#resource-secret-row Input {
+    width: 1fr;
+}
+#resource-secret-reveal {
+    width: auto;
+    min-width: 6;
+    height: 1;
+    margin: 0 0 0 1;
+    padding: 0 1;
+    border: none;
+    background: $highlight;
+    color: $fg2;
+    text-style: none;
+}
+#resource-secret-reveal:hover, #resource-secret-reveal:focus {
+    background: $accent;
+    color: $base;
+    text-style: bold;
 }
 #resource-editor-fields Select {
     width: 100%;
@@ -3340,14 +3390,14 @@ ModalScreen {
 }
 #resource-policy-gates {
     width: 100%;
-    height: 4;
+    height: 3;
     margin: 0 0 1 0;
     layout: horizontal;
     align: left top;
 }
 .resource-policy-gate {
     width: 1fr;
-    height: 4;
+    height: 3;
     margin: 0 1 0 0;
     padding: 0 1;
     background: $base;
@@ -3364,12 +3414,6 @@ ModalScreen {
     padding: 0 1;
     border-left: solid transparent;
     background: transparent;
-}
-.resource-policy-gate-note {
-    width: 100%;
-    height: 1;
-    padding: 0 1;
-    color: $muted;
 }
 #resource-policy-remote-operations-help {
     width: 100%;
@@ -3468,7 +3512,7 @@ ModalScreen {
     padding-top: 0;
 }
 .short #storage-preview {
-    max-height: 2;
+    max-height: 3;
     margin-bottom: 0;
 }
 .short #proxy-manager-body, .short #justwatch-settings-body {
@@ -3531,7 +3575,7 @@ ModalScreen {
     padding-top: 0;
     padding-bottom: 0;
 }
-.short #resource-policy-help, .short .resource-policy-gate-note,
+.short #resource-policy-help,
 .short #resource-policy-remote-operations-help {
     display: none;
 }
@@ -3865,7 +3909,6 @@ JumpToBottom:hover {
 .rtl .resource-field-label,
 .rtl #resource-editor-error,
 .rtl .resource-policy-section,
-.rtl .resource-policy-gate-note,
 .rtl #resource-policy-remote-operations-help,
 .rtl .resource-policy-target-title,
 .rtl .resource-policy-row Static,
@@ -3946,7 +3989,8 @@ JumpToBottom:hover {
 .rtl #search-statusline,
 .rtl #update-links,
 .rtl #resource-manager-actions,
-.rtl #proxy-manager-actions {
+.rtl #proxy-manager-actions,
+.rtl #schedule-manager-actions {
     align: right middle;
 }
 .rtl #modal-card Input,
@@ -4038,5 +4082,429 @@ JumpToBottom:hover {
 .rtl .recent-label,
 .rtl .recent-chip {
     margin: 0 0 0 1;
+}
+
+/* ----------------------------------------------------- poster rail & schedule */
+.poster-split {
+    width: 100%;
+    height: 1fr;
+}
+.poster-split > OptionList {
+    width: 1fr;
+    height: 1fr;
+}
+.poster-rail {
+    width: 44;
+    min-width: 34;
+    height: 1fr;
+    border-left: solid $rule;
+    background: $recessed;
+    padding: 1 2;
+}
+.poster-rail.compact-rail {
+    width: 36;
+}
+.poster-rail.wide-rail {
+    width: 48;
+}
+.rtl .poster-rail {
+    border-left: solid $rule;
+}
+.rtl .poster-meta {
+    text-align: right;
+}
+.poster-art-wrap {
+    width: 100%;
+    height: auto;
+    align-horizontal: center;
+    margin-bottom: 1;
+}
+.poster-status {
+    content-align: center middle;
+    color: $dim;
+    border: round $rule;
+}
+.poster-native,
+.poster-fallback {
+    width: auto;
+    height: auto;
+}
+.poster-meta-scroll {
+    width: 100%;
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+.poster-meta {
+    width: 100%;
+    height: auto;
+}
+
+ScheduleManagerScreen #schedule-help {
+    padding: 0 3 1 3;
+    color: $muted;
+    height: auto;
+}
+#schedule-manager-body {
+    width: 100%;
+    height: 1fr;
+    padding: 1 2 0 2;
+}
+ScheduleManagerScreen #schedule-list {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    background: $base;
+}
+ScheduleManagerScreen #schedule-list:focus > .option-list--option-highlighted {
+    background: $highlight;
+    color: $foreground;
+}
+
+.modal-card-head {
+    width: 100%;
+    height: 1;
+    margin: 0 0 1 0;
+}
+
+ScheduleEditorModal {
+    align: center middle;
+    background: $base 75%;
+    padding: 1 0;
+}
+#schedule-editor-card {
+    width: 104;
+    max-width: 96%;
+    height: 94%;
+    max-height: 96%;
+    border: round $rule;
+    background: $recessed;
+    padding: 1 2 0 2;
+}
+#schedule-editor-card .modal-card-actions {
+    height: 1;
+    margin: 1 0;
+}
+#schedule-editor-scroll {
+    width: 100%;
+    height: 1fr;
+    padding: 0 2 1 2;
+    background: $base;
+    border: round $rule;
+    scrollbar-size: 1 1;
+}
+#sched-context-banner {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border-left: solid $accent;
+    background: $recessed;
+}
+.rtl #sched-context-banner {
+    border-left: none;
+    border-right: solid $accent;
+}
+#schedule-editor-scroll Input {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    border-left: solid $rule;
+    background: $highlight;
+    color: $foreground;
+}
+#schedule-editor-scroll Input:focus {
+    border-left: solid $accent;
+    background: $visual;
+}
+#schedule-editor-scroll Select,
+.host-modal Select {
+    width: 100%;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: $foreground;
+}
+#schedule-editor-scroll Select > SelectCurrent,
+.host-modal Select > SelectCurrent {
+    width: 100%;
+    height: 1;
+    padding: 0 1 !important;
+    border: none !important;
+    border-left: solid $rule !important;
+    background: $highlight;
+    color: $foreground;
+}
+#schedule-editor-scroll Select > SelectCurrent Static#label,
+#schedule-editor-scroll Select > SelectCurrent.-has-value Static#label,
+.host-modal Select > SelectCurrent Static#label,
+.host-modal Select > SelectCurrent.-has-value Static#label {
+    color: $foreground;
+    text-style: bold;
+}
+#schedule-editor-scroll Select > SelectCurrent .arrow,
+.host-modal Select > SelectCurrent .arrow {
+    color: $accent;
+}
+#schedule-editor-scroll Select:focus,
+.host-modal Select:focus {
+    background: transparent;
+}
+#schedule-editor-scroll Select:focus > SelectCurrent,
+.host-modal Select:focus > SelectCurrent {
+    border-left: solid $accent !important;
+    background: $visual;
+}
+#schedule-editor-scroll Select > SelectOverlay,
+.host-modal Select > SelectOverlay {
+    height: auto;
+    min-height: 2;
+    max-height: 8;
+    padding: 0;
+    border: round $accent;
+    background: $recessed;
+    color: $foreground;
+}
+#schedule-editor-scroll Select > SelectOverlay > .option-list--option,
+.host-modal Select > SelectOverlay > .option-list--option {
+    padding: 0 1;
+    background: $recessed;
+    color: $fg2;
+}
+#schedule-editor-scroll Select > SelectOverlay > .option-list--option-highlighted,
+.host-modal Select > SelectOverlay > .option-list--option-highlighted {
+    background: $visual;
+    color: $foreground;
+    text-style: bold;
+}
+.rtl #schedule-editor-scroll Input,
+.rtl #schedule-editor-scroll Select > SelectCurrent,
+.rtl .host-modal Select > SelectCurrent {
+    border-left: none !important;
+    border-right: solid $rule !important;
+}
+.rtl #schedule-editor-scroll Input:focus,
+.rtl #schedule-editor-scroll Select:focus > SelectCurrent,
+.rtl .host-modal Select:focus > SelectCurrent {
+    border-left: none !important;
+    border-right: solid $accent !important;
+}
+.sched-sec-head {
+    width: 100%;
+    height: 1;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    color: $accent;
+    text-style: bold;
+    border-left: solid $accent;
+    background: $recessed;
+}
+.rtl .sched-sec-head {
+    border-left: none;
+    border-right: solid $accent;
+}
+.sched-sec-first {
+    margin-top: 0;
+}
+.sched-field-label {
+    color: $muted;
+    margin-top: 1;
+    height: 1;
+}
+.sched-label-tight {
+    margin-top: 0;
+}
+.sched-preflight {
+    height: 1;
+    margin-top: 0;
+    padding: 0 1;
+}
+.sched-two-col,
+.sched-three-col {
+    width: 100%;
+    height: auto;
+}
+.sched-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 2;
+}
+.sched-col-wide {
+    width: 2fr;
+}
+.sched-col-narrow {
+    width: 18;
+}
+.sched-col-last {
+    margin-right: 0;
+}
+#sched-time-presets {
+    width: 100%;
+    height: 1;
+    margin: 0 0 1 0;
+}
+#sched-time-presets Button {
+    width: auto;
+    min-width: 6;
+    height: 1;
+    min-height: 1;
+    margin: 0 1 0 0;
+    padding: 0 1;
+    border: none;
+    background: $recessed;
+    color: $fg2;
+}
+#sched-time-presets Button:focus,
+#sched-time-presets Button:hover {
+    background: $accent;
+    color: $base;
+    text-style: bold;
+}
+.sched-dry-run-box {
+    margin-top: 1;
+    padding: 0 1;
+    border: round $rule;
+    background: $recessed;
+    height: auto;
+}
+#host-status-scroll {
+    width: 100%;
+    height: auto;
+    max-height: 12;
+    scrollbar-size: 1 1;
+}
+.short #host-status-scroll {
+    max-height: 8;
+}
+.host-status-box {
+    margin: 0 0 1 0;
+    padding: 1 2;
+    border: round $rule;
+    background: $base;
+    height: auto;
+}
+.host-modal,
+.sources-modal,
+.tmdb-key-modal {
+    width: 82;
+    max-width: 94%;
+    height: auto;
+    max-height: 90%;
+}
+.run-log-modal {
+    width: 94;
+    max-width: 96%;
+    height: 82%;
+    max-height: 92%;
+}
+#upcoming-source-options {
+    height: auto;
+    max-height: 10;
+    margin: 0 0 1 0;
+}
+#run-log-scroll {
+    width: 100%;
+    height: 1fr;
+    border: round $rule;
+    background: $base;
+    padding: 1;
+    margin: 0 0 1 0;
+}
+.short #schedule-editor-card {
+    height: 96%;
+    max-height: 98%;
+    padding: 0 1;
+}
+.short #schedule-editor-scroll {
+    padding: 0 1;
+}
+/* ----------------------------------------------------- mini download dock */
+#mini-download-dock {
+    layer: dock;
+    dock: bottom;
+    width: 48;
+    height: auto;
+    margin: 0 0 2 0;
+    padding: 0 1;
+    background: $panel;
+    border: round $accent;
+    color: $foreground;
+}
+#mini-download-dock.mini-dock-attention {
+    border: round $warn;
+}
+#mini-download-dock.mini-dock-done {
+    border: round $ok;
+}
+#mini-download-dock.mini-dock-failed {
+    border: round $bad;
+}
+#mini-download-dock.mini-dock-paused {
+    border: round $muted;
+}
+#mini-download-dock.mini-dock-folded {
+    height: 1;
+    border: none;
+    background: $highlight;
+    padding: 0 1;
+    margin: 0 0 2 0;
+}
+#mini-download-dock.mini-dock-folded.mini-dock-attention {
+    background: $panel;
+    border-left: heavy $warn;
+}
+#mini-download-dock.mini-dock-narrow {
+    width: 1fr;
+    height: 1;
+    border: none;
+    border-top: none;
+    background: $panel;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+#mini-dock-head {
+    width: 1fr;
+    height: 1;
+    align-vertical: middle;
+}
+#mini-dock-title {
+    width: 1fr;
+    height: 1;
+    overflow: hidden;
+}
+#mini-dock-count {
+    width: auto;
+    height: 1;
+    padding: 0 1 0 0;
+}
+.mini-dock-btn {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    color: $fg2;
+    text-style: bold;
+}
+.mini-dock-btn:hover {
+    background: $hover;
+    color: $accent;
+}
+.mini-dock-nav {
+    padding: 0;
+    color: $muted;
+}
+#mini-dock-close:hover {
+    color: $bad;
+}
+#mini-dock-body {
+    width: 1fr;
+    height: auto;
+}
+#mini-dock-progress,
+#mini-dock-sub {
+    width: 1fr;
+    height: 1;
+    overflow: hidden;
 }
 """

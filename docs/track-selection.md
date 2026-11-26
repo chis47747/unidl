@@ -1,5 +1,7 @@
 # Track selection
 
+[English](track-selection.md) | [简体中文](zh-CN/track-selection.md)
+
 ## Embedded HLS closed captions
 
 A master playlist may declare `TYPE=CLOSED-CAPTIONS` with an `INSTREAM-ID`

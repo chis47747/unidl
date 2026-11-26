@@ -1,5 +1,7 @@
 # Mixed import download queue
 
+[English](import-queue.md) | [简体中文](zh-CN/import-queue.md)
+
 Open **Import → Mixed download queue**, the bold first entry in the import list.
 This queue combines individual titles from different exports, services and media
 types without merging their manifests, keys or service settings into a new file.

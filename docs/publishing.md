@@ -1,5 +1,7 @@
 # Publishing UniDL
 
+[English](publishing.md) | [简体中文](zh-CN/publishing.md)
+
 GitHub and PyPI are separate services. A GitHub login controls repository
 operations; it does not select the PyPI account that owns a package. UniDL is
 uploaded with a PyPI API token or with a GitHub Actions trusted publisher.

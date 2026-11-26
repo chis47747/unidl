@@ -190,13 +190,40 @@ def stable_help(active_markup: str, peer_markups: Iterable[str]) -> StableHelp:
 _MANAGER_GROUP_KEYS: dict[str, tuple[str, ...]] = {
     "storage": (
         "download_dir",
-        "subtitle_output",
-        "filename_template",
-        "movie_template",
+        "filename_style",
+        "name_template_episode",
         "episode_folder_template",
+        "name_template_movie",
+        "release_template",
+        "release_tag",
     ),
     "proxy_manager": ("proxy", "proxy_downloads"),
-    "justwatch": ("justwatch_country", "justwatch_language"),
+    "justwatch": (
+        "justwatch_search_region",
+        "justwatch_regions",
+        "upcoming_sources",
+        "tmdb_api_key",
+        "upcoming_installed_only",
+    ),
+    "resources": (
+        "drm_system",
+        "cdm_rules",
+        "local_vault",
+        "remote_vault",
+        "remote_vault_home_search",
+        "remote_vault_manual_add",
+        "remote_vault_auto_lookup",
+        "remote_vault_auto_store",
+        "vault_read_targets",
+        "vault_write_targets",
+        "vault_search_targets",
+    ),
+    "services_manager": (
+        "license_action",
+        "dolby_vision_hybrid",
+        "fetch_chapters",
+        "fetch_actual_bitrate",
+    ),
 }
 
 
@@ -220,14 +247,10 @@ def is_setting_modified(spec, scope) -> bool:
             for key in _MANAGER_GROUP_KEYS[picker]
             if key in scope.spec_by_key
         )
-    if picker in {"resources", "services_manager"} or getattr(spec, "kind", "") == "action":
+    if getattr(spec, "kind", "") == "action":
         return False
 
     current = scope.get(spec.key)
     if getattr(spec, "inherit_global", False) and getattr(scope, "parent", None) is not None:
-        if not scope.has_override(spec.key):
-            return False
-        if spec.key == "license_action" and spec.default == "custom" and not scope.parent.has_override(spec.key):
-            return current != spec.coerce(spec.default)
-        return current != scope.parent.get(spec.key)
+        return bool(scope.has_override(spec.key))
     return current != spec.coerce(spec.default)

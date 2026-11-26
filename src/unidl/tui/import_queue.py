@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from ..core.terminal_cells import cell_width, crop
 from .bidi import visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 from .job_details import JobDetails
-from .session import QUEUED, RUNNING, Job, SessionController, _Sink
+from .session import QUEUED, RUNNING, SKIPPED, Job, SessionController, _Sink
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,7 @@ class ImportQueueScreen(Screen[None]):
         self.items: list[ImportQueueItem] = []
         self._rows: list[tuple[Path, exports.Document | None, str]] = []
         self._drawing = False
-        self._discard_armed = False
+        self._discard_armed_at: float | None = None
         self._scan_generation = 0
 
     def compose(self) -> ComposeResult:
@@ -344,7 +345,7 @@ class ImportQueueScreen(Screen[None]):
         )
 
     def _render_queue(self) -> None:
-        self._discard_armed = False
+        self._discard_armed_at = None
         listing = self.query_one("#import-queue-items", OptionList)
         previous = listing.highlighted
         self._drawing = True
@@ -399,10 +400,14 @@ class ImportQueueScreen(Screen[None]):
     def action_move_down(self) -> None:
         self._move(1)
 
+    def on_screen_resume(self) -> None:
+        self._discard_armed_at = None
+
     def action_start(self) -> None:
         if not self.items:
             self.notify(tr("import.queue.empty"), severity="warning")
             return
+        self._discard_armed_at = None
         self.app.open_import_queue(tuple(self.items))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -416,8 +421,10 @@ class ImportQueueScreen(Screen[None]):
             action()
 
     def go_back(self) -> bool:
-        if self.items and not self._discard_armed:
-            self._discard_armed = True
+        now = time.monotonic()
+        armed = self._discard_armed_at is not None and (now - self._discard_armed_at) <= 4.0
+        if self.items and not armed:
+            self._discard_armed_at = now
             self.notify(
                 tr(
                     "confirm.discard_queue",
@@ -428,6 +435,7 @@ class ImportQueueScreen(Screen[None]):
                 timeout=4,
             )
             return True
+        self._discard_armed_at = None
         if self.app.screen is self:
             self.dismiss(None)
         return True
@@ -517,7 +525,22 @@ class ImportQueueController(SessionController):
         return FlowContext(settings=self.settings, sink=_Sink(self), interactive=True)
 
     def process(self, playback, presenter, ctx):
-        self._switch_source(self._playback_slots[id(playback)])
+        slot = self._playback_slots[id(playback)]
+        row = self._queue_rows[slot]
+        if row.user_skipped:
+            self._playback_slots.pop(id(playback), None)
+            if row in self.pending_jobs:
+                self.pending_jobs.remove(row)
+            row.state = SKIPPED
+            row.playback = playback
+            row.attempts = 0
+            row.note = row.note or tr("job.skipped_by_user")
+            self.jobs.append(row)
+            self._job_slots[id(row)] = slot
+            self.render_queue()
+            self._on_ui(self._after_job)
+            return SKIPPED
+        self._switch_source(slot)
         return super().process(playback, presenter, self._source_context())
 
     def _start_job(self, playback):

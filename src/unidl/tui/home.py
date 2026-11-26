@@ -42,7 +42,7 @@ from ..core import drm as drm_registry
 from ..core import service_catalog
 from ..core.cdm import WIDEVINE
 from ..core.devreload import ReloadError
-from ..core.i18n import cell_width, get_translator, phrase, tr
+from ..core.i18n import cell_width, get_translator, is_rtl_locale, phrase, tr
 from ..core.output_paths import finished_download_root
 from ..core.service import Service
 from ..core.terminal_cells import crop, fit_middle
@@ -162,19 +162,19 @@ class HomeScreen(Screen):
             yield Static("·", id="caption-separator", classes="caption-separator")
             yield StatusChip("show_about", id="caption-copyright", classes="caption-link")
         # every item on this row is a control: click the CDM to change it, the
-        # DRM system to switch it, the action to cycle it, the config to open it
+        # DRM system to switch it, the action to cycle it, or schedule to plan runs
         with Horizontal(id="statusline"):
             yield StatusChip("pick_cdm", id="chip-cdm")
             yield Static("[$gutter]·[/]", id="sep-drm", classes="chip-sep")
             yield StatusChip("toggle_drm", id="chip-drm")
             yield Static("[$gutter]·[/]", id="sep-mode", classes="chip-sep")
             yield StatusChip("cycle_mode", id="chip-mode")
-            yield Static("[$gutter]·[/]", id="sep-config", classes="chip-sep")
-            yield StatusChip("open_config", id="chip-config")
             yield Static("[$gutter]·[/]", id="sep-ready", classes="chip-sep")
             yield StatusChip("open_readiness", id="chip-ready")
             yield Static("[$gutter]·[/]", id="sep-import", classes="chip-sep")
             yield StatusChip("open_imports", id="chip-import")
+            yield Static("[$gutter]·[/]", id="sep-schedule", classes="chip-sep")
+            yield StatusChip("open_schedule", id="chip-schedule")
 
     def compose(self) -> ComposeResult:
         yield from self.compose_header()
@@ -233,6 +233,8 @@ class HomeScreen(Screen):
         elif self.USES_SERVICE_GRID:
             if self._rendered_locale != get_translator().locale:
                 self.relocalize()
+            else:
+                self.refresh_env()
             self.rebuild()
         self.call_later(self.app.refresh_home_interface)
 
@@ -250,6 +252,11 @@ class HomeScreen(Screen):
             found.first(Input).placeholder = tr("home.filter_placeholder")
         self._render_caption()
         self._render_services_heading(len(self.app.home_services))
+        if self.USES_SERVICE_GRID and self._service_view() != "alphabetical" and self._heads:
+            groups = self._groups_for_view(list(self.app.home_services))
+            for head, (title, note, _group) in zip(self._heads, groups, strict=False):
+                if head is not None:
+                    head.update(f"[$muted]{title.upper()}[/]  [$dim]{note}[/]")
         self.refresh_env()
         self._render_setup_note()
         found = self.query("#filter")
@@ -265,16 +272,30 @@ class HomeScreen(Screen):
         if not recent:
             bar.display = False
             return
-        signature = (get_translator().locale, tuple(service.ID for service in recent))
+        width = int(self.size.width or self.app.size.width or 80)
+        rtl = is_rtl_locale()
+        label_text = tr("home.recent")
+        budget = max(20, width - 6 - (cell_width(label_text) + 2))
+        fitted: list[type[Service]] = []
+        used = 0
+        for service in recent:
+            chip_cost = cell_width(service.NAME) + 3
+            if fitted and used + chip_cost > budget:
+                break
+            fitted.append(service)
+            used += chip_cost
+        signature = (get_translator().locale, rtl, tuple(service.ID for service in fitted))
         bar.display = True
         if signature == self._recent_signature:
             return
         self._recent_signature = signature
+        for child in list(bar.children):
+            child.display = False
         bar.remove_children()
-        bar.mount(
-            Static(f"[$muted]{tr('home.recent')}[/]", classes="recent-label"),
-            *(RecentServiceChip(service) for service in recent),
-        )
+        label = Static(f"[$muted]{label_text}[/]", classes="recent-label")
+        chips = [RecentServiceChip(service) for service in fitted]
+        ordered = [*reversed(chips), label] if rtl else [label, *chips]
+        bar.mount(*ordered)
 
     def refresh_banner(self) -> None:
         found = self.query("#banner")
@@ -286,7 +307,7 @@ class HomeScreen(Screen):
         if density == "compact":
             height = 20
         elif density == "comfortable":
-            height = max(height or 0, 34)
+            height = 20 if (height and height < 26) else max(height or 0, 34)
         colour_fn = getattr(self.app, "title_banner_colour", None)
         colour = colour_fn() if callable(colour_fn) else "$accent"
         found.first(Static).update(
@@ -341,7 +362,6 @@ class HomeScreen(Screen):
         cdm_word = tr("home.chip.cdm")
         drm_word = tr("home.chip.drm")
         after_word = tr("home.chip.after_picking")
-        config_word = tr("home.chip.config")
 
         source_colour = "$manifest" if remote is not None else "$muted"
         source = f"[{source_colour}]{device_source}[/] " if device_source else ""
@@ -365,40 +385,33 @@ class HomeScreen(Screen):
             + (f"  [$warn]{tr('home.chip.debug')}[/]" if debug else ""),
             f"{after_word} {action}{debug}",
         )
-        found_chip = self.query("#chip-config")
-        config_chip = found_chip.first(StatusChip) if found_chip else None
-        if config.loaded_config is not None:
-            self._set_chip(
-                "chip-config",
-                f"[$muted]{config_word}[/] [$manifest]{visual_markup(config.loaded_config.name)}[/]",
-                f"{config_word} {config.loaded_config.name}",
-            )
-            if config_chip is not None:
-                config_chip.tooltip = str(config.loaded_config)
-        else:
-            self._set_chip(
-                "chip-config",
-                # Keep this control short enough to remain visible on a normal
-                # 120-column terminal.  A long sentence here used to make the
-                # responsive status row hide the very control that creates the
-                # first config file, so it was impossible to click in the
-                # smallest supported layout.  The full explanation remains in
-                # the tooltip for terminals that can show it.
-                f"[$warn]{config_word}[/] [$muted]{tr('home.chip.config_create')}[/]",
-                f"{config_word} {tr('home.chip.config_create')}",
-            )
-            if config_chip is not None:
-                config_chip.tooltip = tr("home.chip.config_create_tip")
-                if config.missing_config is not None:
-                    config_chip.tooltip = "\n".join((
-                        tr("ready.config_missing", path=config.missing_config),
-                        f"{tr('ready.runtime_home')}: {config.paths.home}",
-                        tr("home.chip.config_create_tip"),
-                    ))
         self._refresh_ready_chip()
         self._refresh_import_chip()
+        self._refresh_schedule_chip()
         self._fit_statusline()
         self._render_setup_note()
+
+    def _refresh_schedule_chip(self) -> bool:
+        word = tr("home.chip.schedule", default="schedule")
+        store = getattr(self.app, "schedule_store", None)
+        info = store.summary() if store is not None else {"pending": 0, "attention": 0, "running": 0, "next_in": ""}
+        pending = int(info.get("pending", 0) or 0)
+        attention = int(info.get("attention", 0) or 0)
+        running = int(info.get("running", 0) or 0)
+        next_in = str(info.get("next_in", "") or "")
+        if running:
+            markup = f"[$muted]{word}[/] [$ok]▸ {running}[/]"
+            plain = f"{word} {running}"
+        elif attention:
+            markup = f"[$muted]{word}[/] [$warn]{attention} ![/]"
+            plain = f"{word} {attention} !"
+        elif pending:
+            suffix = f" · {next_in}" if next_in else ""
+            markup = f"[$muted]{word}[/] [$accent]{pending}{escape_markup(suffix)}[/]"
+            plain = f"{word} {pending}{suffix}"
+        else:
+            markup, plain = f"[$muted]{word}[/]", word
+        return self._set_chip("chip-schedule", markup, plain)
 
     def _refresh_import_chip(self) -> None:
         """How many resolved titles are sitting in the exports folder.
@@ -512,10 +525,7 @@ class HomeScreen(Screen):
         point the user has picked a platform, signed in and chosen an episode. Said
         here, it costs two rows once, and it goes away the moment a device exists.
         """
-        compact = (
-            self.app.has_class("short")
-            or (self.size.height or self.app.size.height or 30) < 28
-        )
+        compact = self.app.has_class("short")
         avail = max(36, (self.size.width or self.app.size.width or 80) - 8)
 
         def _fit_line(text: str) -> str:
@@ -603,7 +613,7 @@ class HomeScreen(Screen):
         round. The import screen is still reachable with the row at its narrowest,
         by pasting the file's path into the box below.
         """
-        return ["chip-import", "chip-config", "chip-mode", "chip-ready", "chip-drm"]
+        return ["chip-import", "chip-schedule", "chip-mode", "chip-ready", "chip-drm"]
 
     def _fit_statusline(self) -> None:
         """Drop items from the right until the row fits.
@@ -617,7 +627,7 @@ class HomeScreen(Screen):
         # least important first, so this is the order they go
         droppable = self._fit_order()
         keep = [
-            "chip-cdm", "chip-drm", "chip-mode", "chip-config", "chip-ready", "chip-import",
+            "chip-cdm", "chip-drm", "chip-mode", "chip-ready", "chip-import", "chip-schedule",
         ]
 
         hidden: set[str] = set()
@@ -635,8 +645,8 @@ class HomeScreen(Screen):
                 found.first().display = chip not in hidden
         # a separator with nothing after it is just a dot
         for chip, sep in (("chip-drm", "sep-drm"), ("chip-mode", "sep-mode"),
-                          ("chip-config", "sep-config"), ("chip-ready", "sep-ready"),
-                          ("chip-import", "sep-import")):
+                          ("chip-ready", "sep-ready"),
+                          ("chip-import", "sep-import"), ("chip-schedule", "sep-schedule")):
             found = self.query(f"#{sep}")
             if found:
                 found.first().display = chip not in hidden
@@ -654,6 +664,9 @@ class HomeScreen(Screen):
     def action_open_config(self) -> None:
         self.app.open_config()
         self.refresh_env()
+
+    def action_open_schedule(self) -> None:
+        self.app.action_open_schedule()
 
     def action_open_readiness(self) -> None:
         """The whole report, from the chip that summarises it."""
@@ -853,6 +866,9 @@ class HomeScreen(Screen):
         self.refresh_banner()
         self._fit_statusline()
         self._render_setup_note()
+        found = self.query("#filter")
+        needle = found.first(Input).value.strip() if found else ""
+        self._refresh_recent_bar(visible=not needle)
         columns = self._column_count()
         if columns == self._columns:
             return
@@ -1045,7 +1061,11 @@ class HomeScreen(Screen):
                     group="home-grid-rebuild",
                 )
                 return
-        self.apply_filter(needle)
+        if _is_number(needle.strip()):
+            self.apply_filter("")
+            self._highlight_number(int(needle.strip()))
+        else:
+            self.apply_filter(needle)
 
     def apply_filter(self, needle: str) -> None:
         """Show the cells that match, hide the rest.
@@ -1056,7 +1076,11 @@ class HomeScreen(Screen):
         """
         needle = needle.strip().lower()
         self._refresh_recent_bar(visible=not needle)
-        by_url = self.app.registry.for_url(needle) if needle else None
+        by_url = None
+        if needle.startswith(("http://", "https://")):
+            candidate = self.app.registry.for_url(needle)
+            if candidate is not None and candidate in self.app.home_services:
+                by_url = candidate
         visible = 0
 
         with self.app.batch_update():
@@ -1140,7 +1164,10 @@ class HomeScreen(Screen):
             return
         located = self._locate(shown)
         if located is None:
-            shown[0][0].focus()
+            if rows < 0:
+                shown[-1][-1].focus()
+            else:
+                shown[0][0].focus()
             return
         section, index = located
         cells = shown[section]

@@ -1,5 +1,7 @@
 # Native downloader integration
 
+[English](downloader-integration.md) | [简体中文](zh-CN/downloader-integration.md)
+
 UniDL's downloader is an in-process engine behind the Core delivery contract.
 Services prepare authorized playback information; Core handles selection and
 passes a typed delivery plan to the downloader. No external downloader process
@@ -109,6 +111,14 @@ before restoring a completed track or reusing its fragments. If the same URL
 now returns different initialization bytes, fragments from that section are
 downloaded again. Matching sections can still be reused. Older caches without
 verifiable part identities may need a one-time redownload.
+
+For ordinary HTTP VOD, the native downloader also records strong ETags from
+the media responses it is already downloading. On retry it rechecks those
+resources before accepting fragments **or a completed-track checkpoint**.
+A changed or no longer verifiable tag invalidates the affected bytes, not
+unrelated segments. The first download does not probe each segment for an
+ETag. If the origin never supplies a strong validator, an in-place change
+with identical URLs, timing and initialization cannot be detected this way.
 
 If another task creates the chosen filename during muxing, UniDL leaves that
 file untouched and publishes the new output under a numbered name instead.

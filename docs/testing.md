@@ -1,5 +1,7 @@
 # Testing UniDL
 
+[English](testing.md) | [简体中文](zh-CN/testing.md)
+
 UniDL uses fast offline checks for contracts and deterministic behavior, then
 focused live checks for provider schemas, accounts, DRM and manifests. Keep live
 fixtures and credentials outside the repository.

@@ -2,68 +2,62 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-UniDL 是一款以终端界面为核心的媒体浏览器与原生下载器。它把不同流媒体服务连接到统一的工作流中：查找节目或频道、按需登录、检查可用媒体、选择需要的轨道、通过服务契约解析 DRM 密钥，并下载或录制最终内容。
+UniDL 是一款运行在终端里的流媒体浏览器、定时任务管理器与原生下载器。它把不同平台的检索、登录、轨道筛选、许可证解析、定时追更和下载混流统一在同一套终端界面中，不依赖外部下载器外壳。
 
-项目由三个边界清晰的层组成：
+整体代码严格划分为三层，职责互不越界：
 
-- **服务（Services）**负责登录、目录、搜索、manifest、服务专属设置，以及服务自己的许可证请求。
-- **Core/TUI** 负责导航、设置、凭证、CDM/vault 选择、轨道选择、进度、日志和交互工作流。
-- **原生下载器（Native downloader）**在进程内解析 manifest、下载分片、解密媒体、写入字幕与章节并混流最终文件。
+- **服务层（Services）**：各平台独立封装登录、目录、搜索、manifest 获取、服务专属选项以及许可证传输。
+- **核心与界面层（Core / TUI）**：负责页面导航、三级设置、凭证与 CDM/Vault 策略、选轨、定时调度、进度与日志展示。
+- **原生下载核心（Native downloader）**：进程内完成 manifest 解析、分片并发下载、解密、字幕/章节处理与最终封装。
 
-## 功能
+## 核心功能
 
-### 交互式 TUI
+### 终端界面与个性化定制
 
-- 支持键盘与鼠标操作，并为返回、取消和退出提供一致且可预期的行为。
-- 服务首页可按服务能力提供 URL、搜索、直播、媒体库和登录入口。
-- 搜索结果可以继续进入季度和单集，不会意外离开当前服务流程。
-- 支持可配置地区与平台映射的 JustWatch 标题及可用性搜索。
-- 支持响应式日志和进度面板、文本选择与复制、深浅色主题以及本地化界面文本。
-- 提供显式的开发模式服务重载，不在后台静默监视文件。
+- **键鼠同等可用**：所有按钮、列表与顶部导航均支持点击或快捷键操作；`Ctrl+B` 严格逐级返回，`Esc` 连按两次防误退。
+- **双模式首页**：默认提供可按字母、国家/地区或媒体类型分组的服务网格，顶部附带「最近使用」快捷栏；也可以在设置里开启**实验版搜索首页（Beta Home）**，在一个搜索框内检索服务、导出文件、本地密钥库、设置项、JustWatch 片源或直接粘贴链接，并支持 `/schedule`、`/radar`、`/vault`、`/exports`、`/settings` 等斜杠命令。
+- **实时预览的外观体系**：内置 **7 套主题**（深色、浅色、Tokyo Night、Catppuccin Mocha、Nord、Gruvbox、高对比度）、**9 套系统强调色**、**12 种首页标题渐变/纯色**、**3 档排版密度**（自动 / 舒展 / 紧凑）以及**色弱友好状态色（Okabe–Ito）**；上下键或点击切换即可即时预览，回车/应用保存，`Esc` 无损还原。
+- **12 种界面语言**：内置英文、简体中文、繁体中文、西语、法语、葡语、意语、日语、韩语、俄语、德语（Deutsch）与从右到左排版的阿拉伯语，切换立即生效且不中断当前会话。
+- **高频效率工具**：按 `?` 查看当前快捷键速查表、`Ctrl+P` 打开全局命令面板、设置页按 `m` 仅看已修改项、编辑框未保存退出二次确认，以及下载完成提醒（系统桌面通知或终端响铃）。
 
-### 点播（VOD）
+### 定时下载与即将上映雷达
 
-- 支持 DASH/MPD、HLS、ISM/Smooth Streaming、JSON manifest 和直接媒体 URL。
-- 视频、音频和字幕轨道可以独立选择输出。
-- 支持分辨率、编码、动态范围、语言、声道布局和字幕筛选，并能在数据可用时标记 HDR、Dolby Vision 及音频编码。
-- 支持服务通过不同档位提供多个 manifest 时构建多 manifest 播放计划。
-- 可选获取章节并将章节写入最终容器。
-- 输出命名可根据用户最终实际下载的轨道加入标题、季集、分辨率、音频和编码标签。
-- 支持分片续传、缓存感知重试、后处理和混流。
+- **灵活定时执行**：可为任意已安装服务指定未来时间，通过**直链 / 内容 ID** 或**服务内关键词搜索**自动执行；搜索模式默认采用保守消歧策略，遇歧义时标记为 `needs_review` 而不会误下错误剧集。
+- **自动选集与追更台账**：支持单部电影、多集区间表达式（如 `S01E01-E05`、`all`）以及**持续追更（Watch ongoing）**模式；内置已下载集数台账（`completed_episodes`）自动跳过旧集，并支持上线延迟重试窗（`6–48 小时`）。
+- **Dry-run 预检**：保存或正式触发前可一键试跑查找与选集匹配，不下载视频也不改动任务状态。
+- **四数据源即将上映雷达**：支持自由组合或单选 **JustWatch**、**TVMaze**、**AniList** 与可选 **TMDB**（勾选 TMDB 且未配置密钥时会立即弹出脱敏密钥输入框，支持 v3 Key 与 v4 Token），按日期聚合上线片单，选中即可一键带入计划下载。
+- **自适应 2:3 海报预览**：在支持 Kitty 图形协议（Kitty / Ghostty）或 Sixel（iTerm2 / WezTerm）的终端下默认展示高清海报与详情卡；在 macOS 原生 `Terminal.app` 或窄窗口下自动隐藏且不发任何图片请求，也支持手动开启字符色块回退（`always`）或按 `p` 随时切换。
+- **前台冲突排队与系统后台托管**：前台正在下载时到期的计划会自动排队等待接管；支持在应用内一键安装 **macOS `launchd`**、**Linux `systemd --user`** 或 **Windows 任务计划程序**，关闭 UniDL 后仍可按时在后台运行，并通过跨进程文件锁避免重复触发。
+
+### 点播（VOD）与轨道控制
+
+- 支持 DASH/MPD、HLS、ISM/Smooth Streaming、JSON manifest 与直链媒体，并支持多 manifest 合并选轨。
+- 视频、音频、字幕独立筛选（分辨率、编码、HDR/Dolby Vision/HLG/HDR Vivid、Atmos/Audio Vivid、语言、声道与字幕类型），并提供**输出范围（Output scope）**（常规封装 / 仅视频 / 仅音频 / 仅字幕 / 自定义），适合批量只下字幕或音轨。
+- 支持通过 `dovi_tool` 生成 **Dolby Vision + HDR10 混合轨**、可选章节获取与内嵌、以及标题附件（海报/剧照）预览与保存。
+- 封装支持 `ffmpeg`、`mkvmerge`、`MP4Box` 或**不混流（保留原始解密轨道）**；内置断点续传缓存、可选下载前**内容密钥校验**、以及跨导出文件与服务的**混合导入队列**（兼容 UniDL 与第三方导出格式）。
+- 支持自定义剧集/电影命名模板、分季子目录模板以及点/空格/连字符风格，文件标签严格按最终实际选中的轨道生成。
 
 ### 直播录制
 
-- 支持直播 HLS、DASH/fMP4 以及其他可刷新的播放列表。
-- 在开始录制前完成轨道选择、回看/DVR 窗口检查、直播边缘或指定偏移选择，以及有限或无限时长设置。
-- `00:00:00` 表示不限制时长；录制期间使用停止、返回或 Esc 即可结束。
-- 在来源和容器允许时支持实时合并与 pipe mux。
-- 支持轮换直播密钥：优先使用服务提供的 init data，仅在真正出现新 KID 时进入交互补充流程。
-- TUI 中展示进度、回看窗口、分片数量、预计大小和取消状态。
+- 支持直播 HLS、DASH/fMP4 等可刷新流，录制前可先完成轨道筛选。
+- 支持检查回看（DVR）窗口、从直播边缘或指定时间偏移起录、定时长或无限时长（`00:00:00`）录制、边录边合并与 pipe mux 实时封装。
+- 支持直播密钥轮换，并区分 `Back` 正常收尾封包与 `Esc` 快速中断保留已录分段。
 
-### DRM、vault 与凭证
+### DRM、密钥库与凭证隔离
 
-- 通过严格的 DRM system 匹配支持本地 Widevine、PlayReady 和 MonaLisa 设备契约。
-- 可为受支持的系统配置远程 CDM endpoint，完成远程 challenge 与许可证解析。
-- 支持本地 SQLite key vault 和兼容的远程 key vault，包括多 vault 读写策略、服务范围和手动 KID:key 录入。
-- 许可证传输属于服务本身：共享 DRM 层只创建 challenge、解析响应；每个服务负责自己的 endpoint、headers 和请求格式。
-- 各服务和登录方式拥有彼此独立的凭证槽、cookie profile、token 存储和刷新生命周期。
+- 严格按 DRM 体系匹配本地 CDM（Widevine `.wvd`、PlayReady `.prd`、MonaLisa `.mld`），支持远程 CDM 与按分辨率分流规则。
+- 支持本地 SQLite 与远程 HTTP Key Vault，读取、写入、搜索目标均可独立配置并支持单服务覆盖，也可在界面内手动录入 `KID:key`。
+- 每个服务及登录方式拥有独立的凭证槽、cookie 配置档与 token 生命周期。
 
-### 音频与元数据
+### 纯音频、代理与路径管理
 
-- 纯音频服务和音频轨道使用专门的展示与命名路径。
-- MP3 导出支持 ID3v2 元数据、封面、艺术家、专辑、标题字段以及章节感知后处理。
-- 当来源已符合目标容器时可保留原始清晰音频，其他来源通过 FFmpeg 转换。
-
-### Helper、代理与存储
-
-- 服务声明的 helper 可从配置、`PATH`、项目 helper 目录或包资源中解析，不会任意扫描文件系统。
-- 支持 HTTP/HTTPS 与 SOCKS 代理，并可使用用户配置的特定 VPN provider 集成。
-- token、cookie、CDM、vault、缓存、命令、字幕和成品路径均可相对于项目配置。
-- 可以保存 JSON 命令/导出文件，用于自动化与可复现下载。
+- 纯音频服务与音轨采用专属分栏布局（封面预览 + ID3v2 标签），原生兼容格式可直接保留，其余通过 FFmpeg 转换（`mp3 / flac / alac / m4a / opus / wav`）。
+- 外部 Helper 按声明顺序从配置、`PATH`、项目 `binaries/` / `helpers/` 或包资源解析，不扫描无关目录。
+- 支持静态 HTTP/HTTPS/SOCKS 代理池，以及 ExpressVPN（OAuth 设备授权）、NordVPN、Surfshark、Windscribe 代理集成，并可将 API 请求与媒体分片下载分流控制。
 
 ## 安装
 
-最低运行环境为 Windows、macOS 或 Linux 上的 **Python 3.11**。建议使用 64 位 Python，并安装 FFmpeg（包括 `ffprobe`），以获得完整的下载、转换和混流能力。Python 依赖见 [`requirements.txt`](requirements.txt)，开发检查依赖见 [`requirements-dev.txt`](requirements-dev.txt)。
+需要 macOS、Windows 或 Linux 上的 **Python 3.11+**（建议 64 位）。建议同时安装 **FFmpeg（含 `ffprobe`）** 以获得完整的混流、转码与探测能力；`mkvmerge`、`MP4Box`、`aria2c`、`dovi_tool` 按需安装即可。详细依赖见 [环境要求与安装](docs/zh-CN/requirements.md)。
 
 从 PyPI 安装：
 
@@ -85,111 +79,89 @@ python -m pip install --upgrade pip
 python -m pip install .
 ```
 
-开发和测试环境：
+开发与测试环境：
 
 ```console
 python -m pip install -e '.[dev]'
-```
-
-也可以使用 `uv`：
-
-```console
+# 或使用 uv：
 uv sync --extra dev
 ```
 
-本地 CDM 路径请通过 `unidl.yaml` 中的 `cdm.devices` 配置。设备文件、Helper、cookie、token 和 vault 数据库都属于运行时数据，必须置于版本控制之外，并保存在配置的项目目录中。
+## 快速上手
 
-外部工具、平台说明与完整的运行前检查请参阅[环境要求与安装](docs/requirements.md)。
-
-## 使用 UniDL
-
-首次启动无需创建 YAML，也无需手动填写下载目录。Windows CMD 用户可以执行：
-
-```bat
-py -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip unidl
-unidl
-```
-
-没有本地配置时，默认下载到项目的 `downloads/<服务名>/`。例如，在
-`D:\unidl` 运行通过 pip 安装的 UniDL，默认下载到 `D:\unidl\downloads`。
-首次启动主页会展示实际位置，
-点击可进入设置查看或修改，无需编辑 YAML。查看后提示会隐藏，但始终可在
-**Settings → Files & naming → Output locations → Finished downloads** 修改目录。
-源码用户也可执行 `uv sync` 后运行 `uv run unidl`；普通使用无需 `uv lock`
-或 `--extra dev`。使用 `--config ./unidl.private.yaml` 时不会读取 `unidl.yaml`，
-后续启动应继续使用同一个配置路径。
-
-启动已安装的 TUI：
+首次启动无需先手写 `unidl.yaml`，直接运行即可进入交互界面：
 
 ```console
 unidl
 ```
 
-`python -m unidl` 与上面的命令等价。通过包安装时，如果当前目录存在
-`unidl.yaml`，程序优先使用该文件；否则使用随包提供的 `unidl.yaml`，相对路径
-仍以启动目录为基准。配置位于其他位置时请显式指定：
+（等价于 `python -m unidl`；源码环境下也可执行 `uv run unidl`。）
+
+未指定自定义配置时，成品默认保存在当前项目目录的 `downloads/<服务名>/`。首次进入主页会提示当前生效路径，点击即可直接进入 **设置 → 文件与命名 → 输出位置** 修改，无需手动编辑 YAML。
+
+如需加载指定配置文件：
 
 ```console
 unidl --config ./unidl.yaml
 ```
 
-常用只读诊断命令：
+### 常用命令行工具
+
+只读查看与环境检查：
 
 ```console
-unidl --config ./unidl.yaml --help
-unidl --config ./unidl.yaml services
-unidl --config ./unidl.yaml cdm --check
-unidl --config ./unidl.yaml keys <kid> --service <service-id>
+unidl --help
+unidl services
+unidl cdm --check
+unidl keys <kid> --service <service-id>
 ```
 
-原生下载器也可以读取导出的 JSON manifest 或直接来源 URL：
+直接解析或下载已导出的 JSON manifest / 媒体链接：
 
 ```console
 unidl list <manifest-or-json>
 unidl download <manifest-or-url> --save-name "Example.Title"
 ```
 
-在 TUI 中选择服务，搜索或打开 URL，选择标题和轨道，再选择立即下载或仅保存命令/导出文件。服务专属设置只控制服务 API/profile 等选项；共享轨道设置只控制最终输出轨道。详见 [docs/settings.md](docs/settings.md)。
-
-录制直播时，请先选择轨道，再设置录制、回看/DVR 行为和时长。保持 `00:00:00` 即可无限录制，使用停止、返回或 Esc 结束。
-
-## 配置与数据
-
-`unidl.yaml` 是静态配置入口。相对路径从该文件所在目录解析，因此源码目录可以安全移动。交互偏好保存在 `paths.home` 下的 `settings.json`。凭证、cookie、token、CDM、vault、日志、命令和导出文件均不需要提交。包含秘密的配置请使用私有文件：
+管理与执行定时下载任务及系统后台托管：
 
 ```console
-python -m unidl --config ./unidl.private.yaml
+unidl schedule list
+unidl schedule run --dry-run --id <job-id>
+unidl schedule run
+unidl schedule daemon --interval 60
+unidl schedule host status
+unidl schedule host install --interval 5
 ```
 
-从源码运行时，程序使用显式指定的配置，或项目根目录下的配置。
+## 配置与运行时数据
 
-## 项目结构
+- **`unidl.yaml`**：静态配置入口（自定义路径、本地/远程 CDM、账号凭证、代理与 Helper）。需要自定义时可复制 [`docs/unidl.example.yaml`](docs/unidl.example.yaml)，常见路径、CDM、密钥库与代理也可直接在 **设置** 中图形化管理。包含私密信息的配置请妥善保管并排除在 Git 之外（Unix 建议 `chmod 600`）。
+- **`<paths.home>/settings.json`**（`0600` 权限、跨进程加锁原子写入并保留 `.bak` 备份）：保存全局、单服务与选轨偏好。
+- **`<paths.home>/schedules.json`**（`0600` 权限）：保存计划任务、追更台账与脱敏后的执行历史。
+- token、cookie、CDM 设备文件、密钥库、日志与导出文件均属本地运行时数据，切勿提交到版本库。
+
+## 目录结构
 
 ```text
-src/unidl/core/        契约、DRM、vault、存储与流程引擎
-src/unidl/tui/         Textual 界面与各个 screen
-src/unidl/downloader/  原生解析、传输、解密和混流流程
-src/unidl/services/    每个服务一个独立 package
-helpers/               声明式 helper 资源与模块（保持私有）
-cdm/                   本地设备文件（保持私有）
-docs/                  架构、服务与下载器文档
-tests/                 离线契约与集成测试
+src/unidl/core/        核心契约、DRM、密钥库、定时调度、即将上映雷达、存储与流程引擎
+src/unidl/tui/         Textual 终端界面、主题系统、海报预览与各功能页面
+src/unidl/downloader/  进程内 manifest 解析、并发传输、解密与混流引擎
+src/unidl/locales/     12 种界面语言本地化词库
+src/unidl/services/    流媒体服务包（每项服务独立子包）
+docs/                  架构说明、功能手册与服务接入规范
+tests/                 离线契约测试与集成测试
 ```
 
-## 文档
+## 文档导航
 
-请从 [docs/README.md](docs/README.md) 开始。常用文档包括：
+完整索引见 [docs/README.md](docs/zh-CN/README.md)：
 
-- [架构](docs/architecture.md)：Core、TUI、服务与原生下载流程的边界。
-- [环境要求与安装](docs/requirements.md)：运行环境、依赖与运行时数据。
-- [编写服务](docs/writing-a-service.md)：新增服务并接入 Core 原生能力。
-- [原生下载器](docs/downloader-integration.md)：输入格式、交付契约与进度。
-- [配置](docs/configuration.md)与[设置](docs/settings.md)：静态配置和交互偏好的职责。
-- [DRM](docs/drm.md) 与 [Key vault](docs/key-vault.md)：本地/远程 key 解析及服务自有许可证请求。
-- [直播](docs/live.md)、[音频](docs/audio.md)与[章节](docs/chapters.md)：专用播放路径。
-- [测试](docs/testing.md)、[故障排查](docs/troubleshooting.md)与[安全](docs/SECURITY.md)：验证和安全运行。
+- **入门与配置**：[环境要求与安装](docs/zh-CN/requirements.md) · [静态配置](docs/zh-CN/configuration.md) · [三级设置](docs/zh-CN/settings.md) · [就绪检查](docs/zh-CN/readiness.md)
+- **界面与效率功能**：[界面说明](docs/zh-CN/interface.md) · [UI 设计规范](docs/zh-CN/ui-design.md) · [实验版搜索首页](docs/zh-CN/home-interface.md) · [定时下载与即将上映雷达](docs/zh-CN/scheduled-downloads.md) · [JustWatch 片源查询](docs/zh-CN/availability.md) · [混合导入队列](docs/zh-CN/import-queue.md) · [多语言本地化](docs/zh-CN/i18n.md)
+- **播放与交付**：[轨道筛选规则](docs/zh-CN/track-selection.md) · [原生下载器集成](docs/zh-CN/downloader-integration.md) · [直播录制](docs/zh-CN/live.md) · [纯音频服务](docs/zh-CN/audio.md) · [章节支持](docs/zh-CN/chapters.md) · [第三方导出兼容](docs/zh-CN/third-party-exports.md)
+- **DRM 与安全**：[DRM 体系](docs/zh-CN/drm.md) · [Key Vault 密钥库](docs/zh-CN/key-vault.md) · [内容密钥校验](docs/zh-CN/key-verification.md) · [安全规范](docs/zh-CN/SECURITY.md)
+- **扩展与排错**：[架构设计](docs/zh-CN/architecture.md) · [编写服务插件](docs/zh-CN/writing-a-service.md) · [测试指南](docs/zh-CN/testing.md) · [故障排查](docs/zh-CN/troubleshooting.md)
 
 ## 开发检查
 
@@ -199,12 +171,10 @@ python -m ruff check src tests
 python -m compileall -q src
 ```
 
-修改服务后，应使用已授权的账号、地区和设备数据运行该服务的离线检查与真实播放检查。不要在 commit 或问题报告中包含凭证、cookie、token、CDM 私有材料、vault key 或已签名 URL。
+提交代码或反馈问题时，请勿包含任何账号凭证、cookie、token、CDM 设备材料、密钥库内容、TMDB API 密钥或带签名的私有链接。
 
 ## 许可证
 
-UniDL 采用 [MIT License](LICENSE) 发布。列在
-[`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES)
-中的组件仍受其各自许可证条款约束。
+UniDL 基于 [MIT License](LICENSE) 开源发布。[`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES) 中列出的第三方组件仍遵循各自原有许可协议。
 
 Copyright © 2026 Chris20

@@ -1,5 +1,7 @@
 # Live channels
 
+[English](live.md) | [简体中文](zh-CN/live.md)
+
 A live stream is the only job here that does not end on its own. Everything below
 follows from that.
 

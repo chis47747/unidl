@@ -2,101 +2,64 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-UniDL is a terminal-first media browser and native downloader. It connects
-streaming services to one consistent workflow: find a title or channel, sign in
-when needed, inspect the available media, choose the tracks you want, resolve
-DRM keys through the service contract, and download or record the result.
+UniDL is a terminal-first media browser, scheduler, and native downloader for streaming services. It connects providers to one consistent workflow: browse or search a catalogue, sign in when needed, inspect the real track ladder, acquire DRM keys through the service's own contract, and download, schedule, or record the final output in the same application.
 
-The project is designed around three clear layers:
+The codebase keeps three layers strictly separated:
 
-- **Services** handle login, catalogs, search, manifests, service settings and
-  service-owned license requests.
-- **Core/TUI** handles navigation, settings, credentials, CDM/vault selection,
-  track selection, progress, logs and the interactive workflow.
-- **Native downloader** parses manifests, downloads segments, decrypts media,
-  writes subtitles and chapters, and muxes the final output in-process.
+- **Services** own sign-in, catalogue browsing, search, manifest discovery, provider-specific settings, and license transport.
+- **Core / TUI** owns navigation, settings, credentials, CDM and vault policy, track selection, scheduling, progress, logs, and the interactive UI.
+- **Native downloader** runs in-process to parse manifests, transfer segments, decrypt media, handle subtitles and chapters, and mux the finished file.
 
 ## Features
 
-### Interactive TUI
+### Interactive TUI & Personalization
 
-- Keyboard and mouse navigation with predictable Back, Cancel and Quit behavior.
-- Service home screens with URL, search, live, library and login entry points.
-- Search results that continue through seasons and episodes without leaving the
-  service flow.
-- JustWatch title and availability search with configurable regions and provider
-  mapping.
-- Responsive log and progress panels, selectable text, copy actions, light and
-  dark themes, and localized interface strings.
-- Explicit development reload for service packages without silently watching
-  files in the background.
+- Full keyboard and mouse support with predictable one-level Back, Cancel, and double-`Esc` Quit behavior.
+- **Classic grid or search-first Beta Home**: browse services by A–Z, country, or media type, jump straight back via the **Recently used** bar, or enable **Beta interface** for unified search across services, exports, local vault keys, settings, JustWatch, URLs, and slash commands (`/schedule`, `/radar`, `/vault`, `/exports`, `/settings`).
+- **Live appearance customization**: 7 built-in themes (`Dark`, `Light`, `Tokyo Night`, `Catppuccin Mocha`, `Nord`, `Gruvbox`, `High Contrast`), 9 system accent presets, 12 Home banner color gradients, 3 layout densities (`Auto`, `Comfortable`, `Compact`), and a colorblind-friendly status palette (Okabe–Ito) — all with real-time preview before saving.
+- **12 interface languages**: English, Simplified Chinese, Traditional Chinese, Spanish, French, Portuguese, Italian, Japanese, Korean, Russian, German (`Deutsch`), and right-to-left Arabic, switchable live without dropping an active session.
+- **Everyday ergonomics**: `?` shortcuts reference modal, `ctrl+p` searchable command palette, `m` modified-only filter in Settings, unsaved-change protection in text editors, and optional completion alerts (desktop notification or terminal bell).
 
-### VOD
+### Scheduled Downloads & Upcoming Radar
 
-- DASH/MPD, HLS, ISM/Smooth Streaming, JSON manifests and direct media URLs.
-- Multiple video, audio and subtitle tracks with independent output selection.
-- Resolution, codec, dynamic-range, language, channel-layout and subtitle
-  controls, including HDR/Dolby Vision and audio codec labels where available.
-- Multi-manifest playback plans for services that expose separate ladders.
-- Optional chapter retrieval and chapter embedding into the final container.
-- Safe output naming with title, season/episode, resolution, audio and codec
-  tags based on the tracks the user actually downloads.
-- Resumable segment downloads, cache-aware retries, post-processing and muxing.
+- Schedule any registered service at a future time by **direct URL / ID** or **in-service search** (with conservative title/year disambiguation that flags ambiguous matches as `needs_review` instead of guessing).
+- Automatic movie, multi-episode range (`S01E01-E05`, `all`), and **Watch ongoing** new-episode tracking with a persistent `completed_episodes` ledger and configurable release-window retries (`6–48h`) when episodes publish late.
+- **Dry-run preflight** tests lookup and episode matching before the scheduled time without downloading media.
+- **4-source Upcoming Radar**: combine or single-select **JustWatch**, **TVMaze**, **AniList**, and optional **TMDB** (prompts for a privately stored v3 API key or v4 token) to browse upcoming releases by date and schedule titles in one press.
+- **Adaptive 2:3 poster previews**: crisp native images on Kitty, Ghostty, iTerm2, and WezTerm (`auto` mode), automatically hidden with zero network fetches on macOS `Terminal.app` or narrow panes, with an opt-in cell fallback (`always`) and instant `p` toggle.
+- **Foreground conflict queueing & OS background hosting**: jobs due during an active foreground download queue automatically; install native **macOS `launchd`**, **Linux `systemd --user`**, or **Windows Task Scheduler** hosting so scheduled jobs run even when UniDL is closed.
 
-### Live recording
+### VOD & Track Selection
 
-- Live HLS, DASH/fMP4 and other refreshable playlists.
-- Track selection before recording, replay/DVR window inspection, recording
-  from the live edge or a chosen offset, and finite or unlimited duration.
-- `00:00:00` means no duration limit; Stop, Back or Esc ends an active recording.
-- Real-time merge and pipe-mux modes where the source and container support them.
-- Rotating live keys with service-provided init data and an interactive fallback
-  for a genuinely new KID.
-- Progress, replay-window information, segment counts, estimated size and
-  cancellation state in the TUI.
+- Supports DASH/MPD, HLS, ISM/Smooth Streaming, JSON manifests, and direct media URLs, plus multi-manifest ladders when a service splits profiles.
+- Independent video, audio, and subtitle filters (resolution, codec, HDR/Dolby Vision/HLG/HDR Vivid, Atmos/Audio Vivid, language, channels, subtitle kinds) and **Output scope** (`Normal package`, `Video`, `Audio`, `Subtitle`, or `Custom`) for targeted batches.
+- Optional **Dolby Vision + HDR10 hybrid** output via `dovi_tool`, optional chapter fetching/embedding, and title attachment preview/download.
+- Flexible delivery: `ffmpeg`, `mkvmerge`, `MP4Box`, or `No mux (original tracks)`, resumable segment checkpoints, optional pre-download **content-key verification**, and **mixed import queues** across UniDL and third-party export files.
+- Customizable filename and episode-folder templates with live preview and dot/space/hyphen styles derived from the tracks actually downloaded.
 
-### Vaults and credentials
+### Live Recording
 
-- Local CDM device contracts with strict system
-  matching.
-- Optional remote CDM endpoints for systems that support remote challenge and
-  license parsing.
-- Local SQLite key vaults and compatible remote key vaults, with multi-vault
-  read/write policies, service scoping and manual KID:key entry.
-- Service-local license transport: the shared layer creates challenges and
-  parses responses, while each service owns its endpoint, headers and request
-  format.
-- Independent credential slots, cookie profiles, token stores and refresh
-  lifecycles per service and login method.
+- Live HLS, DASH/fMP4, and refreshable playlists with track selection before capture.
+- Replay/DVR window inspection, live-edge or offset start, finite or unlimited (`00:00:00`) duration, real-time merge, and pipe muxing into a growing output file.
+- Rotating live-key support and clean Back finalization versus fast Quit cancellation.
 
-### Audio and metadata
+### DRM, Key Vaults & Credentials
 
-- Audio-only services and audio tracks use a dedicated presentation and naming
-  path.
-- MP3 export with ID3v2 metadata, cover art, artist/album/title fields and
-  chapter-aware post-processing.
-- Clear audio formats remain available when the source already matches the
-  requested container; other sources are converted through FFmpeg.
+- Strict system-matched local CDMs (Widevine `.wvd`, PlayReady `.prd`, MonaLisa `.mld`) plus remote CDM endpoints and per-resolution CDM rules.
+- Local SQLite and remote HTTP key vaults with independent read, write, and search target policies, service-level overrides, and manual `KID:key` entry.
+- Service-owned license transport and per-service isolated credential slots, cookie profiles, and token stores.
 
-### Helpers, proxy and storage
+### Audio, Helpers, Proxies & Storage
 
-- Declared service helpers resolved from configuration, `PATH`, project helper
-  folders or package resources; no arbitrary filesystem scan.
-- HTTP/HTTPS and SOCKS proxy support plus provider-specific VPN integrations
-  when configured by the user.
-- Project-relative paths for tokens, cookies, CDMs, vaults, caches, commands,
-  subtitles and finished media.
-- JSON command/export artifacts for automation and reproducible downloads.
+- Dedicated audio-only layout with album artwork rail, ID3v2 tagging, and lossless/clear passthrough or FFmpeg conversion (`mp3`, `flac`, `alac`, `m4a`, `opus`, `wav`).
+- Declarative helper resolution (`PATH`, config, project `binaries/` / `helpers/`, or package resources) without arbitrary filesystem scanning.
+- Static HTTP/HTTPS/SOCKS proxy pools plus integrated proxy providers (ExpressVPN OAuth device grant, NordVPN, Surfshark, Windscribe) with separate API vs. segment-download routing.
 
 ## Install
 
-The minimum supported runtime is **Python 3.11** on Windows, macOS or Linux.
-Use a 64-bit Python build and install FFmpeg (including `ffprobe`) for the full
-download, conversion and muxing workflow. The Python dependency list is kept in
-[`requirements.txt`](requirements.txt); development checks are in
-[`requirements-dev.txt`](requirements-dev.txt).
+UniDL requires **Python 3.11+** on macOS, Windows, or Linux (64-bit recommended). Install **FFmpeg** (including `ffprobe`) for full muxing, conversion, and probing; `mkvmerge`, `MP4Box`, `aria2c`, and `dovi_tool` are optional. See [Requirements and installation](docs/requirements.md) for platform notes.
 
-From a published PyPI release:
+From PyPI:
 
 ```console
 python3 -m venv .venv
@@ -105,9 +68,11 @@ python -m pip install --upgrade pip
 python -m pip install unidl
 ```
 
-The project is also installable directly from a source checkout:
+From a source checkout:
 
 ```console
+git clone https://github.com/chis47747/unidl.git
+cd unidl
 python3 -m venv .venv
 source .venv/bin/activate             # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
@@ -118,145 +83,85 @@ For development and tests:
 
 ```console
 python -m pip install -e '.[dev]'
-```
-
-The project also works with `uv`:
-
-```console
+# or with uv:
 uv sync --extra dev
 ```
 
-`pip install unidl` is the shortest installation after a release has been
-published to PyPI. Until then, use the source-checkout command above.
+## Quick start
 
-Configure local CDM paths through `cdm.devices` in `unidl.yaml`. Device files,
-helpers, cookies, tokens and vault databases are runtime data and must stay
-outside version control; store them in the configured project directories.
-
-See [Requirements and installation](docs/requirements.md) for external tools,
-platform notes and a complete preflight checklist.
-
-## Use UniDL
-
-No YAML file or manual download-path configuration is required for first launch.
-Windows Command Prompt users can install and start with:
-
-```bat
-py -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip unidl
-unidl
-```
-
-Without a local configuration, downloads default to `downloads/<service>/`
-under the project folder. For example, a packaged install started in
-`D:\unidl` defaults to `D:\unidl\downloads`. Home shows the effective
-location on first launch. Change it under **Settings → Files & naming → Output
-locations → Finished downloads**, without editing YAML. After reviewing that
-screen, the first-run hint is dismissed. The setting remains available later.
-For a source checkout managed by uv, use `uv sync` then `uv run unidl`;
-`uv lock` and `--extra dev` are not required for ordinary use.
-
-Launch the installed TUI:
+No YAML file is required on first launch. Start the interactive TUI with:
 
 ```console
 unidl
 ```
 
-`python -m unidl` is equivalent. A packaged install uses `unidl.yaml` from the
-current directory when it exists; otherwise the bundled `unidl.yaml` supplies
-project-relative defaults there. Pass an explicit configuration whenever the
-file lives elsewhere:
+(`python -m unidl` is equivalent; source users with `uv` can run `uv run unidl`.)
+
+Without a custom `unidl.yaml`, finished downloads default to `downloads/<service>/` inside the current project folder. Home displays the active download directory on first launch — click it or open **Settings → Files & naming → Output locations** anytime to change folders without touching YAML.
+
+To target a specific configuration file:
 
 ```console
 unidl --config ./unidl.yaml
 ```
 
-Useful read-only diagnostics:
+### Common CLI commands
+
+Read-only inspection and diagnostics:
 
 ```console
-unidl --config ./unidl.yaml --help
-unidl --config ./unidl.yaml services
-unidl --config ./unidl.yaml cdm --check
-unidl --config ./unidl.yaml keys <kid> --service <service-id>
+unidl --help
+unidl services
+unidl cdm --check
+unidl keys <kid> --service <service-id>
 ```
 
-The native downloader can also consume an exported JSON manifest or a direct
-source URL:
+Standalone native delivery for an exported JSON manifest or direct URL:
 
 ```console
 unidl list <manifest-or-json>
 unidl download <manifest-or-url> --save-name "Example.Title"
 ```
 
-In the TUI, choose a service, search or open a URL, select the title and tracks,
-then choose whether to download now or save a command/export. A service's own
-settings control provider API/profile choices; the shared track settings control
-the final output tracks only. See [docs/settings.md](docs/settings.md).
-
-Automatic track selection can be limited to a single media type with **Output
-scope** (video, audio or subtitle), or use **Custom output types**. Each type
-supports selecting the best matching track or all matching tracks, which makes
-subtitle-only, audio-only and video-only episode batches possible without
-opening the picker. A normal package remains the default. See
-[docs/settings.md](docs/settings.md) for the matching and batch behavior.
-
-For live channels, choose the tracks first, then choose recording, replay/DVR
-behavior and duration. Leave the duration at `00:00:00` for an unlimited
-recording and use Stop/Back/Esc to finish it.
-
-## Configuration and data
-
-`unidl.yaml` is the local configuration surface. The package ships a separate,
-credential-free `unidl.yaml` for defaults. Use the **Config** control on Home
-to create your local copy if needed. Keep the working file out of Git.
-Relative paths are resolved
-from the directory containing that file, so a checkout can be moved safely.
-Interactive preferences are stored in `settings.json` under `paths.home`.
-Credentials, cookies, tokens, CDMs, vaults, logs, command files and exports are
-never required to be committed. Use a private override file for secrets:
+Scheduled downloads and OS background host management:
 
 ```console
-python -m unidl --config ./unidl.private.yaml
+unidl schedule list
+unidl schedule run --dry-run --id <job-id>
+unidl schedule run
+unidl schedule daemon --interval 60
+unidl schedule host status
+unidl schedule host install --interval 5
 ```
 
-The application uses the explicitly selected configuration or the project-root
-configuration when launched from a source checkout.
+## Configuration and runtime data
+
+- **`unidl.yaml`** holds static configuration (directories, local/remote CDMs, credentials, proxies, helpers). Copy [`docs/unidl.example.yaml`](docs/unidl.example.yaml) when you need local overrides, or manage CDMs, vaults, proxies, and output paths directly inside **Settings**. Keep working configs with secrets out of Git (`chmod 600` on Unix).
+- **`<paths.home>/settings.json`** (`0600`, atomic locked writes with `.bak` fallback) stores interactive global, service, and track preferences.
+- **`<paths.home>/schedules.json`** (`0600`) stores scheduled jobs, watch ledgers, and redacted execution history.
+- Tokens, cookies, CDM files, vault databases, logs, and exported commands are runtime data and should never be committed.
 
 ## Project layout
 
 ```text
-src/unidl/core/        contracts, DRM, vaults, storage and flow engine
-src/unidl/tui/         Textual interface and screens
-src/unidl/downloader/  native parsers, transfer, decrypt and mux pipeline
-src/unidl/services/    one package per service
-helpers/               declared helper assets and modules
-cdm/                   local device files, kept private
-docs/                  architecture, service and downloader documentation
+src/unidl/core/        contracts, DRM, vaults, scheduler, upcoming radar, storage, flow engine
+src/unidl/tui/         Textual interface, themes, poster preview, and screens
+src/unidl/downloader/  in-process manifest parsers, transfer, decryption, and muxing
+src/unidl/locales/     12 built-in interface language catalogues
+src/unidl/services/    service packages (one package per service)
+docs/                  architecture, user guides, and service contracts
 tests/                 offline contract and integration tests
 ```
 
 ## Documentation
 
-Start with [docs/README.md](docs/README.md). The most useful paths are:
+Start with [docs/README.md](docs/README.md):
 
-- [Architecture](docs/architecture.md) — boundaries and data flow.
-- [Requirements and installation](docs/requirements.md) — supported runtimes,
-  package installation and external tools.
-- [Publishing](docs/publishing.md) — PyPI releases, token handling and GitHub
-  account switching.
-- [Writing a service](docs/writing-a-service.md) — add a service and integrate
-  native Core capabilities.
-- [Native downloader](docs/downloader-integration.md) — supported inputs,
-  delivery contracts and progress.
-- [Configuration](docs/configuration.md) and [Settings](docs/settings.md) —
-  static configuration versus interactive preferences.
-- [DRM](docs/drm.md) and [Key vault](docs/key-vault.md) — local/remote key
-  resolution and service-owned licensing.
-- [Live channels](docs/live.md), [Audio](docs/audio.md) and
-  [Chapters](docs/chapters.md) — specialized playback paths.
-- [Testing](docs/testing.md), [Troubleshooting](docs/troubleshooting.md) and
-  [Security](docs/SECURITY.md) — verification and safe operation.
+- **Getting started**: [Requirements & installation](docs/requirements.md) · [Configuration](docs/configuration.md) · [Settings](docs/settings.md) · [Readiness](docs/readiness.md)
+- **TUI & workflows**: [Interface](docs/interface.md) · [UI design](docs/ui-design.md) · [Experimental home](docs/home-interface.md) · [Scheduled downloads & Upcoming Radar](docs/scheduled-downloads.md) · [Availability lookup](docs/availability.md) · [Mixed import queue](docs/import-queue.md) · [Internationalization](docs/i18n.md)
+- **Playback & delivery**: [Track selection](docs/track-selection.md) · [Native downloader](docs/downloader-integration.md) · [Live channels](docs/live.md) · [Audio](docs/audio.md) · [Chapters](docs/chapters.md) · [Third-party exports](docs/third-party-exports.md)
+- **DRM & security**: [DRM systems](docs/drm.md) · [Key vault](docs/key-vault.md) · [Content-key verification](docs/key-verification.md) · [Security](docs/SECURITY.md)
+- **Extending & troubleshooting**: [Architecture](docs/architecture.md) · [Writing a service](docs/writing-a-service.md) · [Testing](docs/testing.md) · [Troubleshooting](docs/troubleshooting.md)
 
 ## Development checks
 
@@ -266,15 +171,10 @@ python -m ruff check src tests
 python -m compileall -q src
 ```
 
-When changing a service, run its offline checks and a real playback check with
-authorized account, region and device data. Never include credentials, cookies,
-tokens, CDM private material, vault keys or signed URLs in commits or bug
-reports.
+Never commit credentials, cookies, tokens, CDM devices, vault keys, TMDB API keys, or signed URLs.
 
 ## License
 
-UniDL is released under the [MIT License](LICENSE). Components listed in
-[`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES)
-retain their own license terms.
+UniDL is released under the [MIT License](LICENSE). Third-party components listed in [`docs/downloader/legal/THIRD_PARTY_NOTICES`](docs/downloader/legal/THIRD_PARTY_NOTICES) remain governed by their respective licenses.
 
 Copyright © 2026 Chris20

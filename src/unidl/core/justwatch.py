@@ -31,6 +31,25 @@ from typing import Any
 import requests
 
 GRAPHQL_URL = "https://apis.justwatch.com/graphql"
+IMAGE_BASE_URL = "https://images.justwatch.com"
+
+
+def resolve_poster_url(
+    template: str | None,
+    *,
+    profile: str = "s332",
+    fmt: str = "jpg",
+) -> str:
+    """Turn a JustWatch ``posterUrl`` template into a concrete thumbnail URL."""
+    raw = str(template or "").strip()
+    if not raw:
+        return ""
+    filled = raw.replace("{profile}", profile).replace("{format}", fmt)
+    if filled.startswith(("http://", "https://")):
+        return filled
+    if not filled.startswith("/"):
+        filled = "/" + filled
+    return f"{IMAGE_BASE_URL}{filled}"
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -193,6 +212,8 @@ class Title:
     synopsis: str = ""
     imdb_id: str = ""
     path: str = ""
+    poster_url: str = ""
+    offer_links: list[tuple[str, str, str]] = field(default_factory=list)
 
     @property
     def is_show(self) -> bool:
@@ -403,11 +424,18 @@ query SearchTitles($country: Country!, $language: Language!, $first: Int!, $filt
       node {
         id
         objectType
+        ... on MovieOrShow {
+          offers(country: $country, platform: WEB) {
+            standardWebURL
+            package { clearName technicalName }
+          }
+        }
         content(country: $country, language: $language) {
           title
           originalTitle
           originalReleaseYear
           fullPath
+          posterUrl
           shortDescription
           genres { shortName }
           externalIds { imdbId }
@@ -544,6 +572,20 @@ class JustWatch:
             node = edge.get("node") or {}
             content = node.get("content") or {}
             year = content.get("originalReleaseYear")
+            offer_links: list[tuple[str, str, str]] = []
+            seen_offer_keys: set[tuple[str, str]] = set()
+            for raw_offer in node.get("offers") or []:
+                raw_url = str(raw_offer.get("standardWebURL") or "").strip()
+                if not raw_url.startswith(("http://", "https://")):
+                    continue
+                pkg = raw_offer.get("package") or {}
+                tech = str(pkg.get("technicalName") or "").strip()
+                clear = str(pkg.get("clearName") or "").strip()
+                key = (tech.lower(), clear.lower())
+                if key in seen_offer_keys:
+                    continue
+                seen_offer_keys.add(key)
+                offer_links.append((tech, clear, raw_url))
             titles.append(
                 Title(
                     node_id=str(node.get("id") or ""),
@@ -559,6 +601,8 @@ class JustWatch:
                     synopsis=str(content.get("shortDescription") or ""),
                     imdb_id=str((content.get("externalIds") or {}).get("imdbId") or ""),
                     path=str(content.get("fullPath") or ""),
+                    poster_url=resolve_poster_url(content.get("posterUrl")),
+                    offer_links=offer_links,
                 )
             )
         return [title for title in titles if title.node_id]
@@ -692,6 +736,7 @@ __all__ = [
     "Title",
     "parse_regions",
     "region_label",
+    "resolve_poster_url",
     "resolve_service",
     "service_index",
 ]

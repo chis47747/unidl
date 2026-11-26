@@ -221,10 +221,13 @@ class JobDetailsScreen(ModalScreen[None]):
         if details.chapters or details.attachments:
             lines.extend(("", tr("job.metadata", chapters=details.chapters, attachments=details.attachments)))
         body = "\n".join(lines)
-        selecting = getattr(self, "text_selection", None) is not None
+        body_widget = self.query_one("#job-modal-body", Static)
+        selecting = bool(getattr(self, "selections", None)) or (
+            getattr(body_widget, "text_selection", None) is not None
+        )
         if body != self._last_body and (not selecting or self._last_body is None):
             self._last_body = body
-            self.query_one("#job-modal-body", Static).update(Text(visual_text(body)))
+            body_widget.update(Text(visual_text(body)))
         was_focused = self.focused
         prev_btn = self.query_one("#job-previous", Button)
         next_btn = self.query_one("#job-next", Button)
@@ -241,12 +244,18 @@ class JobDetailsScreen(ModalScreen[None]):
             )
         retry = self.query_one("#job-retry", Button)
         retry.display = bool(getattr(job, "retryable", False))
-        retry.disabled = bool(
-            getattr(self.controller, "batch_busy", False)
-            or getattr(self.controller, "job_running", False)
-            or getattr(self.controller, "_retry_pending", False)
-            or getattr(self.controller, "aborted", False)
-        )
+        if getattr(self.controller, "batch_paused", False):
+            retry.disabled = bool(
+                not getattr(self.controller, "can_resume_batch", False)
+                or getattr(self.controller, "aborted", False)
+            )
+        else:
+            retry.disabled = bool(
+                getattr(self.controller, "batch_busy", False)
+                or getattr(self.controller, "job_running", False)
+                or getattr(self.controller, "_retry_pending", False)
+                or getattr(self.controller, "aborted", False)
+            )
         if was_focused is not None and (
             getattr(was_focused, "disabled", False) or not getattr(was_focused, "display", True)
         ):

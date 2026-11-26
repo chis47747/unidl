@@ -1,5 +1,7 @@
 # External helpers
 
+[English](external-helpers.md) | [简体中文](zh-CN/external-helpers.md)
+
 Helpers are dependencies a native service explicitly declares. Resolution is
 centralised in `unidl.core.helpers`; a service never searches arbitrary host
 directories or embeds a user's absolute path.

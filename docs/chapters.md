@@ -1,5 +1,7 @@
 # Optional chapters
 
+[English](chapters.md) | [简体中文](zh-CN/chapters.md)
+
 Chapters are optional service metadata. A service that has no chapter endpoint
 does nothing; there is no capability flag and no empty method to implement. The
 per-service **Fetch chapter metadata** setting decides whether chapter requests

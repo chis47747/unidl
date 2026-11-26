@@ -1,5 +1,7 @@
 # Content-key verification
 
+[English](key-verification.md) | [简体中文](zh-CN/key-verification.md)
+
 **Verify content keys before download** is an optional, best-effort VOD preflight.
 It is off by default. Enable it under **Settings → Download behavior**, or override
 it for one service under **Settings → License & vaults**. A service follows the

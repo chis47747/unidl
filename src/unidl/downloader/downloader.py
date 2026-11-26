@@ -44,7 +44,9 @@ from .http_client import (
 )
 from .loader import DEFAULT_USER_AGENT
 from .models import SegmentInfo, StreamInfo
+from .muxed import is_demux_stream, projection_source
 from .postprocess import copy_gzip_mp4_init, split_fragmented_mp4_init_media
+from .resume_versions import VersionIndex, observing_media, strong_digest
 from .sabr_ump import (
     SabrUmpError,
     download_sabr_ump_dvr_stream,
@@ -496,10 +498,18 @@ def download_stream(
         _emit_progress(progress, stream, 0, 1, 0, None, discovery_start)
         stream.segments = _discover_json_dvr_sequence_segments(stream, headers=headers, request_timeout=request_timeout, retries=retries)
 
+    versions = None
+
     def part(*args, **kwargs):
         if gate is not None:
             gate()
-        size = _download_part(*args, **kwargs)
+        seg = args[0]
+        resource = versions.resource(seg) if versions and seg.index != -1 and seg.data is None else None
+        if resource is not None:
+            with observing_media(seg.url, lambda etag: versions.observe(resource, etag)):
+                size = _download_part(*args, **kwargs)
+        else:
+            size = _download_part(*args, **kwargs)
         runtime = current_download_runtime()
         if runtime is not None and runtime.vod_transfer is not None:
             segment = args[0]
@@ -514,6 +524,8 @@ def download_stream(
     _validate_striped_blowfish_input(stream, hls_crypto)
     if resume and not stream.vod_resume_id and not stream.is_live:
         prepare_resume_init(stream, headers or {}, request_timeout)
+        if downloader in {"python", "auto"}:
+            versions = prepare_media_versions(stream, headers or {}, request_timeout, temp_dir)
         urls = [_verified_init(stream, segment) if segment.index == -1 else segment for segment in urls]
     urls = _apply_json_live_base_fallback(stream, urls, headers=headers, request_timeout=request_timeout)
     urls = _split_single_large_remote_segment(stream, urls, headers=headers, hls_crypto=hls_crypto, request_timeout=request_timeout)
@@ -720,6 +732,7 @@ def download_stream(
                                 progress_bytes,
                                 host_limiter,
                                 gate=gate,
+                                fetch=part,
                             )
                         else:
                             raise
@@ -1888,6 +1901,7 @@ def _stream_resume_identity(stream: StreamInfo) -> str:
 
     payload = {
         "manifest_type": stream.manifest_type,
+        "source_version": str(stream.extra.get("source_version") or ""),
         "media_type": stream.media_type,
         "url": _resume_url_key(stream.url),
         "original_url": _resume_url_key(stream.original_url),
@@ -1911,7 +1925,22 @@ def _stream_resume_key(stream: StreamInfo, segments: list[SegmentInfo] | None = 
     return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
 
-_RESUME_PARTS_VERSION = 3
+_RESUME_PARTS_VERSION = 5
+
+_EPHEMERAL_WORK_DIR_RE = re.compile(r"^\.(.+?)\.[0-9a-f]{12}\.work$")
+_TRUNCATED_WORK_DIR_RE = re.compile(r"^\..+_[0-9a-f]{8}\.work$")
+
+
+def _resume_output_key(output: Path) -> str:
+    """Stable target identity that strips per-run random workspace IDs."""
+    parts = list(output.parts)
+    for idx, part in enumerate(parts[:-1]):
+        match = _EPHEMERAL_WORK_DIR_RE.match(part)
+        if match:
+            parts[idx] = f".{match.group(1)}.work"
+        elif _TRUNCATED_WORK_DIR_RE.match(part) and idx + 1 < len(parts) - 1 and parts[idx + 1] == "tracks":
+            parts[idx] = ".work"
+    return str(Path(*parts)) if parts else str(output)
 
 
 class _ResumeInitCache:
@@ -1920,11 +1949,13 @@ class _ResumeInitCache:
     def __init__(self) -> None:
         self.init_epoch = uuid.uuid4().hex
         self.inits: dict[tuple[int, int], tuple[StreamInfo, SegmentInfo, bytes, bytes | None]] = {}
+        self.versions: dict[int, tuple[StreamInfo, _MediaVersions]] = {}
         self.lock = threading.Lock()
 
     def close(self) -> None:
         with self.lock:
             self.inits.clear()
+            self.versions.clear()
 
 
 def _resume_init_cache() -> _ResumeInitCache | None:
@@ -1941,13 +1972,100 @@ def _verified_init(stream: StreamInfo, segment: SegmentInfo) -> SegmentInfo:
     return segment
 
 
+class _MediaVersions:
+    def __init__(self, index: VersionIndex):
+        self.index = index
+        self.original = index.snapshot()
+        self.resources: dict[tuple[str, bool], str] = {}
+        self.expected: dict[str, str] = {}
+        self.changed: dict[str, str] = {}
+        self.lock = threading.Lock()
+
+    def resource(self, seg: SegmentInfo) -> str | None:
+        return self.resources.get((seg.url, seg.restrict_request_headers))
+
+    def observe(self, resource: str, etag: str | None) -> None:
+        digest = strong_digest(etag)
+        with self.lock:
+            if expected := self.expected.get(resource):
+                if digest != expected:
+                    raise RuntimeError("Media changed during transfer; retry to revalidate the resume cache.")
+            elif digest:
+                if resource not in self.original and self.index.baseline(resource, digest) != digest:
+                    raise RuntimeError("Media changed during transfer; retry to revalidate the resume cache.")
+                self.expected[resource] = digest
+
+
+def prepare_media_versions(
+    stream: StreamInfo, headers: dict[str, str], timeout: int, temp_dir: str | Path | None,
+) -> _MediaVersions | None:
+    """Probe only previously observed validators, before restoring parts or whole-track checkpoints."""
+    if stream.is_live or stream.vod_resume_id or (cache := _resume_init_cache()) is None:
+        return None
+    with cache.lock:
+        if entry := cache.versions.get(id(stream)):
+            return entry[1]
+    root = safe_temp_root(Path(temp_dir).expanduser() if temp_dir else _default_tmp_root(),
+                          max_length=WINDOWS_INTERMEDIATE_PATH_LIMIT)
+    # A demuxed projection has its own checkpoint but shares the physical
+    # request with its video/audio sibling. Consult that source's validators.
+    source = projection_source(stream) if is_demux_stream(stream) else stream
+    state = _MediaVersions(VersionIndex(root / ".versions" / (_stream_resume_identity(source)[:24] + ".db")))
+    probes = {}
+    for seg in _segment_urls(stream):
+        key = (seg.url, seg.restrict_request_headers)
+        if seg.index == -1 or seg.data is not None or key in state.resources or not is_url(seg.url):
+            continue
+        if _segment_may_return_text_url_redirect(seg):
+            continue  # This response describes a handoff, not the media.
+        # Two signed paths may differ only by a volatile query yet refer to
+        # distinct segments. Anchor each URL at its first media position;
+        # repeated ranges of the very same URL still need just one probe.
+        resource = hashlib.sha256(json.dumps([_resume_part_identity(seg), key[1]]).encode()).hexdigest()
+        state.resources[key] = resource
+        if resource in state.original:
+            probes[resource] = seg
+
+    def probe(item):
+        resource, seg = item
+        _runtime_checkpoint()
+        base = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "*/*", "Accept-Encoding": "identity", **headers}
+        base = _segment_request_headers(seg, base)
+        for method in ("HEAD", "GET"):
+            opts = {k: v for k, v in base.items() if k.lower() != "range"}
+            if method == "GET":
+                opts["Range"] = "bytes=0-0"
+            try:
+                with get_global_http_client().request(method, seg.url, headers=opts, timeout=timeout) as response:
+                    if response.status in {200, 206} and (digest := strong_digest(response.get_header("ETag"))):
+                        return resource, digest
+            except (OSError, http.client.HTTPException, HttpClientError) as exc:
+                if not (method == "HEAD" and getattr(exc, "http_status", None) in {405, 501}):
+                    break
+        return resource, ""
+
+    if probes:
+        with DownloaderThreadPoolExecutor(max_workers=min(8, len(probes))) as pool:
+            for resource, current in pool.map(probe, probes.items()):
+                state.expected[resource] = current
+                if current != state.original[resource]:
+                    state.changed[resource] = current or cache.init_epoch
+    with cache.lock:
+        cache.versions[id(stream)] = (stream, state)
+    return state
+
+
 def _resume_part_fingerprints(stream: StreamInfo, segments: list[SegmentInfo]) -> list[str]:
     result = []
     init = ""
+    cache = _resume_init_cache()
+    versions = cache.versions.get(id(stream)) if cache is not None else None
     for segment in segments:
         if segment.index == -1:
             segment = _verified_init(stream, segment)
         part = _resume_part_identity(segment)
+        if versions and segment.index != -1 and (resource := versions[1].resource(segment)):
+            part += ":" + resource + ":" + versions[1].changed.get(resource, "")
         if segment.index == -1:
             init = part
             if segment.data is None and (cache := _resume_init_cache()) is not None:
@@ -2021,12 +2139,15 @@ def _read_resume_init(segment: SegmentInfo, headers: dict[str, str], timeout: in
 def _resume_part_identity(segment: SegmentInfo) -> str:
     # Media sequence is also the default AES IV. An added init may shift file
     # slots without changing the sequence or identity of a media segment.
+    # Include segment duration and timeline position so switching to a
+    # re-segmented source with unchanged init bytes and URLs invalidates stale parts.
     payload = (
         _resume_url_key(segment.url), segment.index, segment.byte_range,
+        segment.duration, segment.timeline_time, segment.timeline_presentation_time,
         hashlib.sha256(segment.data).hexdigest() if segment.data is not None else None,
         segment.encrypted, segment.encryption_scheme, segment.key_id,
         _resume_url_key(segment.key_uri), segment.key_iv.hex() if segment.key_iv is not None else None,
-        segment.gap, segment.allow_range_status_200,
+        segment.gap, segment.discontinuity_after, segment.allow_range_status_200,
     )
     return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
@@ -2223,6 +2344,7 @@ def _reuse_verified_parts(
         candidates = list(target.parent.iterdir())
     except OSError:
         return
+    expected_output_key = _resume_output_key(output)
     for candidate in candidates:
         if not pending:
             break
@@ -2234,7 +2356,8 @@ def _reuse_verified_parts(
             continue
         if not isinstance(prior, dict) or prior.get("parts_version") != _RESUME_PARTS_VERSION:
             continue
-        if prior.get("identity") != identity or prior.get("output") != str(output):
+        prior_output_key = prior.get("output_key") or _resume_output_key(Path(str(prior.get("output") or "")))
+        if prior.get("identity") != identity or prior_output_key != expected_output_key:
             continue
         old_parts = prior.get("parts")
         if not isinstance(old_parts, list):
@@ -2276,6 +2399,7 @@ def _write_resume_manifest(
     manifest = {
         "parts_version": _RESUME_PARTS_VERSION,
         "output": str(output_path),
+        "output_key": _resume_output_key(output_path),
         "identity": _stream_resume_identity(stream),
         "total_segments": total_segments,
         "parts": fingerprints,
@@ -2794,6 +2918,7 @@ def _retry_failed_parallel_part_serially(
     progress_bytes: _PartProgress | None,
     host_limiter: _HostAdaptiveLimiter | None,
     gate: Callable[[], None] | None = None,
+    fetch: Callable | None = None,
 ) -> int:
     if progress_bytes:
         progress_bytes.discard_part(str(out))
@@ -2801,7 +2926,7 @@ def _retry_failed_parallel_part_serially(
     _runtime_sleep(_retry_delay(0))
     if gate is not None:
         gate()
-    return _download_part(
+    return (fetch or _download_part)(
         segment,
         out,
         headers,

@@ -142,18 +142,29 @@ class AttachmentsScreen(ModalScreen[None]):
         except RuntimeError:
             pass
 
-    def _paint_image(self, image: Image.Image) -> None:
+    def on_resize(self) -> None:
+        if self.is_mounted and self._raw_image is not None:
+            self._paint_image(self._raw_image)
+
+    def _paint_image(self, image: Image.Image, *, _deferred: bool = False) -> None:
+        if not self.is_mounted:
+            return
         target = self.query_one("#attachment-image")
         status = self.query("#attachment-status")
+        was_hidden = not target.display
         if status:
             status.first().display = False
             target.display = True
+        content_size = getattr(target, "content_size", None) or getattr(target, "size", None)
+        target_width = int(getattr(content_size, "width", 0) or 0)
+        target_height = int(getattr(content_size, "height", 0) or 0)
+        if (was_hidden or target_width <= 0 or target_height <= 0) and not _deferred:
+            self.call_after_refresh(self._paint_image, image, _deferred=True)
+            return
         if protocol_image_class() is not None and not isinstance(target, Static):
             palette = getattr(self.app, "palette", None)
             # #attachment-modal paints on $recessed (palette.panel), not $base.
             bg = _hex_rgb(getattr(palette, "panel", None) or getattr(palette, "bg", None))
-            target_width = int(getattr(target.size, "width", 0) or 0)
-            target_height = int(getattr(target.size, "height", 0) or 0)
             if target_width > 0 and target_height > 0:
                 target.image = _letterbox_image(image, target_width, target_height, background=bg)
             else:
@@ -161,8 +172,12 @@ class AttachmentsScreen(ModalScreen[None]):
                 max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
                 target.image = _contain_image(image, max_width, max_height, background=bg)
         else:
-            max_height = max(6, min(24, int(self.size.height) - 10))
-            max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
+            if target_width > 0 and target_height > 0:
+                max_width = max(12, target_width)
+                max_height = max(4, target_height)
+            else:
+                max_height = max(6, min(24, int(self.size.height) - 12))
+                max_width = max(16, min(COVER_WIDTH, int(self.size.width) - 8))
             width, height = _contain_dimensions(image, max_width, max_height)
             target.update(_cover_renderable(image, width=width, height=height), layout=False)
 

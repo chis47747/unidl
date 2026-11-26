@@ -427,6 +427,9 @@ class Config:
         self.source = source
         self.missing_config = missing_config
         self._seed_config = seed_config
+        # An in-memory Config constructed directly with data and no file target
+        # must never silently fall back to overwriting the project's unidl.yaml.
+        self._in_memory_only = bool(data) and source is None and missing_config is None
         self.paths = self._read_paths()
         configure_binary_path(self.paths.home)
         self._devices = self._read_devices()
@@ -515,6 +518,26 @@ class Config:
         self.source = path
         self.missing_config = None
         self._seed_config = ""
+        self._in_memory_only = False
+
+    def _resolve_write_path(self) -> Path:
+        if self.source is None and self._in_memory_only:
+            raise ValueError(
+                "refusing to write an in-memory Config to default unidl.yaml; "
+                "pass source=... or load it with Config.load()"
+            )
+        path = self.config_path
+        _reject_legacy_config(path)
+        if path.is_symlink():
+            path = Path(os.path.realpath(path))
+        return path
+
+    def _guard_unloaded_overwrite(self, path: Path) -> None:
+        if self.loaded_config is None and path.is_file():
+            raise ValueError(
+                f"refusing to overwrite existing {path} from a Config that was not loaded from it; "
+                "load it with Config.load(path) first"
+            )
 
     def ensure_config_file(self) -> tuple[Path, bool]:
         """Materialize the safe defaults only on an explicit Create/Open action."""
@@ -543,11 +566,9 @@ class Config:
         used by credential storage. Only the named section is replaced, so a
         simultaneous edit to service settings or credentials is not overwritten.
         """
-        path = self.config_path
-        _reject_legacy_config(path)
-        if path.is_symlink():
-            path = Path(os.path.realpath(path))
+        path = self._resolve_write_path()
         with locked_path(path):
+            self._guard_unloaded_overwrite(path)
             text = self._config_text_for_write(path)
             updated = _replace_top_level_section(
                 text,
@@ -596,11 +617,9 @@ class Config:
         if unknown:
             raise ValueError(f"paths cannot be managed here: {', '.join(unknown)}")
 
-        path = self.config_path
-        _reject_legacy_config(path)
-        if path.is_symlink():
-            path = Path(os.path.realpath(path))
+        path = self._resolve_write_path()
         with locked_path(path):
+            self._guard_unloaded_overwrite(path)
             text = self._config_text_for_write(path)
             try:
                 current = yaml.safe_load(text) or {}
@@ -934,15 +953,9 @@ class Config:
         a password. Creates it at the canonical project config path if there is
         none; runtime state under ``paths.home`` is a separate location.
         """
-        path = self.config_path
-        _reject_legacy_config(path)
-        if path.is_symlink():
-            # Written through the link, not over it. `os.replace` onto a symlink
-            # replaces the *link* with a regular file, which would quietly
-            # disconnect a config kept somewhere else and symlinked into place -
-            # and leave every later hand edit to the real file unread.
-            path = Path(os.path.realpath(path))
+        path = self._resolve_write_path()
         with locked_path(path):
+            self._guard_unloaded_overwrite(path)
             text = self._config_text_for_write(path)
             updated = write_credential(text, service_id, slot, values)
             atomic_write_text(path, updated)

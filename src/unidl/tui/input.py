@@ -55,8 +55,15 @@ class ClipboardInput(TextualInput):
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape" and self.value and not self.disabled:
+            import time
+
             from textual.screen import ModalScreen
 
+            from .app import QUIT_CONFIRM_WINDOW
+
+            armed_at = getattr(self.app, "_quit_armed_at", None)
+            if armed_at is not None and time.monotonic() - armed_at <= QUIT_CONFIRM_WINDOW:
+                return
             if not isinstance(self.screen, ModalScreen):
                 event.stop()
                 event.prevent_default()
@@ -126,7 +133,7 @@ class ClipboardTextArea(TextualTextArea):
             edit_result = self._delete_cursor_line()
         else:
             edit_result = self._delete_via_keyboard(start, end)
-        if edit_result is not None:
+        if edit_result is not None and edit_result.replaced_text:
             self.app.copy_to_clipboard(edit_result.replaced_text)
             write_system_clipboard(edit_result.replaced_text)
 

@@ -739,6 +739,13 @@ class AddKeysScreen(ModalScreen[AddKeysResult | None]):
     def _failed(self, exc: Exception) -> None:
         self._set_busy(False)
         self._problem(tr("vault.write_failed", error=_safe_error(exc)))
+        pairs = self.query("#vault-pairs")
+        if pairs:
+            pairs.first(TextArea).focus()
+        else:
+            save_btn = self.query("#vault-save")
+            if save_btn:
+                save_btn.first(Button).focus()
 
     def _finished(self, result: AddKeysResult) -> None:
         self._set_busy(False)

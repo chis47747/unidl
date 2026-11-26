@@ -1,5 +1,7 @@
 # Availability lookup
 
+[English](availability.md) | [简体中文](zh-CN/availability.md)
+
 Global Search can answer the question that comes before choosing a service:
 who carries this title in the regions that matter to me? The lookup uses
 JustWatch, then maps each provider back to a native service registered in unidl.
@@ -26,7 +28,9 @@ third-party channel add-on from being mistaken for the provider's native app.
 Availability rows are grouped by region and then by subscription, free,
 ad-supported, rental and purchase offers. Series offers include the seasons
 reported by the provider. `ctrl+y` copies the highlighted offer URL, falling
-back to the title's JustWatch page.
+back to the title's JustWatch page. Press `p` to toggle the 2:3 poster preview
+inspector or `t` to schedule a timed download for the highlighted title (see
+[Scheduled downloads](scheduled-downloads.md)).
 
 ## Regions
 

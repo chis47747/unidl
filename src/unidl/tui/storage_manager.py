@@ -10,6 +10,7 @@ state paths can be opened without turning inspection into a path migration.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,7 +157,7 @@ class _StorageEditor(ModalScreen[str | None]):
         self.value = value
         self.preview = preview
         self.validator = validator
-        self._discard_armed = False
+        self._discard_armed_at = 0.0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-card"):
@@ -195,7 +196,7 @@ class _StorageEditor(ModalScreen[str | None]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
-        self._discard_armed = False
+        self._discard_armed_at = 0.0
         self._show_preview(event.value)
         self.call_after_refresh(self._fit_modal)
 
@@ -206,6 +207,7 @@ class _StorageEditor(ModalScreen[str | None]):
         if self.validator is not None:
             problems = self.validator(value)
             if problems:
+                self._discard_armed_at = 0.0
                 self.notify(
                     "  ·  ".join(problems),
                     title=tr(
@@ -234,14 +236,16 @@ class _StorageEditor(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         field = self.query_one("#storage-editor-input", Input)
-        if field.value != self.value and not self._discard_armed:
-            self._discard_armed = True
-            self.notify(
-                tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
-                severity="warning",
-                timeout=4,
-            )
-            return
+        if field.value != self.value:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
         if self.app.screen is self:
             self.dismiss(None)
 
@@ -586,7 +590,10 @@ class StorageManagerScreen(Screen[None]):
     def _edit_preview(self, row: StorageRow, value: str) -> str:
         if row.kind in {"setting-path", "config-path"}:
             if not str(value or "").strip():
-                fallback, _source = self._display_value(row)
+                if row.kind == "setting-path":
+                    fallback = str(self.app.config.paths.downloads)
+                else:
+                    fallback = str(self.app.config.paths.home / row.key)
                 return f"[$dim]{tr('storage.preview.default')}[/]  {visual_markup(fallback)}"
             try:
                 resolved = self._normalise_path(value)
@@ -601,9 +608,9 @@ class StorageManagerScreen(Screen[None]):
             problems = validate_episode_folder_template(str(value or "").strip())
             if problems:
                 return f"[$warn]{visual_markup('  ·  '.join(problems))}[/]"
-        return self._name_preview({row.key: value})
+        return self._name_preview({row.key: value}, focus_key=row.key)
 
-    def _name_preview(self, changes: dict[str, str] | None = None) -> str:
+    def _name_preview(self, changes: dict[str, str] | None = None, *, focus_key: str = "") -> str:
         values = {
             key: str(self.globals.get(key) or "")
             for key in (
@@ -670,11 +677,14 @@ class StorageManagerScreen(Screen[None]):
             layout=values["release_template"],
             style=values["filename_style"],
         )
-        return (
-            f"[$dim]{tr('storage.preview.episode')}[/]  {visual_markup(episode + suffix)}\n"
-            f"[$dim]{tr('storage.preview.film')}[/]     {visual_markup(movie + suffix)}\n"
-            f"[$dim]{tr('storage.preview.folder')}[/]  {visual_markup(folder)}"
-        )
+        episode_line = f"[$dim]{tr('storage.preview.episode')}[/]  {visual_markup(episode + suffix)}"
+        film_line = f"[$dim]{tr('storage.preview.film')}[/]     {visual_markup(movie + suffix)}"
+        folder_line = f"[$dim]{tr('storage.preview.folder')}[/]  {visual_markup(folder)}"
+        if focus_key == "name_template_movie":
+            return f"{film_line}\n{episode_line}\n{folder_line}"
+        if focus_key == "episode_folder_template":
+            return f"{folder_line}\n{episode_line}\n{film_line}"
+        return f"{episode_line}\n{film_line}\n{folder_line}"
 
     def go_back(self) -> bool:
         self.dismiss(None)

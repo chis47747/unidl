@@ -16,7 +16,6 @@ screen's ``service``.
 
 from __future__ import annotations
 
-from textual import work
 from textual.app import ComposeResult
 from textual.widgets import Static
 
@@ -121,10 +120,42 @@ class ServiceScreen(AskHost):
         colour = colour_fn() if callable(colour_fn) else "$accent"
         found.first(Static).update(banner.small_art(name, self.size.width, colour))
 
+    def reset_after_minimize(self) -> None:
+        """Hand this ServiceScreen a fresh controller while the old one downloads in background."""
+        if not self.is_attached:
+            return
+        from ..core.engine import Engine
+        from .session import SessionController
+
+        previous = self.controller
+        previous.detach(self)
+        extras = getattr(getattr(self.service, "ctx", None), "extras", None)
+        if isinstance(extras, dict):
+            for key in ("initial_target", "initial_search", "initial_import"):
+                extras.pop(key, None)
+        fresh = SessionController(
+            self.app,
+            self.service,
+            Engine(
+                self.app.config,
+                vault=self.app.vault,
+                vault_collection=self.app.vaults,
+            ),
+        )
+        fresh.root = self
+        fresh._worker_started()
+        fresh._flow_worker_reserved = True
+        self.controller = fresh
+        self.service = fresh.service
+        self.settings = fresh.settings
+        if hasattr(self.app, "register_session"):
+            self.app.register_session(fresh)
+        fresh.attach(self)
+        self.run_service_flow()
+
     # ------------------------------------------------------------------ worker
-    @work(thread=True, exclusive=True, group="service-flow")
     def run_service_flow(self) -> None:
-        self.controller.drive()
+        self.controller.start_drive_thread()
 
     # -------------------------------------------------------------- navigation
     def back_without_ask(self) -> bool:

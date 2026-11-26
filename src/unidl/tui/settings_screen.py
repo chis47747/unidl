@@ -17,6 +17,7 @@ restart. Settings that invalidate a login are marked and drop the session.
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,7 @@ _THEME_SWATCH_SURFACES: dict[str, str] = {
     "catppuccin": "#45475a",
     "nord": "#4c566a",
     "gruvbox": "#504945",
-    "high_contrast": "#ffffff",
+    "high_contrast": "#262626",
 }
 
 
@@ -81,23 +82,30 @@ def appearance_swatch_markup(
     *,
     dark: bool,
     accent: str = DEFAULT_ACCENT,
+    theme_mode: str = "",
 ) -> str:
     """Colour swatch representing a theme, accent, title colour, density, or status-color choice."""
     accent_key = normalize_accent(accent)
+    active_mode = normalize_theme(theme_mode) if theme_mode else ("dark" if dark else "light")
     if setting_key == "theme":
         mode = normalize_theme(str(value or ""))
         pal = palette_for(mode, accent_key)
         surface = _THEME_SWATCH_SURFACES.get(mode, "#3a3a3a")
         return f"[{surface}]━━[/][{pal.accent}]━━[/]"
     if setting_key == "accent_color":
-        preset = ACCENT_PRESETS[normalize_accent(str(value or ""))]
+        choice = normalize_accent(str(value or ""))
+        preset = ACCENT_PRESETS[choice]
+        if choice == DEFAULT_ACCENT and theme_mode:
+            pal = palette_for(active_mode, DEFAULT_ACCENT)
+            return swatch_markup((pal.accent,), blocks=4)
         return swatch_markup(preset.swatch_stops(dark), blocks=4)
     if setting_key == "title_color":
-        stops = title_color_stops(str(value or ""), dark=dark, accent=accent_key)
+        pal = palette_for(active_mode, accent_key)
+        stops = title_color_stops(str(value or ""), dark=pal.dark, accent=accent_key, palette=pal)
         return swatch_markup(stops, blocks=4)
     if setting_key == "layout_density":
         density = normalize_density(str(value or ""))
-        pal = palette_for("dark" if dark else "light", accent_key)
+        pal = palette_for(active_mode, accent_key)
         if density == "comfortable":
             return f"[{pal.accent}]━  ━[/]"
         if density == "compact":
@@ -105,7 +113,7 @@ def appearance_swatch_markup(
         return f"[{pal.dim}]─[/][{pal.accent}]━━[/][{pal.dim}]─[/]"
     if setting_key == "semantic_colors":
         semantic = normalize_semantic_colors(str(value or ""))
-        pal = palette_for("dark" if dark else "light", accent_key, semantic)
+        pal = palette_for(active_mode, accent_key, semantic)
         return f"[{pal.ok}]━━[/][{pal.warn}]━[/][{pal.error}]━[/]"
     return ""
 
@@ -128,13 +136,13 @@ class _Editor(ModalScreen[Any]):
             yield from self.compose_title()
             help_text = setting_help(self.setting)
             if help_text:
-                yield Label(help_text, classes="modal-card-help")
+                yield Label(help_text, classes="modal-card-help", markup=False)
             yield from self.compose_editor()
             yield from self.compose_actions()
 
     def compose_title(self) -> ComposeResult:
         with Horizontal(classes="modal-head"):
-            yield Label(setting_label(self.setting), classes="modal-card-title")
+            yield Label(setting_label(self.setting), classes="modal-card-title", markup=False)
             yield CloseMark(id="modal-close")
 
     def compose_editor(self) -> ComposeResult:
@@ -280,6 +288,7 @@ class _AppearanceChoiceEditor(_Editor):
                 option.value,
                 dark=dark,
                 accent=accent,
+                theme_mode=mode,
             )
             label = escape_markup(option_label(self.setting, option))
             prompts.append(f"{mark} {swatch}  {label}" if swatch else f"{mark} {label}")
@@ -299,7 +308,7 @@ class _AppearanceChoiceEditor(_Editor):
     def _render_preview(self, value: Any) -> None:
         mode, accent, title_color, density, semantic = self._preview_state(value)
         pal = palette_for(mode, accent, semantic)
-        stops = title_color_stops(title_color, dark=pal.dark, accent=accent)
+        stops = title_color_stops(title_color, dark=pal.dark, accent=accent, palette=pal)
         viewport_h = self.size.height or self.app.size.height
         if density == "compact":
             compact = True
@@ -350,6 +359,9 @@ class _AppearanceChoiceEditor(_Editor):
                     preview_fn(semantic_colors=str(value))
         self._render_preview(value)
         self._rebuild_options(value)
+        if self.setting.key == "layout_density":
+            self._fit_modal()
+            self.call_after_refresh(self._fit_modal)
 
     def _restore_preview(self) -> None:
         clear_fn = getattr(self.app, "clear_appearance_preview", None)
@@ -433,6 +445,8 @@ class _MultiChoiceEditor(_Editor):
     def __init__(self, setting: Setting, current: Any):
         super().__init__(setting, current)
         self.selected = list(setting.coerce(current))
+        self._initial_selected = tuple(self.selected)
+        self._discard_armed_at = 0.0
 
     def _apply_label(self) -> str:
         return f"{phrase('Apply')} ({len(self.selected)})"
@@ -493,20 +507,39 @@ class _MultiChoiceEditor(_Editor):
             self.selected = [option.value]
         else:
             self.selected = [
-                value for value in self.selected
+                value
+                for value in self.selected
                 if not any(item.value == value and item.exclusive for item in self.setting.options)
             ]
             self.selected.append(option.value)
+        self._discard_armed_at = 0.0
         self._rebuild_options()
         self.query_one("#multi-setting-options", OptionList).highlighted = index
 
     def action_toggle(self) -> None:
-        self._toggle_index(
-            self.query_one("#multi-setting-options", OptionList).highlighted
-        )
+        if isinstance(self.focused, Button):
+            self.focused.press()
+            return
+        options = self.query_one("#multi-setting-options", OptionList)
+        if self.focused is not options:
+            return
+        self._toggle_index(options.highlighted)
 
     def action_apply(self) -> None:
         self.dismiss(tuple(self.selected))
+
+    def action_cancel(self) -> None:
+        if tuple(self.selected) != self._initial_selected:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
+        super().action_cancel()
 
     def on_option_list_option_selected(
         self, event: OptionList.OptionSelected
@@ -527,6 +560,13 @@ class _DefaultAudioEditor(_Editor):
         Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
+    def __init__(self, setting: Setting, current: Any):
+        super().__init__(setting, current)
+        self._initial_custom = (
+            str(current or "") if current not in {"auto", "original", None} else ""
+        )
+        self._discard_armed_at = 0.0
+
     def compose_editor(self) -> ComposeResult:
         yield OptionList(
             Option(tr("setting.default_audio.option.auto"), id="auto"),
@@ -535,7 +575,7 @@ class _DefaultAudioEditor(_Editor):
             id="default-audio-options",
         )
         yield Input(
-            value=str(self.current or "") if self.current not in {"auto", "original", None} else "",
+            value=self._initial_custom,
             placeholder="en / fr-CA / es-419",
             classes="ask-input",
             id="default-audio-language",
@@ -556,6 +596,9 @@ class _DefaultAudioEditor(_Editor):
         self.call_after_refresh(self._fit_modal)
         (field if custom else options).focus()
 
+    def on_input_changed(self, _event: Input.Changed) -> None:
+        self._discard_armed_at = 0.0
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         if event.option.id in {"auto", "original"}:
@@ -573,6 +616,7 @@ class _DefaultAudioEditor(_Editor):
         try:
             value = normalize_default_audio(raw)
         except ValueError:
+            self._discard_armed_at = 0.0
             self.notify(tr("mux_audio.invalid_language"), severity="warning")
             return
         self.dismiss(value)
@@ -583,16 +627,35 @@ class _DefaultAudioEditor(_Editor):
 
     def action_save(self) -> None:
         field = self.query_one(Input)
-        if field.display:
-            self._submit_value(field.value)
-            return
         options = self.query_one(OptionList)
         idx = options.highlighted
+        if idx in (0, 1) and self.focused is not field:
+            self.dismiss("auto" if idx == 0 else "original")
+            return
+        if field.display and (idx == 2 or self.focused is field):
+            self._submit_value(field.value)
+            return
         if idx in (0, 1):
             self.dismiss("auto" if idx == 0 else "original")
             return
         field.display = True
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         field.focus()
+
+    def action_cancel(self) -> None:
+        field = self.query_one(Input)
+        if field.display and field.value != self._initial_custom:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
+        super().action_cancel()
 
     def _handle_button(self, button_id: str) -> None:
         if button_id == "modal-save":
@@ -610,6 +673,13 @@ class _DefaultSubtitleEditor(_Editor):
         Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
+    def __init__(self, setting: Setting, current: Any):
+        super().__init__(setting, current)
+        self._initial_custom = (
+            str(current or "") if current not in {"auto", "original", None} else ""
+        )
+        self._discard_armed_at = 0.0
+
     def compose_editor(self) -> ComposeResult:
         yield OptionList(
             Option(tr("setting.default_subtitle.option.auto"), id="auto"),
@@ -618,7 +688,7 @@ class _DefaultSubtitleEditor(_Editor):
             id="default-subtitle-options",
         )
         yield Input(
-            value=str(self.current or "") if self.current not in {"auto", "original", None} else "",
+            value=self._initial_custom,
             placeholder="en / fr-CA / es-419",
             classes="ask-input",
             id="default-subtitle-language",
@@ -639,6 +709,9 @@ class _DefaultSubtitleEditor(_Editor):
         self.call_after_refresh(self._fit_modal)
         (field if custom else options).focus()
 
+    def on_input_changed(self, _event: Input.Changed) -> None:
+        self._discard_armed_at = 0.0
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         if event.option.id in {"auto", "original"}:
@@ -656,6 +729,7 @@ class _DefaultSubtitleEditor(_Editor):
         try:
             value = normalize_default_subtitle(raw)
         except ValueError:
+            self._discard_armed_at = 0.0
             self.notify(tr("mux_subtitle.invalid_language"), severity="warning")
             return
         self.dismiss(value)
@@ -666,16 +740,35 @@ class _DefaultSubtitleEditor(_Editor):
 
     def action_save(self) -> None:
         field = self.query_one(Input)
-        if field.display:
-            self._submit_value(field.value)
-            return
         options = self.query_one(OptionList)
         idx = options.highlighted
+        if idx in (0, 1) and self.focused is not field:
+            self.dismiss("auto" if idx == 0 else "original")
+            return
+        if field.display and (idx == 2 or self.focused is field):
+            self._submit_value(field.value)
+            return
         if idx in (0, 1):
             self.dismiss("auto" if idx == 0 else "original")
             return
         field.display = True
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         field.focus()
+
+    def action_cancel(self) -> None:
+        field = self.query_one(Input)
+        if field.display and field.value != self._initial_custom:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
+        super().action_cancel()
 
     def _handle_button(self, button_id: str) -> None:
         if button_id == "modal-save":
@@ -697,7 +790,7 @@ def validate_setting_value(spec: Setting, value: Any) -> list[str]:
     problems = _template_problems(spec, value)
     if problems:
         return problems
-    text = str(value or "").strip()
+    text = ("" if value is None else str(value)).strip()
     if spec.kind == "int":
         try:
             number = int(text)
@@ -728,7 +821,7 @@ class _TextEditor(_Editor):
     def __init__(self, setting: Setting, current: Any):
         super().__init__(setting, current)
         self._initial_text = "" if current is None else str(current)
-        self._discard_armed = False
+        self._discard_armed_at = 0.0
 
     def compose_editor(self) -> ComposeResult:
         yield Input(
@@ -748,11 +841,12 @@ class _TextEditor(_Editor):
         self.query_one(Input).focus()
 
     def on_input_changed(self, _event: Input.Changed) -> None:
-        self._discard_armed = False
+        self._discard_armed_at = 0.0
 
     def _submit(self, value: str) -> None:
         problems = validate_setting_value(self.setting, value)
         if problems:
+            self._discard_armed_at = 0.0
             self.notify(
                 "  ·  ".join(problems),
                 title=tr("settings.not_saved", label=setting_label(self.setting)),
@@ -771,14 +865,16 @@ class _TextEditor(_Editor):
 
     def action_cancel(self) -> None:
         field = self.query_one(Input)
-        if field.value != self._initial_text and not self._discard_armed:
-            self._discard_armed = True
-            self.notify(
-                tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
-                severity="warning",
-                timeout=4,
-            )
-            return
+        if field.value != self._initial_text:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
         super().action_cancel()
 
     def _handle_button(self, button_id: str) -> None:
@@ -797,9 +893,14 @@ class _TitleDelayEditor(_Editor):
         Binding("ctrl+s", "save", "Save", show=False, priority=True),
     ]
 
+    def __init__(self, setting: Setting, current: Any):
+        super().__init__(setting, current)
+        self._initial_text = "" if current is None else str(current)
+        self._discard_armed_at = 0.0
+
     def compose_editor(self) -> ComposeResult:
         yield Input(
-            value="" if self.current is None else str(self.current),
+            value=self._initial_text,
             placeholder="off / 30 / 20-40",
             classes="ask-input",
         )
@@ -810,7 +911,12 @@ class _TitleDelayEditor(_Editor):
             yield Button(phrase("Cancel"), id="modal-cancel")
 
     def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
         self.query_one(Input).focus()
+
+    def on_input_changed(self, _event: Input.Changed) -> None:
+        self._discard_armed_at = 0.0
 
     def _submit(self, raw: str) -> None:
         from ..core.title_delay import normalize_title_delay
@@ -818,6 +924,7 @@ class _TitleDelayEditor(_Editor):
         try:
             value = normalize_title_delay(raw)
         except ValueError as exc:
+            self._discard_armed_at = 0.0
             self.notify(
                 tr(
                     "title_delay.invalid",
@@ -835,6 +942,20 @@ class _TitleDelayEditor(_Editor):
 
     def action_save(self) -> None:
         self._submit(self.query_one(Input).value)
+
+    def action_cancel(self) -> None:
+        field = self.query_one(Input)
+        if field.value != self._initial_text:
+            now = time.monotonic()
+            if now - self._discard_armed_at > 4.0:
+                self._discard_armed_at = now
+                self.notify(
+                    tr("confirm.discard_unsaved", default="Unsaved changes — press Esc or Cancel again to discard"),
+                    severity="warning",
+                    timeout=4,
+                )
+                return
+        super().action_cancel()
 
     def _handle_button(self, button_id: str) -> None:
         if button_id == "modal-save":
@@ -897,7 +1018,7 @@ class SettingsScreen(Screen):
             yield Static("", id="crumbs-pill", classes="pill")
         with Vertical(id="body"):
             yield OptionList(id="settings-list")
-        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", "modified only"), ("^b", "back"), ("esc", "quit"))
+        yield KeyBar(("enter", "change"), ("r", "reset"), ("m", tr("settings.modified_only")), ("^b", "back"), ("esc", "quit"))
 
     def _render_masthead(self, modified_count: int = 0) -> None:
         if self.service is None:
@@ -943,6 +1064,10 @@ class SettingsScreen(Screen):
 
         for chrome in self.query(Chrome):
             chrome.refresh_locale()
+        self.set_hint("")
+        self.rebuild()
+
+    def refresh_after_settings(self) -> None:
         self.rebuild()
 
     def set_hint(self, text: str) -> None:
@@ -1027,7 +1152,7 @@ class SettingsScreen(Screen):
             if self._modified_only:
                 visible_specs = [
                     spec for spec in visible_specs
-                    if is_setting_modified(spec, scope) or spec.key == self._search_key
+                    if is_setting_modified(spec, scope)
                 ]
             if not visible_specs:
                 return
@@ -1423,7 +1548,7 @@ class SettingsScreen(Screen):
             label = self._vault_label(scope.get(spec.key), spec)
         else:
             label = setting_value(spec, scope)
-        note = f"{setting_label(spec)} -> {label}"
+        note = tr("settings.changed", label=setting_label(spec), value=label)
         if paired_device:
             note += tr("settings.paired_cdm", name=paired_device)
         if resets and self.service is not None:

@@ -31,7 +31,7 @@ from ..core.cdmrules import Rule
 from ..core.i18n import cell_width, tr
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting
-from .bidi import visual_text
+from .bidi import escape_markup, visual_text
 from .chrome import Chrome, KeyBar, refresh_locale_widgets
 
 #: The row that adds one. Not a key on its own: an empty screen has to say what to
@@ -45,9 +45,7 @@ CONDITION_WIDTH = 20
 
 def _esc(text: object) -> str:
     """Neutralise square brackets: real device names are full of them."""
-    from rich.markup import escape as _escape_markup
-
-    return _escape_markup(str(text))
+    return escape_markup(text)
 
 
 class CdmRulesScreen(Screen[str | None]):

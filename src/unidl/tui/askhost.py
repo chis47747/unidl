@@ -905,10 +905,16 @@ class AskHost(Screen):
         count = min(self._log_lines, LOG_LIMIT)
         label = tr("log.lines", count=count)
         note = tr(f"log.note.{state}", default=LOG_NOTE[state])
-        found.first(Static).update(
-            f"[$accent]{LOG_ARROW[state]}[/] [$muted]{tr('log.title')}[/]  "
-            f"[$muted]{label}[/]  [$dim]^l · {note}[/]"
-        )
+        width = getattr(getattr(self, "size", None), "width", 100) or 100
+        if width < 92:
+            found.first(Static).update(
+                f"[$accent]{LOG_ARROW[state]}[/] [$muted]{tr('log.title')}[/]  [$muted]{label}[/]"
+            )
+        else:
+            found.first(Static).update(
+                f"[$accent]{LOG_ARROW[state]}[/] [$muted]{tr('log.title')}[/]  "
+                f"[$muted]{label}[/]  [$dim]^l · {note}[/]"
+            )
 
     def action_cycle_log_filter(self) -> None:
         """Cycle log visibility between all entries, warnings+, and errors only."""
@@ -917,10 +923,20 @@ class AskHost(Screen):
         order = ("all", "warn", "error")
         current = getattr(self, "_log_filter", "all")
         self._log_filter = order[(order.index(current) + 1) % len(order)] if current in order else "all"
+        was_collapsed = self._log_state == "collapsed"
+        if was_collapsed:
+            pane = self.query("#log-pane")
+            if pane:
+                self._log_state = "normal"
+                pane.first().remove_class("collapsed", "tall")
+                self.refresh_keys()
         self._log_dirty = True
-        self._drawn_width = 0
         self._render_log_header()
-        self._reflow_log()
+        if was_collapsed:
+            self._drawn_width = 0
+            self.call_after_refresh(self._reflow_log)
+        else:
+            self._reflow_log()
 
     def action_toggle_log_search(self) -> None:
         """Show or focus the inline keyword search bar for the session log."""
@@ -935,7 +951,8 @@ class AskHost(Screen):
         if self._log_search_open and self.focused is field:
             self.action_close_log_search()
             return
-        if self._log_state == "collapsed":
+        was_collapsed = self._log_state == "collapsed"
+        if was_collapsed:
             pane = self.query("#log-pane")
             if pane:
                 self._log_state = "normal"
@@ -944,6 +961,9 @@ class AskHost(Screen):
         self._log_search_open = True
         bar.display = True
         self._render_log_header()
+        if was_collapsed:
+            self._drawn_width = 0
+            self.call_after_refresh(self._reflow_log)
         field.focus()
         self.call_after_refresh(field.focus)
 
@@ -996,6 +1016,8 @@ class AskHost(Screen):
         self._log_state = LOG_STATES[(LOG_STATES.index(self._log_state) + 1) % len(LOG_STATES)]
         target.set_class(self._log_state == "tall", "tall")
         target.set_class(self._log_state == "collapsed", "collapsed")
+        if self._log_state == "collapsed" and self._log_search_open:
+            self.action_close_log_search()
         self._render_log_header()
         self.refresh_keys()
         if was_collapsed and self._log_state != "collapsed":
@@ -1154,7 +1176,9 @@ class AskHost(Screen):
         """Run every row that failed or was stopped, in queue order."""
         started = self.controller.retry()
         if not started:
-            busy = getattr(
+            batch_paused = bool(getattr(self.controller, "batch_paused", False))
+            can_resume = bool(getattr(self.controller, "can_resume_batch", False))
+            busy = False if (batch_paused and can_resume) else getattr(
                 self.controller,
                 "batch_busy",
                 self.controller.job_running or self.controller._retry_pending,
@@ -1164,12 +1188,18 @@ class AskHost(Screen):
                 timeout=3,
             )
             return
+        disarm = getattr(self.app, "disarm_quit", None)
+        if callable(disarm):
+            disarm()
         self.notify(tr("queue.retrying_n", count=started), timeout=3)
         self.refresh_keys()
 
     def retry_job(self, job) -> None:
         """Run one row again, from a click on it."""
         if self.controller.retry([job]):
+            disarm = getattr(self.app, "disarm_quit", None)
+            if callable(disarm):
+                disarm()
             self.notify(tr("queue.retrying_name", name=job.name), timeout=3)
             self.refresh_keys()
         else:
@@ -1290,6 +1320,7 @@ class AskHost(Screen):
             self._current_ask = None
         self._ask_scope = None
         self._render_waiting()
+        self.refresh_keys()
 
     def clear_ask(self) -> None:
         """Take the current ask off the screen, and the question with it.

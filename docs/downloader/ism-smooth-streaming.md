@@ -1,3 +1,5 @@
+[English](ism-smooth-streaming.md) | [简体中文](../zh-CN/downloader/ism-smooth-streaming.md)
+
 ## Smooth Streaming ISM CENC Init Track IDs
 
 Some Smooth Streaming services number MP4 track IDs across every

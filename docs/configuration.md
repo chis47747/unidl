@@ -1,5 +1,7 @@
 # Configuration
 
+[English](configuration.md) | [简体中文](zh-CN/configuration.md)
+
 ## First launch: no YAML required
 
 After installation, run `unidl` (or `python -m unidl`). A missing YAML file

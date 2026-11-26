@@ -32,6 +32,7 @@ from ..core.i18n import cell_width, get_translator, tr
 from ..core.redact import redact
 from .bidi import rtl_terminal_mode, visual_text
 from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
+from .poster import DEFAULT_POSTER_PREVIEW, detect_terminal_poster_capability, normalize_poster_preview
 from .terminal_progress import supports_osc_progress
 
 #: state -> (glyph, palette role).  Core runtime gaps are red, global DRM setup
@@ -94,6 +95,12 @@ def format_diagnostics_report(app: object, report: readiness.Report) -> str:
     semantic = getattr(app, "semantic_colors_preference", "default")
     density = getattr(app, "density_preference", "auto")
     globals_scope = getattr(app, "globals", None)
+    poster_mode = normalize_poster_preview(
+        globals_scope.get("poster_preview", DEFAULT_POSTER_PREVIEW)
+        if hasattr(globals_scope, "get")
+        else DEFAULT_POSTER_PREVIEW
+    )
+    poster_cap, _poster_term = detect_terminal_poster_capability()
     drm_system = (
         str(globals_scope.get("drm_system", "widevine") or "widevine")
         if hasattr(globals_scope, "get")
@@ -122,7 +129,7 @@ def format_diagnostics_report(app: object, report: readiness.Report) -> str:
         ),
         (
             f"Interface: locale={locale} · theme={theme} · accent={accent} · "
-            f"semantic={semantic} · density={density}"
+            f"semantic={semantic} · density={density} · posters={poster_mode}({poster_cap})"
         ),
         f"DRM:       system={drm_system} · device={device_kind}",
         "",

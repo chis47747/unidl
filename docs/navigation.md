@@ -1,5 +1,7 @@
 # Back and one-level navigation
 
+[English](navigation.md) | [简体中文](zh-CN/navigation.md)
+
 ## The rule
 
 **Back returns to the immediate previous page that opened the current step.**

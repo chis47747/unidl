@@ -194,7 +194,8 @@ def setting_index(app) -> list[SettingHit]:
                         tr(f"storage.row.{row.key}.help", default=row.help),
                         ("storage", row.key), row.label)
     for key, label_id in JUSTWATCH_SETTING_ROWS:
-        manager_hit(key, label_id, "", ("justwatch", key))
+        jw_help = tr("schedule.setting.host_help") if key == "schedule_host" else ""
+        manager_hit(key, label_id, jw_help, ("justwatch", key))
     for key, _kind, label_id in PROXY_ROUTING_ROWS:
         manager_hit(key, label_id, tr("proxy.help.routing"), ("proxy", key))
     for tab in ("endpoints", "providers"):
@@ -611,6 +612,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         self._fit_statusline()
         self._fit_beta()
         self._render_setup_note()
+        self._refresh_recent_bar(visible=not self._query() and self.search_mode == "auto")
 
     def _fit_beta(self) -> None:
         self.set_class(self.size.width < 80, "narrow")
@@ -618,7 +620,7 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         if density == "compact":
             compact = True
         elif density == "comfortable":
-            compact = False
+            compact = bool(self.size.height and self.size.height < 26)
         else:
             compact = self.size.height < 32
         self.set_class(compact, "compact")
@@ -766,6 +768,11 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
 
     def choose_mode(self) -> None:
         def chosen(value):
+            if value == "schedule":
+                if self.query_one("#filter", _SearchInput).value == "/":
+                    self.query_one("#filter", _SearchInput).value = ""
+                self.app.action_open_schedule()
+                return
             if value not in MODES:
                 self.focus_search()
                 return
@@ -773,10 +780,14 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
                 self.query_one("#filter", _SearchInput).value = ""
             self.set_mode(value)
 
-        self.app.push_screen(_ChoicePicker(tr("beta.commands"), [
+        choices = [
             (mode, tr(f"beta.mode.{mode}"), "/" + {"services": "service", "add_keys": "addkeys"}.get(mode, mode))
             for mode in MODES
-        ]), chosen)
+        ]
+        choices.append(
+            ("schedule", tr("schedule.title", default="Scheduled downloads"), "/schedule")
+        )
+        self.app.push_screen(_ChoicePicker(tr("beta.commands"), choices), chosen)
 
     def set_mode(self, mode: str) -> None:
         self.search_mode = mode
@@ -1059,7 +1070,10 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
             self._refresh_exports()
             rows = self._export_rows(query)
         elif query and query != "/":
-            if mode == "url" or mode == "auto" and query[:8].lower().startswith(("http://", "https://")):
+            slash_rows = self._slash_command_rows(query)
+            if slash_rows:
+                rows = slash_rows
+            elif mode == "url" or mode == "auto" and query[:8].lower().startswith(("http://", "https://")):
                 if mode == "auto" and not self._auto_shows("url"):
                     rows = []
                 elif len(query) > MAX_AUTO_URL_CHARS and query[:8].lower().startswith(("http://", "https://")):
@@ -1218,7 +1232,13 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         query = self._query()
         if query.startswith("/"):
             token, _, rest = query.partition(" ")
-            mode = COMMANDS.get(token[1:].lower())
+            cmd = token[1:].lower()
+            if cmd in {"schedule", "schedules", "radar", "upcoming"}:
+                self.query_one("#filter", _SearchInput).value = ""
+                tab = "tab-radar" if cmd in {"radar", "upcoming"} else "tab-jobs"
+                self.app.action_open_schedule(initial_tab=tab)
+                return
+            mode = COMMANDS.get(cmd)
             if mode is not None:
                 self.query_one("#filter", _SearchInput).value = rest.lstrip()
                 self.set_mode(mode)
@@ -1278,7 +1298,36 @@ class BetaHomeScreen(HomeScreen, inherit_bindings=False):
         if self._results:
             self.query_one("#beta-results").focus()
 
+    def _slash_command_rows(self, query: str) -> list[_Result]:
+        if not query.startswith("/") or " " in query:
+            return []
+        prefix = query[1:].lower()
+        if not prefix or "/" in prefix:
+            return []
+        specs = [
+            (
+                "/" + {"services": "service", "add_keys": "addkeys"}.get(mode, mode),
+                tr(f"beta.mode.{mode}"),
+            )
+            for mode in MODES
+        ]
+        specs.extend(
+            [
+                ("/schedule", tr("schedule.title", default="Scheduled downloads")),
+                ("/radar", tr("schedule.tab.radar", default="Upcoming radar")),
+            ]
+        )
+        return [
+            _Result("command", cmd, desc)
+            for cmd, desc in specs
+            if cmd[1:].startswith(prefix)
+        ]
+
     def activate(self, row: _Result) -> None:
+        if row.kind == "command":
+            self.query_one("#filter", _SearchInput).value = row.label
+            self.submit()
+            return
         if self.search_mode == "auto":
             if row.category is not None and not self._auto_shows(row.category):
                 self.rebuild()

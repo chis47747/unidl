@@ -1,5 +1,7 @@
 # Security policy
 
+[English](SECURITY.md) | [简体中文](zh-CN/SECURITY.md)
+
 unidl handles unusually sensitive local material: account credentials, browser
 cookies, session tokens, CDM device files and secrets, content keys, remote-vault
 tokens, exported commands and debug logs. Treat a disclosure involving any of

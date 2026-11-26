@@ -1,5 +1,7 @@
 # Contributing to unidl
 
+[English](CONTRIBUTING.md) | [简体中文](zh-CN/CONTRIBUTING.md)
+
 UniDL services are the account, catalogue and key-acquisition layer; the native
 delivery core is part of the same application. Keep that boundary intact:
 services may log in, discover playback and acquire keys; the native core owns

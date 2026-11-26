@@ -641,7 +641,7 @@ class _ConfirmProxyDelete(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-confirm-card"):
             with Horizontal(classes="modal-head"):
-                yield Label(f"{phrase('Delete')} {self.target_label}?", id="resource-confirm-title")
+                yield Label(f"{phrase('Delete')} {self.target_label}?", id="resource-confirm-title", markup=False)
                 yield CloseMark(id="resource-confirm-close")
             yield Static(
                 f"{visual_markup(self.target_kind)}: [$warn]{visual_markup(self.target_label)}[/]",
@@ -680,7 +680,7 @@ class ProxyManagerScreen(Screen[None]):
         Binding("a", "add", "Add", show=True),
         Binding("e", "activate", "Edit", show=False),
         Binding("d", "delete", "Delete", show=True),
-        Binding("space", "toggle", "Enable/disable", show=True),
+        Binding("space", "toggle_key", "Enable/disable", show=True),
         Binding("t", "test", "Test route", show=True),
         Binding("l", "authorize", "Authorize", show=True),
     ]
@@ -852,6 +852,9 @@ class ProxyManagerScreen(Screen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         action = (event.button.id or "").removeprefix("proxy-")
+        if action == "edit" and self._tab == "routing":
+            self._edit_route()
+            return
         {
             "edit": self.action_activate,
             "add": self.action_add,
@@ -936,12 +939,15 @@ class ProxyManagerScreen(Screen[None]):
         self.rebuild()
         self.query_one("#proxy-list", OptionList).focus()
 
+    def _edit_route(self) -> None:
+        self.app.push_screen(_RouteEditor(str(self.globals.get("proxy") or "")), self._save_route)
+
     def action_activate(self) -> None:
         row = self._selected()
         if row is None:
             return
         if row.kind == "route":
-            self.app.push_screen(_RouteEditor(str(self.globals.get("proxy") or "")), self._save_route)
+            self._edit_route()
         elif row.kind == "download":
             self.globals.set("proxy_downloads", not bool(self.globals.get("proxy_downloads")))
             self.rebuild()
@@ -1045,6 +1051,12 @@ class ProxyManagerScreen(Screen[None]):
             _ConfirmProxyDelete(self._row_label(row), kind_label),
             lambda confirmed: self._confirm_delete(row, confirmed),
         )
+
+    def action_toggle_key(self) -> None:
+        if isinstance(self.focused, Button):
+            self.focused.press()
+            return
+        self.action_toggle()
 
     def action_toggle(self) -> None:
         if self._tab == "routing":
