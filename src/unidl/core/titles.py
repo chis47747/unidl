@@ -52,6 +52,11 @@ class Title:
     season: int | None = None
     episode: int | None = None
     episode_name: str | None = None
+    #: ISO broadcast/air date (e.g. ``"2026-11-26"``) for daily, news, or
+    #: sports episodes that have no season/episode numbering.
+    air_date: str | None = None
+    #: Optional release edition label (e.g. ``"Extended"``, ``"Directors Cut"``, ``"IMAX"``).
+    edition: str | None = None
     language: str | None = None
     duration: float | None = None
 

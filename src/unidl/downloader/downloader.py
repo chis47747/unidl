@@ -2233,7 +2233,7 @@ def _prepare_vod_resume_parts(target: Path, stream: StreamInfo, segments: list[S
     expected = {"version": 1, "id": stream.vod_resume_id, "parts": fingerprints}
     if target.is_symlink() or marker.is_symlink():
         raise RuntimeError("VOD resume cache contains an unexpected symlink")
-    for partial in target.glob("*.part.tmp"):
+    for partial in target.glob("*.part*.tmp"):
         partial.unlink(missing_ok=True)
     if marker.exists():
         if json.loads(marker.read_text("utf-8")) != expected:
@@ -3197,12 +3197,16 @@ def _download_part(
         if _is_skippable_missing_hls_boundary_segment(segment, exc):
             return _write_empty_part(out, progress_bytes=progress_bytes, part_id=str(out))
         raise
-    tmp_out = out.with_suffix(out.suffix + ".tmp")
-    tmp_out.write_bytes(data)
-    if not _cached_part_is_complete(tmp_out, len(data), segment):
+    tmp_out = out.with_name(f"{out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp_out.write_bytes(data)
+        if not _cached_part_is_complete(tmp_out, len(data), segment):
+            tmp_out.unlink(missing_ok=True)
+            raise DownloadError(f"Incomplete segment {_segment_label(segment)}: got {len(data)} bytes.", url=segment.url)
+        tmp_out.replace(out)
+    except BaseException:
         tmp_out.unlink(missing_ok=True)
-        raise DownloadError(f"Incomplete segment {_segment_label(segment)}: got {len(data)} bytes.", url=segment.url)
-    tmp_out.replace(out)
+        raise
     if progress_bytes:
         progress_bytes.add(len(data))
     return len(data)
@@ -3522,10 +3526,14 @@ def _stream_part_to_file(
 
 
 def _write_empty_part(out: Path, progress_bytes: _PartProgress | None = None, part_id: str | None = None) -> int:
-    tmp_out = out.with_suffix(out.suffix + ".tmp")
+    tmp_out = out.with_name(f"{out.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp_out.parent.mkdir(parents=True, exist_ok=True)
-    tmp_out.write_bytes(b"")
-    tmp_out.replace(out)
+    try:
+        tmp_out.write_bytes(b"")
+        tmp_out.replace(out)
+    except BaseException:
+        tmp_out.unlink(missing_ok=True)
+        raise
     if progress_bytes and part_id:
         progress_bytes.complete_part(part_id)
     return 0

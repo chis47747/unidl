@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable, Iterator
+from dataclasses import replace
+from functools import partial
+from pathlib import Path
 
 from ...core.attachments import Attachment
 from ...core.cdm import CdmError
 from ...core.flow import SCOPE_ROOT, Ask, Back, Choice, FlowContext, Pick
-from ...core.playback import DrmInfo, Playback
+from ...core.playback import DrmInfo, ExternalTrack, Playback, SubtitleReference
 from ...core.qr import QrPresentation
+from ...core.secureio import atomic_write_bytes, private_directory, private_file
 from ...core.service import AuthStatus, Capabilities, Service, registry
 from ...core.settings import Option, Setting
 from ...core.titles import Title, TitleKind
+from ...downloader.models import StreamInfo
+from ...downloader.subtitles import SubtitleConversionError, convert_subtitle_file
 from . import api
 
 _CODEC = Setting(
@@ -800,6 +808,7 @@ class ABCiView(Service):
     def _playback(self, title: Title, source: api.Source, *, is_live: bool = False) -> Playback:
         if source.duration:
             title.duration = source.duration
+        live = bool(is_live or source.is_live)
         playback = Playback(
             title=title,
             save_name=self.save_name(title),
@@ -807,8 +816,9 @@ class ABCiView(Service):
             headers={"User-Agent": api.USER_AGENT},
             proxy=self.ctx.proxy,
             is_live=is_live,
-            chapters=list(source.chapters) if not (is_live or source.is_live) and self.fetch_chapters_enabled() else [],
+            chapters=list(source.chapters) if not live and self.fetch_chapters_enabled() else [],
             attachments=list(source.attachments) if self.fetch_attachments_enabled() else [],
+            subtitle_references=[] if live else list(source.subtitles),
             note=source.line(),
         )
         if source.protected:
@@ -824,6 +834,170 @@ class ABCiView(Service):
         else:
             playback.drm = DrmInfo(clear=True)
         return playback
+
+    def augment_tracks(
+        self,
+        playback: Playback,
+        tracks,
+        log: Callable[[str], None],
+    ) -> list[StreamInfo]:
+        """Expose ABC iView API captions alongside manifest tracks in the picker."""
+        native_urls = {
+            stream.url
+            for stream in (getattr(tracks, "streams", ()) or ())
+            if stream.media_type in {"subtitle", "subtitles", "text"}
+            and not stream.extra.get("portable_subtitle_reference")
+        }
+        if native_urls and playback.subtitle_references:
+            playback.subtitle_references = [
+                replace(reference, selected=False) if reference.url in native_urls else reference
+                for reference in playback.subtitle_references
+            ]
+        seen: set[tuple[str, str, str]] = set()
+        rows: list[StreamInfo] = []
+        for reference in playback.subtitle_references:
+            url = str(reference.url or "").strip()
+            if not url or url in native_urls:
+                continue
+            language = reference.language or "und"
+            kind = reference.kind or "normal"
+            identity = (url, language.casefold(), kind.casefold())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            fmt = api.normalize_subtitle_format(reference.format, url=url, default="vtt") or "vtt"
+            rows.append(
+                StreamInfo(
+                    manifest_type="service",
+                    media_type="subtitle",
+                    url=url,
+                    original_url=url,
+                    id=f"abciview-subtitle-{len(rows) + 1}",
+                    group_id=kind,
+                    name=reference.name or language,
+                    language=language,
+                    role={"sdh": "SDH", "forced": "Forced"}.get(kind),
+                    codecs={
+                        "vtt": "webvtt",
+                        "srt": "subrip",
+                        "ttml": "ttml",
+                        "dfxp": "ttml",
+                        "xml": "ttml",
+                    }.get(fmt, fmt),
+                    extension=fmt,
+                    extra={
+                        "service_sidecar": "subtitle",
+                        "subtitle_reference_url": url,
+                        "subtitle_kind": kind,
+                        "subtitle_original": reference.original,
+                    },
+                )
+            )
+        if rows and callable(log):
+            log(f"ABC iView: added {len(rows)} API subtitle track(s) to the picker")
+        return rows
+
+    def prepare_download(self, playback: Playback, log: Callable[[str], None]) -> None:
+        self._prepare_subtitles(playback, log)
+
+    def prepare_download_with_progress(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+        progress: Callable[[SubtitleReference, int, int | None], None],
+    ) -> None:
+        self._prepare_subtitles(playback, log, progress)
+
+    def _prepare_subtitles(
+        self,
+        playback: Playback,
+        log: Callable[[str], None],
+        progress: Callable[[SubtitleReference, int, int | None], None] | None = None,
+    ) -> None:
+        if not playback.subtitle_references:
+            return
+        owned = {
+            (
+                ref.language or "und",
+                ref.name or ref.language or "",
+                ref.kind or "normal",
+            )
+            for ref in playback.subtitle_references
+        }
+        playback.mux_imports[:] = [
+            track
+            for track in playback.mux_imports
+            if (
+                track.language or "und",
+                track.name or track.language or "",
+                track.kind or "normal",
+            )
+            not in owned
+            or Path(track.path).suffix.casefold()
+            not in {".srt", ".vtt", ".webvtt", ".ttml", ".dfxp", ".xml", ".ass", ".ssa"}
+        ]
+        selected = [ref for ref in playback.subtitle_references if ref.selected]
+        if not selected:
+            return
+        client = self._api or self.client()
+        try:
+            directory = private_directory(self.ctx.subtitle_dir())
+        except OSError as exc:
+            raise api.AbcIviewError(f"Could not create ABC iView subtitle cache: {exc}") from exc
+        output_format = str(self.settings.get("sub_format", "srt") or "srt").strip().lower()
+        auto_fix = bool(self.settings.get("auto_subtitle_fix", True))
+        staged = {Path(track.path).resolve() for track in playback.mux_imports if track.path}
+        duration = playback.title.duration if playback.title else None
+        for index, reference in enumerate(selected, 1):
+            language = reference.language or "und"
+            name = reference.name or language
+            kind = reference.kind or "normal"
+            source_ext = api.normalize_subtitle_format(reference.format, url=reference.url, default="vtt") or "vtt"
+            safe_stem = _safe_stem(f"{playback.save_name}.{language}.{kind}.{index}")
+            try:
+                report = partial(progress, reference) if progress is not None else None
+                data = client.subtitle_bytes(
+                    reference.url,
+                    headers=reference.headers,
+                    progress=report,
+                )
+                identity = f"{reference.url}\0{language}\0{kind}".encode()
+                digest = hashlib.sha256(identity + b"\0" + data).hexdigest()[:12]
+                original = directory / f"{safe_stem}.{digest}.{source_ext}"
+                atomic_write_bytes(original, data)
+                converted = convert_subtitle_file(
+                    original,
+                    output_format=output_format,
+                    output_path=(
+                        original.with_suffix(f".{output_format}")
+                        if output_format != "raw"
+                        else None
+                    ),
+                    auto_fix=auto_fix,
+                    duration=duration,
+                )
+                if not converted.is_file() or converted.stat().st_size <= 0:
+                    raise SubtitleConversionError("no subtitle output was produced")
+                private_file(converted)
+            except (api.AbcIviewError, OSError, SubtitleConversionError) as exc:
+                raise api.AbcIviewError(
+                    f"Could not prepare ABC iView subtitle {name}: {exc}"
+                ) from exc
+            resolved = converted.resolve()
+            if resolved not in staged:
+                staged.add(resolved)
+                playback.mux_imports.append(
+                    ExternalTrack(
+                        path=str(converted),
+                        language=language,
+                        name=name,
+                        kind=kind,
+                        original=reference.original,
+                        forced=kind == "forced",
+                    )
+                )
+            if callable(log):
+                log(f"ABC iView subtitle prepared: {name}")
 
     def get_license(self, challenge: bytes, drm: DrmInfo) -> bytes:
         context = dict(drm.context or {})
@@ -853,6 +1027,11 @@ class ABCiView(Service):
                 session=self.ctx.session(user_agent=api.USER_AGENT)
             )
         return self._api
+
+
+def _safe_stem(value: str) -> str:
+    stem = re.sub(r"[^\w.-]+", ".", str(value or ""), flags=re.UNICODE)
+    return re.sub(r"\.{2,}", ".", stem).strip(".")[:140] or "ABCiView"
 
 
 def _format_duration(value: object) -> str:

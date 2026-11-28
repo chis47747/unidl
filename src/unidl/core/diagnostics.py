@@ -184,10 +184,17 @@ def activate(recorder: DebugRecorder | None) -> Iterator[None]:
 
 
 class DebugRecorder:
-    """Thread-safe, timestamped diagnostic file writer."""
+    """Thread-safe, timestamped diagnostic text + JSONL file writer."""
 
-    def __init__(self, path: Path, *, session_id: str | None = None):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        session_id: str | None = None,
+        jsonl: bool = True,
+    ):
         self.path = Path(path)
+        self.jsonl_path: Path | None = self.path.with_suffix(".jsonl") if jsonl else None
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self._lock = threading.RLock()
         self._closed = False
@@ -204,6 +211,46 @@ class DebugRecorder:
                         file.write(f"[{_timestamp()}] [{self.session_id}] [{event}] {line}\n")
             except OSError:
                 return
+            self._write_jsonl(event=event, message=text)
+
+    def record_event(self, event: str, *, stage: str = "", **fields: Any) -> None:
+        """Write one structured, redacted JSONL diagnostic event."""
+        if self._closed:
+            return
+        safe_fields = {
+            str(key): _redact_value(value, key=str(key))
+            for key, value in fields.items()
+        }
+        with self._lock:
+            self._write_jsonl(event=event, stage=stage, data=safe_fields)
+
+    def _write_jsonl(
+        self,
+        *,
+        event: str,
+        message: str = "",
+        stage: str = "",
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        if self.jsonl_path is None:
+            return
+        record: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "session": self.session_id,
+            "event": str(event or "log"),
+        }
+        if stage:
+            record["stage"] = str(stage)
+        if message:
+            record["message"] = message
+        if data:
+            record["data"] = dict(data)
+        try:
+            self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.jsonl_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            return
 
     def close(self) -> None:
         self._closed = True

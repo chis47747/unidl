@@ -60,11 +60,13 @@ UniDL 会优先查找操作系统的 `PATH`。如果某个命令未在系统 `PA
 - **pymonalisa** 与 **wasmtime**：已随依赖包含，用于 MonaLisa 本地票据 DRM 系统；不过 `.mld` 设备仍需配备其引用的 WebAssembly 模块。
 - **mkvmerge**：可选。在用户显式选择或可产出更佳 Matroska 封装结果时使用；在可行场景下 FFmpeg 会作为回退方案。
 - **MP4Box**（GPAC）：可选。选择 MP4Box 封装或输出立体 3D 点播内容时使用。
-- **dovi_tool**：可选。仅在需要输出 Dolby Vision + HDR10 混合格式时用到。
+- **dovi_tool**：可选。用于 Dolby Vision + HDR10 混合输出（含自动 L5 黑边裁切与 L6 亮度元数据写入）以及 HDR10+ 转 DV Profile 8.1 生成。
+- **hdr10plus_tool**：可选。仅在开启 `generate_dv_from_hdr10p` 时用于提取 HDR10+ 动态元数据并合成为 Dolby Vision Profile 8.1。
+- **shaka-packager**：可选。供相关封装/解密流程或声明依赖的服务使用。
 - **aria2c**：可选。仅在用户选择该分段下载后端时使用。
 - **curl**：可选。供显式声明其为外部工具（Helper）的服务或传输回退路径使用。
 
-通过操作系统的包管理器安装上述工具后，可运行以下命令验证：
+可通过操作系统的包管理器安装上述工具，也可以直接在 TUI 的**就绪检查 → 安装工具**（点击顶栏按钮或按 `i`）中查看各平台推荐安装命令并确认安装。验证安装示例：
 
 ~~~console
 ffmpeg -version
@@ -84,10 +86,11 @@ unidl
 unidl --config ./unidl.yaml
 ~~~
 
-在进入具体服务前，可以先执行只读检查确认环境状态：
+在进入具体服务前，可执行只读环境检查，或刷新已配置的 Git 服务仓库：
 
 ~~~console
 unidl --config ./unidl.yaml services
 unidl --config ./unidl.yaml cdm --check
 unidl --config ./unidl.yaml schedule list
+unidl --config ./unidl.yaml refresh-services          # 附带 --force 可忽略 TTL 强制刷新
 ~~~

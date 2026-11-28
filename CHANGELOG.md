@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.7.7] - 2026-11-28
+
+### Setup and connectivity
+
+- Added Firefox cookie import, Git service repository management, and an external tool installer in Readiness.
+- Added Proton VPN and Gluetun proxy options and an exit IP and timezone check.
+- Strengthened validation for service packages, proxies, vaults, and configuration.
+
+### Downloads and interface
+
+- Added optional HDR probing and post-processing, post-download hooks, and more controls for track selection and output naming.
+- Improved batch episode selection, resume paths, and settings screens.
+- Updated themes, interface translations, and English and Simplified Chinese documentation.
+
+### Service updates
+
+- Added ABC iView API subtitles to the track picker and prepared selected captions for download.
+
 ## [2.7.6] - 2026-11-26
 
 ### Scheduled downloads

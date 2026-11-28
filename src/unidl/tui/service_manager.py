@@ -4,20 +4,29 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Label, OptionList, Static
+from textual.widgets import Button, Checkbox, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..core import exports, service_catalog
 from ..core.i18n import phrase, setting_label, setting_value, tr
+from ..core.service_repo import (
+    RepoSyncResult,
+    ServiceRepoSpec,
+    parse_service_repos,
+    refresh_service_repos,
+)
 from ..core.settings import Option as SettingOption
 from ..core.settings import Setting, Settings, service_license_settings
-from .bidi import visual_markup
+from .bidi import escape_markup, visual_markup
 from .chrome import Chrome, CloseMark, KeyBar, fit_modal_card
+from .input import ClipboardInput as Input
 from .settings_layout import label_width, setting_row
+from .vault_targets import VaultCheckbox
 
 # Static declarations shared by the manager and Home's metadata-only search.
 SERVICE_MANAGER_ITEMS = (
@@ -29,6 +38,8 @@ SERVICE_MANAGER_ITEMS = (
     ("register", "register_service"),
     ("home", "home_services"),
     ("export", "export_manifest_type"),
+    ("repos", "service_repos"),
+    ("cookies", "browser_cookies"),
 )
 
 
@@ -466,6 +477,459 @@ class _ExportManifestEditor(ModalScreen[None]):
         return True
 
 
+def _repo_spec_to_entry(spec: ServiceRepoSpec) -> dict[str, Any]:
+    entry: dict[str, Any] = {"url": spec.url, "enabled": spec.enabled}
+    if spec.name:
+        entry["name"] = spec.name
+    if spec.branch:
+        entry["branch"] = spec.branch
+    if spec.subdir:
+        entry["subdir"] = spec.subdir
+    if spec.ttl_hours != 24.0:
+        entry["ttl_hours"] = spec.ttl_hours
+    return entry
+
+
+class _ServiceRepoEditorModal(ModalScreen[dict[str, Any] | None]):
+    """Add or edit one Git-backed external service repository."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
+
+    def __init__(self, spec: ServiceRepoSpec | None = None) -> None:
+        super().__init__()
+        self.spec = spec
+
+    def compose(self) -> ComposeResult:
+        spec = self.spec
+        ttl_value = (
+            str(int(spec.ttl_hours) if float(spec.ttl_hours).is_integer() else spec.ttl_hours)
+            if spec is not None
+            else "24"
+        )
+        title = (
+            tr("service.repos.edit_title", default="Edit Git service repository")
+            if spec is not None
+            else tr("service.repos.add_title", default="Add Git service repository")
+        )
+        with Vertical(id="repo-editor-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(title, classes="proxy-editor-title")
+                yield CloseMark(id="repo-editor-close")
+            yield Label(
+                tr(
+                    "service.repos.edit_help",
+                    default="Clones under <home>/service_repos/<name> and skips pull if local edits exist.",
+                ),
+                classes="proxy-editor-help",
+            )
+            with VerticalScroll(classes="proxy-editor-fields"):
+                yield Label(tr("service.repos.field.url", default="Repository URL"), classes="proxy-field-label")
+                yield Input(
+                    value=spec.url if spec is not None else "",
+                    placeholder="https://github.com/org/unidl-services.git",
+                    id="repo-url",
+                )
+                yield Label(
+                    tr("service.repos.field.name", default="Local folder name (optional)"),
+                    classes="proxy-field-label",
+                )
+                yield Input(
+                    value=spec.name if spec is not None else "",
+                    placeholder="auto from URL",
+                    id="repo-name",
+                )
+                yield Label(
+                    tr("service.repos.field.branch", default="Branch or tag (optional)"),
+                    classes="proxy-field-label",
+                )
+                yield Input(
+                    value=spec.branch if spec is not None else "",
+                    placeholder="main",
+                    id="repo-branch",
+                )
+                yield Label(
+                    tr("service.repos.field.subdir", default="Subdirectory inside repo (optional)"),
+                    classes="proxy-field-label",
+                )
+                yield Input(
+                    value=spec.subdir if spec is not None else "",
+                    placeholder="services",
+                    id="repo-subdir",
+                )
+                yield Label(
+                    tr("service.repos.field.ttl", default="Refresh cache TTL (hours)"),
+                    classes="proxy-field-label",
+                )
+                yield Input(value=ttl_value, placeholder="24", id="repo-ttl")
+                yield VaultCheckbox(
+                    tr("service.repos.field.enabled", default="Enabled"),
+                    value=spec.enabled if spec is not None else True,
+                    id="repo-enabled",
+                )
+            yield Static("", id="repo-editor-error")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="repo-editor-save")
+                yield Button(phrase("Cancel"), id="repo-editor-cancel")
+
+    def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+        self.query_one("#repo-url", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_save()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "repo-editor-save":
+            self.action_save()
+        else:
+            self.action_cancel()
+
+    def _fail(self, message: str, selector: str) -> None:
+        self.query_one("#repo-editor-error", Static).update(f"[$bad]{visual_markup(message)}[/]")
+        self.query_one(selector, Input).focus()
+
+    def action_save(self) -> None:
+        url = self.query_one("#repo-url", Input).value.strip()
+        if not url:
+            self._fail(tr("service.repos.need_url", default="Enter a Git repository URL."), "#repo-url")
+            return
+        raw_ttl = self.query_one("#repo-ttl", Input).value.strip()
+        if not raw_ttl:
+            ttl_hours = 24.0
+        else:
+            try:
+                ttl_hours = float(raw_ttl)
+            except ValueError:
+                self._fail(
+                    tr("service.repos.bad_ttl", default="TTL hours must be a non-negative number."),
+                    "#repo-ttl",
+                )
+                return
+            if ttl_hours < 0:
+                self._fail(
+                    tr("service.repos.bad_ttl", default="TTL hours must be a non-negative number."),
+                    "#repo-ttl",
+                )
+                return
+        entry: dict[str, Any] = {
+            "url": url,
+            "enabled": bool(self.query_one("#repo-enabled", Checkbox).value),
+        }
+        name = self.query_one("#repo-name", Input).value.strip()
+        branch = self.query_one("#repo-branch", Input).value.strip()
+        subdir = self.query_one("#repo-subdir", Input).value.strip().strip("/\\")
+        if name:
+            entry["name"] = name
+        if branch:
+            entry["branch"] = branch
+        if subdir:
+            entry["subdir"] = subdir
+        if ttl_hours != 24.0:
+            entry["ttl_hours"] = int(ttl_hours) if ttl_hours.is_integer() else ttl_hours
+        self.dismiss(entry)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.action_cancel()
+        return True
+
+
+class _ServiceReposModal(ModalScreen[None]):
+    """Manage Git-backed external service repositories and trigger safe syncs."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("a", "add", "Add", show=False),
+        Binding("e", "edit", "Edit", show=False),
+        Binding("space", "toggle", "Toggle", show=False),
+        Binding("d", "delete", "Delete", show=False),
+        Binding("r", "refresh_repos", "Refresh", show=False),
+        Binding("f", "force_refresh_repos", "Force refresh", show=False),
+    ]
+
+    def __init__(self, app) -> None:
+        super().__init__()
+        self._app_ref = app
+        self._specs: list[ServiceRepoSpec] = []
+        self._syncing = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="service-repos-card", classes="service-policy-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(
+                    tr("service.repos.title", default="Git service repositories"),
+                    classes="modal-card-title",
+                )
+                yield CloseMark(id="service-modal-close")
+            yield Label(
+                tr(
+                    "service.repos.help",
+                    default="Add external Git repositories containing UniDL service packages, toggle them, or sync updates safely.",
+                ),
+                classes="modal-card-help",
+            )
+            yield OptionList(id="service-repos-list")
+            yield Static("", id="service-repos-status", classes="modal-card-help")
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(tr("common.add", default="Add"), variant="primary", id="repo-add")
+                yield Button(phrase("Edit"), id="repo-edit")
+                yield Button(tr("common.toggle", default="Toggle"), id="repo-toggle")
+                yield Button(phrase("Delete"), id="repo-delete")
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(tr("service.repos.refresh", default="Refresh"), id="repo-refresh")
+                yield Button(tr("service.repos.force_refresh", default="Force refresh"), id="repo-force")
+                yield Button(phrase("Close"), id="repo-close")
+
+    def on_mount(self) -> None:
+        self._reload_specs()
+        self.rebuild()
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+        self.query_one("#service-repos-list", OptionList).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".service-policy-card", "#service-repos-list")
+
+    def _reload_specs(self) -> None:
+        raw = (
+            self.app.config.service_repos()
+            if callable(getattr(self.app.config, "service_repos", None))
+            else []
+        )
+        self._specs = parse_service_repos(raw)
+
+    def _sync_buttons(self) -> None:
+        has_items = bool(self._specs)
+        for ident in ("#repo-edit", "#repo-toggle", "#repo-delete"):
+            self.query_one(ident, Button).disabled = not has_items or self._syncing
+        for ident in ("#repo-refresh", "#repo-force"):
+            self.query_one(ident, Button).disabled = not has_items or self._syncing
+        self.query_one("#repo-add", Button).disabled = self._syncing
+
+    def rebuild(self, *, highlight: int | None = None) -> None:
+        options = self.query_one("#service-repos-list", OptionList)
+        previous = options.highlighted if highlight is None else highlight
+        options.clear_options()
+        if not self._specs:
+            options.add_option(
+                Option(
+                    f"  [$dim]{escape_markup(tr('service.repos.empty', default='No Git service repositories configured yet. Click Add (a) to add one.'))}[/]",
+                    disabled=True,
+                )
+            )
+        else:
+            for index, spec in enumerate(self._specs):
+                glyph = "[$ok]✓[/]" if spec.enabled else "[$dim]○[/]"
+                meta_parts: list[str] = []
+                if spec.branch:
+                    meta_parts.append(spec.branch)
+                if spec.subdir:
+                    meta_parts.append(spec.subdir)
+                ttl_label = int(spec.ttl_hours) if float(spec.ttl_hours).is_integer() else spec.ttl_hours
+                meta_parts.append(f"TTL {ttl_label}h")
+                meta = " · ".join(meta_parts)
+                row = (
+                    f"  {glyph}  [$accent]{escape_markup(spec.name)}[/]"
+                    f"  [$dim]{escape_markup(meta)}[/]  {escape_markup(spec.url)}"
+                )
+                options.add_option(Option(row, id=f"repo-{index}"))
+            options.highlighted = min(max(0, previous or 0), len(self._specs) - 1)
+        self._sync_buttons()
+
+    def _selected_index(self) -> int | None:
+        if not self._specs:
+            return None
+        idx = self.query_one("#service-repos-list", OptionList).highlighted
+        if idx is None or idx < 0 or idx >= len(self._specs):
+            return None
+        return idx
+
+    def _save_entries(self, entries: list[dict[str, Any]], *, highlight: int | None = None) -> None:
+        self.app.config.save_service_repos(entries)
+        self._reload_specs()
+        self.rebuild(highlight=highlight)
+        self.notify(tr("service.repos.saved", default="Saved Git service repositories"), timeout=4)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if self._specs:
+            self.action_edit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        ident = event.button.id or ""
+        if ident == "repo-add":
+            self.action_add()
+        elif ident == "repo-edit":
+            self.action_edit()
+        elif ident == "repo-toggle":
+            self.action_toggle()
+        elif ident == "repo-delete":
+            self.action_delete()
+        elif ident == "repo-refresh":
+            self.action_refresh_repos()
+        elif ident == "repo-force":
+            self.action_force_refresh_repos()
+        else:
+            self.action_cancel()
+
+    def action_add(self) -> None:
+        if self._syncing:
+            return
+
+        def _added(entry: dict[str, Any] | None) -> None:
+            if not entry:
+                return
+            entries = [_repo_spec_to_entry(spec) for spec in self._specs]
+            entries.append(entry)
+            self._save_entries(entries, highlight=len(entries) - 1)
+
+        self.app.push_screen(_ServiceRepoEditorModal(), _added)
+
+    def action_edit(self) -> None:
+        if self._syncing:
+            return
+        index = self._selected_index()
+        if index is None:
+            return
+
+        def _edited(entry: dict[str, Any] | None) -> None:
+            if not entry:
+                return
+            entries = [_repo_spec_to_entry(spec) for spec in self._specs]
+            if 0 <= index < len(entries):
+                entries[index] = entry
+                self._save_entries(entries, highlight=index)
+
+        self.app.push_screen(_ServiceRepoEditorModal(self._specs[index]), _edited)
+
+    def action_toggle(self) -> None:
+        if self._syncing:
+            return
+        index = self._selected_index()
+        if index is None:
+            return
+        entries = [_repo_spec_to_entry(spec) for spec in self._specs]
+        entries[index]["enabled"] = not bool(entries[index].get("enabled", True))
+        self._save_entries(entries, highlight=index)
+
+    def action_delete(self) -> None:
+        if self._syncing:
+            return
+        index = self._selected_index()
+        if index is None:
+            return
+        entries = [_repo_spec_to_entry(spec) for spec in self._specs]
+        entries.pop(index)
+        self._save_entries(entries, highlight=max(0, index - 1))
+
+    def action_refresh_repos(self) -> None:
+        self._start_sync(force=False)
+
+    def action_force_refresh_repos(self) -> None:
+        self._start_sync(force=True)
+
+    def _start_sync(self, *, force: bool) -> None:
+        if self._syncing or not self._specs:
+            return
+        self._syncing = True
+        self._sync_buttons()
+        self.query_one("#service-repos-status", Static).update(
+            f"[$dim]{escape_markup(tr('service.repos.syncing', default='Syncing Git service repositories…'))}[/]"
+        )
+        self._sync_worker(force)
+
+    @work(thread=True, exclusive=True)
+    def _sync_worker(self, force: bool) -> None:
+        try:
+            results = refresh_service_repos(self.app.config, force=force)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.app.call_from_thread(self._on_sync_error, str(exc))
+            except RuntimeError:
+                pass
+            return
+        try:
+            self.app.call_from_thread(self._on_sync_done, results)
+        except RuntimeError:
+            pass
+
+    def _on_sync_error(self, message: str) -> None:
+        if not self.is_attached:
+            return
+        self._syncing = False
+        self._sync_buttons()
+        self.query_one("#service-repos-status", Static).update(
+            f"[$bad]{escape_markup(message)}[/]"
+        )
+        self.notify(message, severity="error", timeout=8)
+
+    def _on_sync_done(self, results: list[RepoSyncResult]) -> None:
+        if not self.is_attached:
+            return
+        self._syncing = False
+        self._reload_specs()
+        self.rebuild()
+        ok_count = sum(1 for item in results if item.ok)
+        fail_count = len(results) - ok_count
+        changed = any(item.ok and item.action in {"cloned", "updated"} for item in results)
+        lines = [
+            f"[{'$ok' if item.ok else '$warn'}][{escape_markup(item.action)}][/] "
+            f"{escape_markup(item.spec.name)} — {escape_markup(item.detail)}"
+            for item in results[:4]
+        ]
+        hint = ""
+        if changed:
+            hint = tr(
+                "service.repos.restart_hint",
+                default="New services can now be registered under 'Register a service'; restart UniDL to load updated packages.",
+            )
+            lines.append(f"[$dim]{escape_markup(hint)}[/]")
+        self.query_one("#service-repos-status", Static).update("\n".join(lines))
+        summary = tr(
+            "service.repos.sync_done",
+            total=len(results),
+            ok=ok_count,
+            failed=fail_count,
+            default=f"Synced {len(results)} repo(s): {ok_count} ok, {fail_count} issue(s)",
+        )
+        if hint:
+            summary = f"{summary}. {hint}"
+        self.notify(
+            summary,
+            severity="warning" if fail_count else "information",
+            timeout=8 if hint else 6,
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.dismiss(None)
+        return True
+
+
 class ServicesManagerScreen(Screen[None]):
     BINDINGS = [
         Binding("b", "back", "Back", show=False),
@@ -521,7 +985,11 @@ class ServicesManagerScreen(Screen[None]):
 
     def _refresh_sources(self) -> None:
         self._sources = service_catalog.merge_registry_sources(
-            service_catalog.discover_sources(home=self.app.config.paths.home), self.app.registry.all()
+            service_catalog.discover_sources(
+                home=self.app.config.paths.home,
+                config=self.app.config,
+            ),
+            self.app.registry.all(),
         )
 
     def rebuild(self) -> None:
@@ -537,6 +1005,12 @@ class ServicesManagerScreen(Screen[None]):
             == exports.MEDIA_MANIFEST
             for service_id in registered
         )
+        repo_specs = (
+            parse_service_repos(self.app.config.service_repos())
+            if callable(getattr(self.app.config, "service_repos", None))
+            else []
+        )
+        enabled_repos = sum(1 for spec in repo_specs if spec.enabled)
         summaries = {
             "chapters": tr("service.chapters.summary"),
             "attachments": tr("service.attachments.summary"),
@@ -546,6 +1020,13 @@ class ServicesManagerScreen(Screen[None]):
             "register": tr("service.register.summary", registered=count, available=len(self._sources)),
             "home": tr("service.home.summary", shown=shown, registered=count),
             "export": tr("service.export.summary", media=media, master=max(0, count - media)),
+            "repos": tr(
+                "service.repos.summary",
+                enabled=enabled_repos,
+                total=len(repo_specs),
+                default=f"{enabled_repos} / {len(repo_specs)} enabled",
+            ),
+            "cookies": tr("service.cookies.summary", default="Import from Firefox"),
         }
         rows = [(ident, tr(f"service.{ident}.action"), f"[$dim]{summaries[ident]}[/]")
                 for ident, _key in SERVICE_MANAGER_ITEMS]
@@ -635,6 +1116,38 @@ class ServicesManagerScreen(Screen[None]):
             sources = [item for item in self._sources if item.service_id in registered]
             self.app.push_screen(
                 _ExportManifestEditor(sources, self.app.settings_store),
+                lambda _value: self.rebuild(),
+            )
+            return
+        if ident == "repos":
+            def repos_done(_value: Any) -> None:
+                self._refresh_sources()
+                self.rebuild()
+
+            self.app.push_screen(_ServiceReposModal(self.app), repos_done)
+            return
+        if ident == "cookies":
+            from .cookie_extract_modal import FirefoxCookieExtractModal
+
+            registered = service_catalog.registered_ids(self.app.settings_store)
+            cookie_ids = {
+                cls.ID: (cls.COOKIE_SERVICE_ID or cls.ID)
+                for cls in getattr(self.app, "services", ())
+            }
+            ordered = sorted(
+                self._sources,
+                key=lambda item: (item.service_id not in registered, item.name.casefold()),
+            )
+            choices: list[tuple[str, str]] = []
+            seen_cookie_ids: set[str] = set()
+            for item in ordered:
+                cid = cookie_ids.get(item.service_id, item.service_id)
+                if cid in seen_cookie_ids:
+                    continue
+                seen_cookie_ids.add(cid)
+                choices.append((cid, item.name))
+            self.app.push_screen(
+                FirefoxCookieExtractModal(service_choices=choices),
                 lambda _value: self.rebuild(),
             )
 

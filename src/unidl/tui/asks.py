@@ -461,12 +461,10 @@ class MultiPickWidget(_Filterable, _NumberJump):
                     yield ScrollTail(
                         _ConfirmingSelectionList(*self._selections(self._visible))
                     )
-                    yield Static("", id="multi-summary")
                     yield from self.compose_filter()
             return
         yield Label("", id="multi-hint", classes="ask-hint")
         yield ScrollTail(_ConfirmingSelectionList(*self._selections(self._visible)))
-        yield Static("", id="multi-summary")
         yield from self.compose_filter()
 
     def _selections(self, indexes: list[int]) -> list[Selection[int]]:
@@ -551,10 +549,14 @@ class MultiPickWidget(_Filterable, _NumberJump):
             counted = f"[$accent]{visual_markup(counted_text)}[/]"
         else:
             counted = f"[$accent]{tr('ask.multi.selected', picked=picked, total=total)}[/]"
+            if picked:
+                chosen = sorted(index for index in self._chosen if 0 <= index < total)
+                spans = self._format_spans(chosen)
+                if spans:
+                    counted += f"  [$muted]{spans}[/]"
         if self._filtered and (self._chosen - set(self._visible)):
             counted += f"[$dim]{tr('ask.multi.hidden')}[/]"
         self.query_one("#multi-hint", Label).update(f"[$dim]{keys}[/]   {counted}")
-        self._render_summary()
 
     def _is_track_pick(self) -> bool:
         return any(getattr(choice.value, "media_type", "") for choice in self.ask.choices)
@@ -620,28 +622,6 @@ class MultiPickWidget(_Filterable, _NumberJump):
         if len(spans) > 6:
             return ", ".join(spans[:5]) + f" … (+{len(spans) - 5})"
         return ", ".join(spans)
-
-    def _selection_summary(self) -> str:
-        if not self._chosen or self._is_track_pick():
-            return ""
-        chosen = sorted(index for index in self._chosen if 0 <= index < len(self.ask.choices))
-        if not chosen:
-            return ""
-        spans = self._format_spans(chosen)
-        return (
-            f"[$dim]{tr('ask.multi.summary_prefix')}[/]  "
-            f"[$accent]{tr('ask.multi.selected', picked=len(chosen), total=len(self.ask.choices))}[/]  "
-            f"[$muted]{spans}[/]"
-        )
-
-    def _render_summary(self) -> None:
-        found = self.query("#multi-summary")
-        if not found:
-            return
-        widget = found.first(Static)
-        text = self._selection_summary()
-        widget.display = bool(text)
-        widget.update(text)
 
     # ------------------------------------------------------------------ filter
     def apply_filter(self, needle: str) -> None:

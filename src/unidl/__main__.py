@@ -59,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sched_host.add_argument("host_action", choices=("status", "install", "uninstall"))
     sched_host.add_argument("--interval", type=int, default=5, help="check interval in minutes (default: 5)")
 
+    refresh = sub.add_parser("refresh-services", help="clone or update configured Git service repositories")
+    refresh.add_argument("--force", action="store_true", help="bypass TTL cache and check remote immediately")
+
     return parser
 
 
@@ -88,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         return _keys(config, args)
     if args.command == "schedule":
         return _schedule(config, args)
+    if args.command == "refresh-services":
+        return _refresh_services(config, args)
 
     from .tui.app import run
 
@@ -279,6 +284,21 @@ def _schedule(config, args) -> int:
         return 0
 
     return 1
+
+
+def _refresh_services(config, args) -> int:
+    from .core.service_repo import refresh_service_repos
+
+    results = refresh_service_repos(config, force=bool(getattr(args, "force", False)))
+    if not results:
+        print("No service_repos configured in unidl.yaml.")
+        return 0
+    failed = 0
+    for res in results:
+        print(f"{res.spec.name:<22} {res.action:<10} {res.detail}")
+        if not res.ok:
+            failed += 1
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

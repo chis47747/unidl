@@ -72,7 +72,12 @@ def user_service_root(home: Path | None = None) -> Path:
     return Path(home).expanduser() / "services"
 
 
-def service_roots(home: Path | None = None) -> list[Path]:
+def service_roots(
+    home: Path | None = None,
+    *,
+    config: Any = None,
+    repo_specs: list[Any] | tuple[Any, ...] | None = None,
+) -> list[Path]:
     """Return package, checkout and user service roots in precedence order."""
     roots = [source_root()]
     configured = os.environ.get("UNIDL_SERVICES", "")
@@ -81,6 +86,10 @@ def service_roots(home: Path | None = None) -> list[Path]:
     cwd = Path.cwd()
     roots.extend((cwd / "src" / "unidl" / "services", cwd / "services"))
     roots.append(user_service_root(home))
+    from .service_repo import configured_repo_specs, service_repo_roots
+
+    specs = list(repo_specs) if repo_specs is not None else configured_repo_specs(config)
+    roots.extend(service_repo_roots(home, specs=specs))
     unique: list[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -278,6 +287,8 @@ def discover_sources(
     root: Path | None = None,
     *,
     home: Path | None = None,
+    config: Any = None,
+    repo_specs: list[Any] | tuple[Any, ...] | None = None,
 ) -> list[ServiceSource]:
     """Read service metadata from all supported install roots.
 
@@ -286,7 +297,7 @@ def discover_sources(
     source checkouts and the writable user service directory; package-root
     entries win when an id is duplicated.
     """
-    roots = [Path(root)] if root is not None else service_roots(home)
+    roots = [Path(root)] if root is not None else service_roots(home, config=config, repo_specs=repo_specs)
     found: dict[str, ServiceSource] = {}
     seen_packages: set[str] = set()
     for directory in roots:

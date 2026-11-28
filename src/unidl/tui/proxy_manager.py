@@ -359,6 +359,123 @@ class _ProviderEditor(ModalScreen[dict[str, Any] | None]):
         return True
 
 
+class _GluetunProviderEditor(ModalScreen[dict[str, Any] | None]):
+    """Gluetun Docker VPN HTTP proxy + optional control server editor."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("ctrl+s", "save", "Save", show=False, priority=True),
+    ]
+
+    def __init__(self, current: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.current = current or {}
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="proxy-provider-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.gluetun.title", default="Gluetun"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            yield Label(
+                tr("proxy.gluetun.help", default="Local or Docker Gluetun HTTP proxy endpoint and optional Control Server."),
+                classes="proxy-editor-help",
+            )
+            with VerticalScroll(classes="proxy-editor-fields"):
+                yield Label(tr("proxy.field.gluetun_url", default="HTTP proxy URL"), classes="proxy-field-label")
+                yield Input(
+                    value=str(self.current.get("url") or f"http://{self.current.get('host', '127.0.0.1')}:{self.current.get('port', 8888)}"),
+                    placeholder="http://127.0.0.1:8888",
+                    id="gluetun-url",
+                )
+                yield Label(tr("proxy.field.gluetun_control", default="Control server URL (optional)"), classes="proxy-field-label")
+                yield Input(
+                    value=str(self.current.get("control_url", "")),
+                    placeholder="http://127.0.0.1:8000",
+                    id="gluetun-control",
+                )
+                yield Label(tr("proxy.field.gluetun_api_key", default="Control API key (optional)"), classes="proxy-field-label")
+                yield Input(
+                    value=str(self.current.get("api_key", "")),
+                    password=True,
+                    id="gluetun-api-key",
+                )
+                yield Label(tr("proxy.field.gluetun_instances", default="Per-region instances (optional)"), classes="proxy-field-label")
+                yield Input(
+                    value=_format_map(self.current.get("instances")),
+                    placeholder="us=http://gluetun-us:8888, jp=http://gluetun-jp:8888",
+                    id="gluetun-instances",
+                )
+                yield VaultCheckbox(
+                    tr("proxy.gluetun.verify_region", default="Verify exit country via Control Server"),
+                    value=bool(self.current.get("verify_region", False)),
+                    id="gluetun-verify-region",
+                )
+                yield VaultCheckbox(
+                    tr("proxy.enabled"),
+                    value=bool(self.current.get("enabled", self.current.get("enable", True))),
+                    id="provider-enabled",
+                )
+            yield Static("", id="proxy-editor-error")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(phrase("Save"), variant="primary", id="proxy-editor-save")
+                yield Button(phrase("Cancel"), id="proxy-editor-cancel")
+
+    def on_mount(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+        self.query_one("#gluetun-url", Input).focus()
+
+    def on_resize(self) -> None:
+        self._fit_modal()
+        self.call_after_refresh(self._fit_modal)
+
+    def _fit_modal(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card", ".proxy-editor-fields")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-editor-save":
+            self._save()
+        else:
+            self.action_cancel()
+
+    def action_save(self) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        url = self.query_one("#gluetun-url", Input).value.strip()
+        instances = _parse_map(self.query_one("#gluetun-instances", Input).value)
+        if not url and not instances:
+            self.query_one("#proxy-editor-error", Static).update(
+                f"[$bad]{visual_markup(tr('proxy.need_named'))}[/]"
+            )
+            self.query_one("#gluetun-url", Input).focus()
+            return
+        value: dict[str, Any] = {
+            "enabled": self.query_one("#provider-enabled", Checkbox).value,
+            "verify_region": self.query_one("#gluetun-verify-region", Checkbox).value,
+        }
+        if url:
+            value["url"] = url
+        control_url = self.query_one("#gluetun-control", Input).value.strip()
+        if control_url:
+            value["control_url"] = control_url
+        api_key = self.query_one("#gluetun-api-key", Input).value.strip()
+        if api_key:
+            value["api_key"] = api_key
+        if instances:
+            value["instances"] = instances
+        self.dismiss(value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.dismiss(None)
+        return True
+
+
 class _ExpressProviderEditor(ModalScreen[dict[str, Any] | None]):
     """ExpressVPN has a device login, not manually entered service credentials."""
 
@@ -669,6 +786,61 @@ class _ConfirmProxyDelete(ModalScreen[bool]):
         return True
 
 
+class _IpInfoModal(ModalScreen[None]):
+    """Show live exit IP geolocation and timezone for the active route."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False),
+        Binding("ctrl+b", "close", "Close", show=False),
+        Binding("enter", "close", "Close", show=False),
+        Binding("c", "copy", "Copy", show=False),
+    ]
+
+    def __init__(self, route_label: str, info_lines: list[tuple[str, str]], summary_text: str) -> None:
+        super().__init__()
+        self.route_label = route_label
+        self.info_lines = info_lines
+        self.summary_text = summary_text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="proxy-ipinfo-card", classes="proxy-editor-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("proxy.ipinfo.title", default="Exit IP & timezone"), classes="proxy-editor-title")
+                yield CloseMark(id="proxy-editor-close")
+            body = "\n".join(
+                f"[$dim]{escape_markup(k):<12}[/]  {escape_markup(v)}"
+                for k, v in self.info_lines
+                if v
+            )
+            yield Static(body, id="proxy-ipinfo-body")
+            with Horizontal(classes="proxy-editor-actions"):
+                yield Button(tr("common.copy", default="Copy"), variant="primary", id="proxy-ipinfo-copy")
+                yield Button(phrase("Close"), id="proxy-ipinfo-close")
+
+    def on_mount(self) -> None:
+        fit_modal_card(self, ".proxy-editor-card")
+        self.query_one("#proxy-ipinfo-close", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "proxy-ipinfo-copy":
+            self.action_copy()
+        else:
+            self.action_close()
+
+    def action_copy(self) -> None:
+        if self.app.copy_text(self.summary_text) is False:
+            return
+        self.notify(tr("proxy.ipinfo.copied", default="IP info copied"), timeout=3)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def go_back(self) -> bool:
+        self.action_close()
+        return True
+
+
 class ProxyManagerScreen(Screen[None]):
     """Manage routing, static endpoints and provider credentials in one place."""
 
@@ -682,6 +854,7 @@ class ProxyManagerScreen(Screen[None]):
         Binding("d", "delete", "Delete", show=True),
         Binding("space", "toggle_key", "Enable/disable", show=True),
         Binding("t", "test", "Test route", show=True),
+        Binding("i", "check_ip", "Check IP", show=True),
         Binding("l", "authorize", "Authorize", show=True),
     ]
 
@@ -713,6 +886,7 @@ class ProxyManagerScreen(Screen[None]):
             yield Button(tr("common.toggle"), id="proxy-toggle")
             yield Button(phrase("Delete"), id="proxy-delete")
             yield Button(tr("proxy.test_route"), id="proxy-test")
+            yield Button(tr("proxy.check_ip", default="Check IP"), id="proxy-ipinfo")
             yield Button(tr("common.authorize"), id="proxy-authorize")
         yield KeyBar(
             ("enter", "edit"),
@@ -721,6 +895,7 @@ class ProxyManagerScreen(Screen[None]):
             ("d", "delete"),
             ("space", "toggle"),
             ("t", "test"),
+            ("i", tr("proxy.check_ip_key", default="check IP")),
             ("^b", "back"),
         )
 
@@ -749,6 +924,7 @@ class ProxyManagerScreen(Screen[None]):
         self.query_one("#proxy-add", Button).label = tr("common.add")
         self.query_one("#proxy-delete", Button).label = phrase("Delete")
         self.query_one("#proxy-test", Button).label = tr("proxy.test_route")
+        self.query_one("#proxy-ipinfo", Button).label = tr("proxy.check_ip", default="Check IP")
         self.query_one("#proxy-authorize", Button).label = tr("common.authorize")
         self.rebuild()
 
@@ -861,6 +1037,7 @@ class ProxyManagerScreen(Screen[None]):
             "toggle": self.action_toggle,
             "delete": self.action_delete,
             "test": self.action_test,
+            "ipinfo": self.action_check_ip,
             "authorize": self.action_authorize,
         }.get(action, lambda: None)()
 
@@ -907,6 +1084,7 @@ class ProxyManagerScreen(Screen[None]):
                     ("enter", "edit"),
                     ("space", "toggle"),
                     ("t", "test"),
+                    ("i", tr("proxy.check_ip_key", default="check IP")),
                     ("^b", "back"),
                     ("esc", "quit"),
                 )
@@ -917,6 +1095,7 @@ class ProxyManagerScreen(Screen[None]):
                     ("d", "delete"),
                     ("space", "toggle"),
                     ("t", "test"),
+                    ("i", tr("proxy.check_ip_key", default="check IP")),
                     ("^b", "back"),
                     ("esc", "quit"),
                 )
@@ -928,6 +1107,7 @@ class ProxyManagerScreen(Screen[None]):
                     ("d", "delete"),
                     ("space", "toggle"),
                     ("t", "test"),
+                    ("i", tr("proxy.check_ip_key", default="check IP")),
                     ("^b", "back"),
                     ("esc", "quit"),
                 )
@@ -968,6 +1148,8 @@ class ProxyManagerScreen(Screen[None]):
         editor: ModalScreen
         if name == "expressvpn":
             editor = _ExpressProviderEditor(current)
+        elif name == "gluetun":
+            editor = _GluetunProviderEditor(current)
         else:
             editor = _ProviderEditor(name, current)
         self.app.push_screen(
@@ -1088,6 +1270,46 @@ class ProxyManagerScreen(Screen[None]):
             return
         self._test_route(route)
 
+    def action_check_ip(self) -> None:
+        """Inspect live exit IP, geolocation and timezone for direct or proxied traffic."""
+        route = str(self.globals.get("proxy") or "").strip()
+        self.notify(tr("proxy.ipinfo.checking", default="Checking exit IP & timezone…"), timeout=3)
+        self._lookup_ip(route)
+
+    @work(thread=True, exclusive=True)
+    def _lookup_ip(self, route: str) -> None:
+        try:
+            resolved = self.app.config.proxy(route) if route else None
+            route_label = safe_proxy_label(resolved) if resolved else tr("proxy.direct")
+            from ..core.ip_info import lookup_ip_info
+
+            token = self.app.config.ipinfo_token() if hasattr(self.app.config, "ipinfo_token") else ""
+            info = lookup_ip_info(proxy=resolved, token=token, timeout=10.0, required_fields=("timezone",))
+            loc = ", ".join(part for part in (info.city, info.region, info.country) if part)
+            org_line = f"{info.asn} {info.org}".strip() if info.asn else info.org
+            lines = [
+                (tr("proxy.ipinfo.field.route", default="Route"), route_label),
+                (tr("proxy.ipinfo.field.ip", default="IP"), info.ip),
+                (tr("proxy.ipinfo.field.location", default="Location"), loc or "-"),
+                (tr("proxy.ipinfo.field.timezone", default="Timezone"), info.timezone or "-"),
+                (tr("proxy.ipinfo.field.network", default="Network"), org_line or "-"),
+                (tr("proxy.ipinfo.field.source", default="Source"), info.source or "-"),
+            ]
+            try:
+                self.app.call_from_thread(
+                    self.app.push_screen,
+                    _IpInfoModal(route_label, lines, f"{route_label}  ·  {info.summary()}"),
+                )
+            except RuntimeError:
+                pass
+        except Exception as exc:
+            try:
+                self.app.call_from_thread(
+                    self.notify, tr("proxy.notify.test_fail", error=exc), severity="error", timeout=8
+                )
+            except RuntimeError:
+                pass
+
     def action_authorize(self) -> None:
         row = self._selected()
         if row is None or row.kind != "provider" or row.name != "expressvpn":
@@ -1101,10 +1323,18 @@ class ProxyManagerScreen(Screen[None]):
     def _test_route(self, route: str) -> None:
         try:
             resolved = self.app.config.proxy(route)
+            label = safe_proxy_label(resolved)
+            detail = tr("proxy.notify.resolves", route=label)
             try:
-                self.app.call_from_thread(
-                    self.notify, tr("proxy.notify.resolves", route=safe_proxy_label(resolved)), timeout=6
-                )
+                from ..core.ip_info import lookup_ip_info
+
+                token = self.app.config.ipinfo_token() if hasattr(self.app.config, "ipinfo_token") else ""
+                info = lookup_ip_info(proxy=resolved, token=token, timeout=8.0)
+                detail = f"{detail}  ·  {info.summary()}"
+            except Exception:
+                pass
+            try:
+                self.app.call_from_thread(self.notify, detail, timeout=8)
             except RuntimeError:
                 pass
         except Exception as exc:

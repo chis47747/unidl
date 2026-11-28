@@ -8,9 +8,13 @@
 | --- | --- | --- | --- |
 | 红色 | `core` | Textual、PyYAML、Requests、Cryptography、PyCryptodome、可写的 UniDL 路径 | UniDL 正常的 TUI / 下载器运行环境不完整 |
 | 黄色 | `global` | Widevine / PlayReady / MonaLisa 相关库，以及本地或远程 CDM 设备 | 受 DRM 保护的服务可能无法使用；未加密播放及不依赖对应 DRM 的服务仍可正常工作 |
-| 蓝色 | `enhancement` | 服务声明的外部助手、`dovi_tool`，以及混合输出（Hybrid）所需的 ffmpeg / ffprobe / mkvmerge 工具 | 对应服务或可选功能不可用；UniDL 的其余部分仍可正常使用 |
+| 蓝色 | `enhancement` | 服务声明的外部助手、`dovi_tool`、`hdr10plus_tool`、`MP4Box`、`shaka-packager`、`aria2c`，以及混合输出（Hybrid）所需的 ffmpeg / ffprobe / mkvmerge 工具 | 对应服务或可选功能不可用；UniDL 的其余部分仍可正常使用 |
 | 绿色 | — | 以上三个级别的依赖全部就位 | 当前安装已完全就绪 |
 
 服务外部助手的影响范围始终限定在声明它的服务之内。某个服务标记为必需的助手缺失时，会阻止该服务运行，但绝不应导致整个应用亮红灯。同理，CDM 属于全局能力而非启动 UniDL 的先决条件：在用户添加本地或远程设备前，它显示为黄色。
 
-`dovi_tool` 被刻意归为蓝色级别。Dolby Vision + HDR10 混合输出（Hybrid）属于可选的后处理功能，常规播放与下载从不依赖它。其就绪检查条目还会一并检查混合输出流水线所调用的配套工具。
+`dovi_tool` 与 `hdr10plus_tool` 被刻意归为蓝色级别。Dolby Vision + HDR10 混合输出（Hybrid）以及可选的 HDR10+ 转 DV Profile 8.1 合成都属于可选后处理功能，常规播放与下载从不依赖它们。就绪检查还会通过共享二进制注册表（优先系统 `PATH`，其次项目 `binaries/` 目录，并涵盖服务注册的工具）展示各工具已探测到的版本号。
+
+## 在就绪检查页安装外部工具
+
+在**就绪检查**页面，点击顶栏中的**安装工具**按钮或按 `i` 可打开显式确认安装向导。向导会检查常用媒体工具（`ffmpeg`、`ffprobe`、`mkvmerge`、`MP4Box`、`dovi_tool`、`hdr10plus_tool`、`shaka-packager`、`aria2c`）以及服务注册的自定义二进制工具，展示已安装版本或适配当前平台的包管理器命令（`brew`、`apt`、`winget`、`choco`），且只有在用户选中条目并点击**安装所选**（或按 `Enter`）后才会真正执行安装。

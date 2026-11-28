@@ -216,14 +216,16 @@ internally, `False` means pop. Service flows do not need to know any of this -
 | `↑ ↓ ← →` | move, in two dimensions on the grid |
 | `enter` | confirm |
 | `space` | toggle, in a multi-select |
-| `a` / `n` | select all / clear |
+| `a` / `n` / `i` | select all / clear / invert selection |
+| `Tab` | focus the filter bar in a multi-select (supports text or expressions like `S02`, `S01E05-S02E03`, `3-8,-5`, `13-`, `all`) |
 | digits | jump to that number |
 | `home` / `end` | first / last |
 | `ctrl+r` | on Home with Debug enabled, reload the explicitly selected service code |
 
 Multi-selects arrive with the automatic choice already ticked, so `enter`
 accepts it. That is how the track picker starts on whatever the track settings
-resolved to.
+resolved to. The top-right hint shows both the selected count and compact spans
+(for example `Selected 2 / 27  #2, #4`).
 
 ## Command palette and shortcuts reference
 
@@ -236,6 +238,18 @@ resolved to.
   non-default choices quickly.
 - On Scheduled downloads, Upcoming Radar, and JustWatch screens, `p` toggles
   the 2:3 poster and metadata inspector rail.
+- Every maintenance and diagnostic workflow exposes both a clickable button/chip
+  and a keyboard shortcut inside the TUI:
+  - **Readiness**: click **Install tools** or press `i` to open the explicit
+    tool-installation modal.
+  - **Settings → Proxy & VPN**: click **Check IP** or press `i` to inspect the
+    live exit IP, geolocation, timezone, and network (`c` copies).
+  - **Settings → Services → Git service repositories**: clickable action buttons
+    and `a` / `e` / `Space` / `d` / `r` / `f` for adding, editing, toggling,
+    deleting, refreshing, and force-refreshing Git service repos.
+  - **Settings → Services → Firefox cookies** (and **Extract from Firefox…** /
+    `f` inside any service's Cookie profile picker): extract Firefox cookies
+    and optionally inspect `localStorage` directly in the TUI.
 
 ## Colour and appearance
 

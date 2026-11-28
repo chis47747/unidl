@@ -61,14 +61,16 @@ def load_all(config=None) -> int:
     """
     home = getattr(getattr(config, "paths", None), "home", None)
     package_paths = getattr(sys.modules[__name__], "__path__", ())
-    for root in service_roots(home):
+    roots = service_roots(home, config=config) if config is not None else service_roots(home)
+    for root in roots:
         text = str(root)
         if text not in package_paths and hasattr(package_paths, "append"):
             package_paths.append(text)
     packages: dict[str, list[ServiceSource]] = defaultdict(list)
     _SERVICE_LOAD_ERRORS.clear()
     _COMPILED_SERVICE_ERRORS.clear()
-    for source in discover_sources(home=home):
+    discovered = discover_sources(home=home, config=config) if config is not None else discover_sources(home=home)
+    for source in discovered:
         packages[source.package].append(source)
     checks = RegistrationChecks()
     for package, sources in packages.items():

@@ -37,19 +37,37 @@ fallback rules, standalone commands and vault-write safety.
 ## Services and homepage visibility
 
 Global Settings → **Services** contains the global **License action**
-default, **Chapter metadata by service**,
+default, **Dolby Vision hybrid**, **Chapter metadata by service**,
 **Title attachments by service**, **Actual video bitrate by service**,
-**Register a service**, **Services shown on home**, and **Export manifest type**.
+**Register a service**, **Services shown on home**, **Export manifest type**,
+**Git service repositories**, and **Firefox cookies**.
 UniDL discovers service packages from the active package directory, the source
-checkout's `src/unidl/services`, the current project's `services` directory and
-the writable `<paths.home>/services` directory. It shows already registered
+checkout's `src/unidl/services`, the current project's `services` directory,
+the writable `<paths.home>/services` directory, and enabled Git repositories
+cloned under `<paths.home>/service_repos/`. It shows already registered
 packages as disabled entries. To add a service, copy its completed service
 package (or single-file service module) into the writable directory shown on the
 home setup notice, open **Settings → Services → Register a service**, and select
 it. Registration records the choice and asks you to restart UniDL; the restart
 is required for the package to be imported in the new process and for the
-registration to take effect on the homepage grid or global search. If you are
-unsure which installation is running, open **Settings → Files & naming →
+registration to take effect on the homepage grid or global search.
+
+- **Git service repositories** opens a TUI manager with clickable buttons and
+  keyboard shortcuts to **Add** (`a`), **Edit** (`e` / `Enter`), **Toggle**
+  (`Space`), **Delete** (`d`), **Refresh** (`r`), and **Force refresh** (`f`)
+  external Git repositories stored in `unidl.yaml` under `service_repos`.
+  Repositories clone into `<paths.home>/service_repos/<name>`, respect per-repo
+  `ttl_hours` (default `24`), and skip pulls whenever uncommitted local edits
+  are detected (dirty-clone guard). You can also trigger updates from the CLI
+  with `unidl refresh-services [--force]`.
+- **Firefox cookies** opens the TUI Firefox cookie extractor (also reachable
+  directly inside any service's **Cookie profile** picker via the **Extract from
+  Firefox…** button or `f`). It copies a temporary WAL-safe snapshot of Firefox's
+  `cookies.sqlite`, optionally inspects matching `localStorage` entries (both
+  legacy `webappsstore.sqlite` and modern LSNG `storage/default/.../ls/data.sqlite`),
+  and writes Netscape cookies into `<paths.cookies>/<service>/<profile>.txt`.
+
+If you are unsure which installation is running, open **Settings → Files & naming →
 Advanced paths**. **Service directory** shows that installation's actual
 service directory. Click the row or press Enter to open it. If you are
 running a source checkout with the `unidl` command from another installation,
@@ -243,12 +261,12 @@ heartbeat interval is part of the shared settings contract.
 
 | Setting | Values | Default | Notes |
 |---------|--------|---------|-------|
-| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, live defaults, batch confirmation and native transfer options. Licence timing defaults are configured under **Services** and may be overridden per service. |
-| `services_manager` | manager screen | — | Opens **Services**, including registration, homepage visibility, chapters, attachments, actual video bitrate, licence defaults and export manifest type. Metadata and bitrate switches can be set independently for each service. |
-| `resource_manager` | manager screen | — | Opens **DRM & vaults**, the single place to choose the app-wide DRM/CDM, edit CDM rules, add/edit/delete remote CDMs and vaults, enable/disable backends, choose local vaults, and open vault policy. |
+| `download_manager` | manager screen | — | Opens **Download behavior**, which owns `after_resolve`, live defaults, batch confirmation, HDR bitstream/VUI/HDR10+→DV post-processing, post-download hooks, and native transfer options. Licence timing defaults are configured under **Services** and may be overridden per service. |
+| `services_manager` | manager screen | — | Opens **Services**, including registration, homepage visibility, chapters, attachments, actual video bitrate, licence defaults, Dolby Vision hybrid, export manifest type, Git service repositories, and Firefox cookie extraction. Metadata and bitrate switches can be set independently for each service. |
+| `resource_manager` | manager screen | — | Opens **DRM & vaults**, the single place to choose the app-wide DRM/CDM, edit CDM rules, add/edit/delete remote CDMs and vaults (with masked saved tokens and a **Show** toggle), enable/disable backends, choose local vaults, and open vault policy. |
 | `storage_manager` | manager screen | — | Opens **Files & naming**, the single place to edit ordinary output folders and file-name templates, preview a sample release name, and inspect sensitive runtime paths without moving them. |
-| `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints and HTTPS proxy providers are managed together. |
-| `justwatch_manager` | manager screen | — | Opens **JustWatch search**, where the title-catalogue country, availability-country list, Upcoming Radar data sources, and optional TMDB API key are edited together. Each underlying value remains independent. |
+| `proxy_manager` | manager screen | — | Opens **Proxy & VPN**, where the default route, segment-download routing, named endpoints, proxy providers (including Proton VPN and Gluetun), and live **Check IP** (`i`) exit-IP/timezone diagnostics are managed together. |
+| `justwatch_manager` | manager screen | — | Opens **Search & scheduled downloads**, where the title-catalogue country, availability-country list, Upcoming Radar data sources, optional masked TMDB API key, and scheduled-download preferences are edited together. Each underlying value remains independent. |
 | `interface_manager` | manager screen | — | Opens **Interface & diagnostics**, which owns `theme`, `accent_color`, `title_color`, `layout_density`, `semantic_colors`, `completion_alert`, `poster_preview`, `interface_locale`, `beta_interface`, `beta_auto_results` and `debug`. |
 | `after_resolve` | `download` / `command` / `list` / `export` / `ask` | `download` | Compatibility key controlled by **Download behavior**. `command` writes a reproducible command file; `list` prints the parsed ladder without licensing; `export` writes a portable JSON bundle. The Home shortcut `d` cycles all five modes. |
 | `fetch_actual_bitrate` | on / off | **on** | Controlled by **Settings → Services → Actual video bitrate by service** or the individual service's settings. Unconfigured services inherit the global default; saved service overrides are independent. Press `r` on a service row to resume inheritance. Existing global preferences are preserved. After the final video tracks are selected and the download details screen is visible, UniDL samples distributed media segments to show an actual bitrate beside the manifest estimate. During that same probe it may read the selected video's bounded MP4 initialization metadata to correct a missing HLG/HDR label before final naming. A probe is accepted only when the complete segment size is known; unreliable CDN responses are omitted. Off skips all of this and keeps manifest metadata only. |
@@ -275,10 +293,18 @@ heartbeat interval is part of the shared settings contract.
 | `vault_write_targets` | multi-select writable vaults | all writable | Global **Store acquired keys** destinations inherited by services until overridden. `no_push` backends are omitted. |
 | `live_record` | on / off | **off** | Compatibility key controlled by **Download behavior**. In the TUI this preselects the record-vs-command question asked after final track selection; headless runs use it directly. A recording then uses the service's `live_record_limit` default unless the user changes it for that run; `00:00:00` means unlimited until stopped. See [live.md](live.md). |
 | `license_action` | `before` / `after` / `custom` | **before**, or **custom** for supporting services | Global Before/After default under **Settings → Services**; per-service override under **License and vaults**. Custom appears only for explicitly supporting services. Legacy `license_after_tracks` true/false remains readable as After/Before. See [License action](drm.md#license-action). |
-| `dolby_vision_hybrid` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. For VOD only, a selected HDR10/HDR10+ base is combined with the lowest-resolution available DV layer from the same manifest or merged profile ladder using `dovi_tool`. |
+| `dolby_vision_hybrid` | on / off | **off** | Global default under **Settings → Services**. Services inherit it until overridden under **License and vaults**. For VOD only, a selected HDR10/HDR10+ base is combined with the lowest-resolution available DV layer from the same manifest or merged profile ladder using `dovi_tool` (with automatic L5 active-area crop detection and L6 `MaxCLL`/`MaxFALL` luminance metadata). |
+| `probe_hdr_metadata` | on / off | **off** | Controlled by **Download behavior**. Before track selection, inspects clear HEVC HDR samples for SMPTE ST 2094-40 HDR10+ SEI and Dolby Vision RPU NAL units to upgrade stream dynamic-range labels. |
+| `generate_dv_from_hdr10p` | on / off | **off** | Controlled by **Download behavior**. When an HDR10+ track has no matching Dolby Vision donor, synthesizes Dolby Vision Profile 8.1 RPU metadata using `hdr10plus_tool` and `dovi_tool`. |
+| `normalize_vui` | on / off | **off** | Controlled by **Download behavior**. Losslessly patches missing or mismatched BT.2020 PQ/HLG VUI colour tags on downloaded HDR video bitstreams using FFmpeg bitstream filters. |
+| `post_download_hook` | command template | empty | Controlled by **Download behavior**. Optional command executed after a delivery finishes. Tokenized with `shlex.split` before `{variable}` expansion (no `shell=True`); safe metadata is also exposed via `UNIDL_*` environment variables. |
+| `post_download_hook_on_failure` | on / off | **off** | Controlled by **Download behavior**. Also runs `post_download_hook` when a download fails (never on cancel). |
 | `download_dir` | a path | empty | Compatibility key controlled by **Files & naming → Output locations**. Where downloads and live recordings land. Empty uses the configured or default folder, grouped by service. No YAML editing is required; `~` is expanded and the folder is created if it does not exist. |
 | `episode_folder_template` | relative template | empty | Compatibility key controlled by **Files & naming → Naming templates**. Adds optional folders below `downloads/<service>/` for episode titles only. Empty preserves the flat layout. Use `{series}`, `{season}`, `{season_number}`, `{year}`, `{season_episode}` and `{service}`; `{series}/{season}` is a typical choice. In episode folders, `{year}` prefers the service-supplied series premiere/release year and falls back to the episode year. Movies, live titles and audio remain in the service folder. |
 | `filename_style` | `dot` / `space` / `hyphen` | `dot` | Compatibility key controlled by **Files & naming → Naming templates**. Chooses separators for the final title and release name while preserving the selected template fields. |
+| `unicode_filenames` | on / off | **on** | Controlled by **Files & naming → Naming templates**. On preserves accents and non-ASCII scripts; off transliterates filenames to ASCII. |
+| `repack_tag` | on / off | **off** | Controlled by **Files & naming → Naming templates**. Appends `REPACK` to generated release suffixes for films and episodes. |
+| `audio_lang_tag` | `off` / `auto` / `multi_only` | `off` | Controlled by **Files & naming → Naming templates**. Automatically appends `DUAL` (2 distinct audio languages) or `MULTI` (3+, or 2+ under `multi_only`) to release filenames based on the final selected audio tracks. |
 | `debug` | on / off | off | Compatibility key controlled by **Interface & diagnostics**. Verbose logging, full URLs, keeps temp files, writes stream metadata and a per-task log. A service may explicitly set `DEBUG_LOGGING = False` in its service class to suppress diagnostic files for that service; the TUI reports the opt-out. Also enables the Home screen's explicit `ctrl+r` service-code reload; there is no automatic watcher. |
 | `confirm_batch` | on / off | off | Compatibility key controlled by **Download behavior**. Ask once before processing a multi-episode selection. |
 | `retries` | integer | `5` | Compatibility key controlled by **Download behavior**. Segment retry count for the native engine. |
@@ -322,9 +348,10 @@ heartbeat interval is part of the shared settings contract.
 - Ordinary VOD cancellation and live replay taken **as VOD** keep their existing
   cancellation/resume behaviour.
 
-### JustWatch search & Upcoming Radar sources
+### Search & scheduled downloads
 
-The **JustWatch search** manager groups four related discovery settings:
+The **Search & scheduled downloads** manager (previously **JustWatch search**)
+groups discovery and scheduling preferences together:
 
 - **Title catalogue** (`justwatch_search_region`) is one country. It decides which
   catalogue supplies title matches, localized names, and regional Upcoming Radar
@@ -335,7 +362,7 @@ The **JustWatch search** manager groups four related discovery settings:
   (`JustWatch`, `TVMaze`, `AniList`, `TMDB`) for the Upcoming Radar tab inside
   **Scheduled downloads**.
 - **TMDB API key** (`tmdb_api_key`) stores an optional masked TMDB v3 API key or
-  v4 Read Access Token.
+  v4 Read Access Token (masked with dots when edited, with a **Show** toggle).
 
 The JustWatch search and availability screens keep their own `Ctrl+R` region
 pickers, and **Scheduled downloads → Settings** exposes the radar sources, TMDB
@@ -343,9 +370,29 @@ key, region, and poster preview controls in one place.
 
 The first-level Global Settings menu deliberately contains only these seven
 managers: **Download behavior**, **Services**, **DRM & vaults**, **Files &
-naming**, **Proxy & VPN**, **JustWatch search**, and **Interface & diagnostics**.
+naming**, **Proxy & VPN**, **Search & scheduled downloads**, and **Interface &
+diagnostics**.
 The rows below them in the table above are persisted compatibility keys and are
 not duplicated on the top-level menu.
+
+### Post-download hooks
+
+Under **Settings → Download behavior**, set **Post-download hook command**
+(`post_download_hook`) to run a local command or script after a delivery
+finishes (and optionally **Run post-download hook on failure**,
+`post_download_hook_on_failure`, which never runs on user cancellation):
+
+- **Safe execution**: UniDL tokenizes the command template with `shlex.split`
+  *before* expanding `{variable}` placeholders and runs with `shell=False`
+  (default timeout `120s`), so spaces or shell metacharacters in titles or
+  filenames cannot inject shell syntax.
+- **Available placeholders & `UNIDL_*` env vars**: `{status}`, `{exit_code}`,
+  `{service}`, `{title}`, `{title_kind}`, `{episode_name}`, `{season}`,
+  `{episode}`, `{year}`, `{air_date}`, `{edition}`, `{save_name}`, `{quality}`,
+  `{output_dir}`, `{output_file}`, `{output_path}`, `{artifacts_json}`,
+  `{artifact_count}`, and `{failure}` (each also exported as `UNIDL_<NAME>`).
+- **Process environment**: hooks inherit UniDL's process environment along with
+  the delivery metadata. Only configure commands you trust to run locally.
 
 ### Files & naming
 
@@ -368,8 +415,15 @@ separate path/template rows. Its tabs are:
   **Hyphens between sections** uses `Real Time With Bill Maher-S24E29-720p...`.
   The choice changes separators only; the templates still control which title,
   quality, audio, video and tag fields are present.
-  The release template can use `audio`, `audio_channels`, `audio_full`, `atmos`
-  and `video`. `{three_d?}` adds `3D` for an explicitly identified stereoscopic
+  Additional naming controls in this tab include **Preserve Unicode characters
+  in filenames** (`unicode_filenames`, default on; off transliterates to ASCII),
+  **Append REPACK release tag** (`repack_tag`), and **Multi-audio language tag**
+  (`audio_lang_tag`: `off`, `auto` for `DUAL`/`MULTI`, or `multi_only`).
+  Title templates also support `{air_date}` (normalized `YYYY-MM-DD`, used
+  automatically for dated episodes without season/episode numbers) and
+  `{edition}`; the release template supports `edition`, `repack`, `lang_tag`,
+  `audio`, `audio_channels`, `audio_full`, `atmos` and `video`. `{three_d?}`
+  adds `3D` for an explicitly identified stereoscopic
   video track; the default places it after the picture-range tag, for example
   `H.265.DV.3D`. It is independent of DV/HDR and uses only the final selected
   video tracks. Custom templates can place or omit it. The other default fields
@@ -402,22 +456,37 @@ is moved into this manager.
 
 The global Settings list exposes one **Proxy & VPN** row. Its Routing tab accepts
 an empty value (direct), a full `http(s)://`/`socks` URI, a name under `proxies`, or
-a provider query such as `expressvpn:us`, `nordvpn:us`, `surfshark:gb` or
-`windscribe:ca:toronto`.
+a provider query such as `expressvpn:us`, `nordvpn:us`, `surfshark:gb`,
+`windscribe:ca:toronto`, `proton:us` (`proton:us:new_york`, `proton:us12`), or
+`gluetun` / `gluetun:jp`.
 `proxy_downloads` separately controls whether native delivery core's segment requests use the
 resolved route; UniDL's own API, manifest and licence requests remain on it.
 
-The manager supports static HTTP/HTTPS/SOCKS endpoint pools and HTTPS proxy
-endpoints from ExpressVPN, NordVPN, Surfshark and Windscribe. ExpressVPN uses an
-explicit OAuth device-authorization screen (`l` on its provider row); its rotating
-refresh/access/connection tokens are written owner-only under
-`<paths.tokens>/vpn/expressvpn_tokens.json` and refreshed headlessly later.
-NordVPN, Surfshark and Windscribe use manual-setup service credentials stored in
-`unidl.yaml`. Providers are resolved only when selected and do not change the
-computer's system VPN/default route. Gluetun, Proton TV login and Hola still require
-external-process or different login lifecycles and are not silent URI fallbacks. A
-service-level Proxy setting remains available and overrides the app-wide route when
-non-empty.
+The manager supports static HTTP/HTTPS/SOCKS endpoint pools and proxy providers:
+
+- **ExpressVPN**: uses an explicit OAuth device-authorization screen (`l` on its
+  provider row); rotating tokens are written owner-only under
+  `<paths.tokens>/vpn/expressvpn_tokens.json` and refreshed headlessly later.
+- **NordVPN, Surfshark, Windscribe**: use manual-setup service credentials
+  stored in `unidl.yaml`.
+- **Proton VPN**: selects logical servers by country (`proton:us`), city
+  (`proton:us:new_york`), or server number (`proton:us12`), with optional
+  `server_map` aliases and credentials from `unidl.yaml` or cached
+  `<paths.tokens>/vpn/protonvpn_tokens.json`.
+- **Gluetun**: connects to a Docker Gluetun HTTP proxy (`url` or `host`/`port`,
+  or per-region `instances` map) and optionally verifies the active exit country
+  via Gluetun's Control Server `/v1/publicip/ip` when `verify_region: true`
+  (with optional `api_key`).
+- **Live exit IP & timezone check**: click **Check IP** or press `i` inside
+  **Proxy & VPN** (works for both direct and proxied routes) to inspect the
+  resolved exit IP, city/region/country, timezone, ASN/ISP, and lookup source
+  (`ipinfo.io` with optional `ipinfo_token` in `unidl.yaml`, plus automatic
+  fallback), with clickable **Copy** (`c`) and **Close** (`Esc`/`Enter`) actions.
+
+Providers are resolved only when selected and do not change the computer's
+system VPN/default route. Hola still requires an external process and is not a
+silent URI fallback. A service-level Proxy setting remains available and
+overrides the app-wide route when non-empty.
 
 Two things happen on **every** run regardless of these settings:
 
@@ -451,9 +520,12 @@ by default, ignored for live/replay streams, and safely leaves the original
 tracks alone when one layer, compatible frame rate, duration, frame count or
 HEVC data is missing. The DV input is the lowest-resolution available DV layer;
 its resolution need not match the HDR base. `dovi_tool` must be installed and available on `PATH` (or
-selected with `UNIDL_DOVI_TOOL`). The first implementation normalizes the RPU
-with dovi mode 3 and keeps the source frame geometry; it does not invent L5/L6
-crop metadata.
+selected with `UNIDL_DOVI_TOOL`). The pipeline normalizes the RPU with dovi mode 3,
+runs bounded `ffmpeg cropdetect` to compute L5 active-area crop offsets, and
+reads base-layer `MaxCLL`/`MaxFALL` luminance values into L6 via `dovi_tool --edit-config`.
+When `generate_dv_from_hdr10p` is enabled and an HDR10+ stream has no matching DV donor,
+UniDL can additionally synthesize Dolby Vision Profile 8.1 RPU metadata using
+`hdr10plus_tool` (`UNIDL_HDR10PLUS_TOOL`) and `dovi_tool`.
 
 This section is **Track output selection**. Its settings answer which parsed
 tracks native delivery core will download, keep and mux into the result. By
@@ -503,6 +575,12 @@ compatibility and DASH/HLS/ISM scope.
 | `sub_langs` | comma separated, `all`, or empty to skip | `all` |
 | `subtitle_kinds` | comma separated `normal`, `forced`, `sdh`, `commentary`, `audio_description`, or `all` | `normal,forced` |
 | `subtitle_selection` | `all` / `best` | `all` |
+| `audio_codec_priority` | comma-separated codecs (e.g. `atmos,eac3,ac3,aac`) | empty |
+| `subtitle_type_priority` | comma-separated kinds (e.g. `normal,forced,sdh`) | empty |
+| `merge_video` | on / off | off |
+| `require_video` | on / off | off |
+| `require_audio` | on / off | off |
+| `require_subtitles` | on / off | off |
 | `drop_video` | regex | boundary-aware `trick` / `trickplay` / `thumbnail` / `image` |
 | `sub_format` | `srt` / `vtt` / `ass` / `raw` | `srt` |
 | `mux_format` | `mkv` / `mp4` | `mkv` |

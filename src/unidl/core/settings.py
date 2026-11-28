@@ -746,6 +746,59 @@ GLOBAL_SETTINGS: list[Setting] = [
         ),
         visible=False,
     ),
+    Setting(
+        "probe_hdr_metadata",
+        "Probe HDR10+ / DV bitstream metadata",
+        "bool",
+        default=False,
+        help=(
+            "Before track selection, inspect clear HEVC HDR samples for ST 2094-40 HDR10+ "
+            "SEI and Dolby Vision RPU NAL units to upgrade stream dynamic range labels."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "generate_dv_from_hdr10p",
+        "Generate Dolby Vision P8.1 from HDR10+",
+        "bool",
+        default=False,
+        help=(
+            "When an HDR10+ track has no matching Dolby Vision donor, synthesize Dolby "
+            "Vision Profile 8.1 RPU metadata using hdr10plus_tool and dovi_tool."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "normalize_vui",
+        "Normalize HDR SPS VUI metadata",
+        "bool",
+        default=False,
+        help=(
+            "Losslessly patch missing or mismatched BT.2020 PQ/HLG VUI color tags on "
+            "downloaded HDR video bitstreams using FFmpeg bitstream filters."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "post_download_hook",
+        "Post-download hook command",
+        "text",
+        default="",
+        help=(
+            "Optional command executed after a download finishes. Supports {output_path}, "
+            "{output_dir}, {title}, {service}, {save_name}, {status} placeholders and UNIDL_* "
+            "environment variables."
+        ),
+        visible=False,
+    ),
+    Setting(
+        "post_download_hook_on_failure",
+        "Run post-download hook on failure",
+        "bool",
+        default=False,
+        help="Also run the post-download hook command when a download fails (never on cancel).",
+        visible=False,
+    ),
     _choice(
         "subtitle_output",
         "Subtitle output",
@@ -1391,6 +1444,34 @@ GLOBAL_SETTINGS: list[Setting] = [
         visible=False,
     ),
     Setting(
+        "unicode_filenames",
+        "Preserve Unicode characters in filenames",
+        "bool",
+        default=True,
+        help="On keeps accents and non-ASCII scripts. Off transliterates filenames to safe ASCII.",
+        visible=False,
+    ),
+    Setting(
+        "repack_tag",
+        "Append REPACK release tag",
+        "bool",
+        default=False,
+        help="Include REPACK in the generated release suffix for films and episodes.",
+        visible=False,
+    ),
+    _choice(
+        "audio_lang_tag",
+        "Multi-audio language tag",
+        [
+            ("off", "Off"),
+            ("auto", "DUAL (2) / MULTI (3+)"),
+            ("multi_only", "MULTI (2+)"),
+        ],
+        "off",
+        "Automatically add DUAL or MULTI to release filenames when multiple audio languages are selected.",
+        visible=False,
+    ),
+    Setting(
         "justwatch_manager",
         "Search & scheduled downloads",
         "action",
@@ -1636,6 +1717,48 @@ TRACK_SETTINGS: list[Setting] = [
         [("all", "All matching tracks"), ("best", "Best one per language")],
         "all",
         "Normal and forced may both be selected. Choose Best one when only one subtitle per language is wanted.",
+    ),
+    Setting(
+        "audio_codec_priority",
+        "Audio codec priority",
+        "text",
+        default="",
+        help="Optional comma-separated codec preference when selecting best audio, e.g. atmos,eac3,ac3,aac.",
+    ),
+    Setting(
+        "subtitle_type_priority",
+        "Subtitle type priority",
+        "text",
+        default="",
+        help="Optional comma-separated subtitle kind preference when picking best subtitle, e.g. normal,forced,sdh.",
+    ),
+    Setting(
+        "merge_video",
+        "Merge multi-language video variants",
+        "bool",
+        default=False,
+        help="Include distinct-language video variants sharing the same resolution, dynamic range and codec in one container.",
+    ),
+    Setting(
+        "require_video",
+        "Require matching video track",
+        "bool",
+        default=False,
+        help="Fail (or wait in scheduled retry window) instead of falling back if requested video quality or language is unavailable.",
+    ),
+    Setting(
+        "require_audio",
+        "Require all requested audio languages",
+        "bool",
+        default=False,
+        help="Fail (or wait in scheduled retry window) if any requested audio language or constraint is missing.",
+    ),
+    Setting(
+        "require_subtitles",
+        "Require all requested subtitle languages",
+        "bool",
+        default=False,
+        help="Fail (or wait in scheduled retry window) if any requested subtitle language or kind is missing.",
     ),
     Setting(
         "drop_video",

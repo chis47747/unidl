@@ -207,6 +207,63 @@ class _ChoiceEditor(_Editor):
         self.dismiss(self.setting.options[int(event.option.id or 0)].value)
 
 
+class _CookieChoiceEditor(_ChoiceEditor):
+    """Cookie profile picker with clickable & keyboard Firefox extraction."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+b", "cancel", "Back", show=False),
+        Binding("f", "extract_firefox", "Extract from Firefox", show=False),
+    ]
+
+    def __init__(
+        self,
+        setting: Setting,
+        current: Any,
+        *,
+        service_id: str,
+        service_label: str = "",
+    ) -> None:
+        super().__init__(setting, current)
+        self.cookie_service_id = service_id
+        self.cookie_service_label = service_label or service_id
+
+    def compose_actions(self) -> ComposeResult:
+        with Horizontal(classes="modal-card-actions"):
+            yield Button(
+                tr("cookies.firefox.button", default="Extract from Firefox…"),
+                variant="primary",
+                id="modal-firefox-extract",
+            )
+            yield Button(phrase("Cancel"), id="modal-cancel")
+
+    def _handle_button(self, button_id: str) -> None:
+        if button_id == "modal-firefox-extract":
+            self.action_extract_firefox()
+        else:
+            super()._handle_button(button_id)
+
+    def action_extract_firefox(self) -> None:
+        from .cookie_extract_modal import FirefoxCookieExtractModal
+
+        default_profile = str(self.current or "").strip()
+        if default_profile.lower() in {"", "none"}:
+            default_profile = "default"
+
+        def _extracted(profile_name: str | None) -> None:
+            if profile_name and self.app.screen is self:
+                self.dismiss(profile_name)
+
+        self.app.push_screen(
+            FirefoxCookieExtractModal(
+                service_id=self.cookie_service_id,
+                service_label=self.cookie_service_label,
+                default_profile=default_profile,
+            ),
+            _extracted,
+        )
+
+
 class _PreviewOptionList(OptionList):
     """OptionList where mouse clicks highlight for live preview without committing."""
 
@@ -1450,6 +1507,24 @@ class SettingsScreen(Screen):
             self.app.push_screen(_AppearanceChoiceEditor(spec, scope.get(spec.key)), _done)
         elif spec.kind == "multi" and spec.options:
             self.app.push_screen(_MultiChoiceEditor(spec, scope.get(spec.key)), _done)
+        elif spec.picker == "cookie" and self.service is not None:
+            cookie_service_id = self.service.COOKIE_SERVICE_ID or self.service.ID
+
+            def _cookie_done(value: Any) -> None:
+                if value is None:
+                    return
+                self._refresh_cookie_setting(spec, scope)
+                _done(value)
+
+            self.app.push_screen(
+                _CookieChoiceEditor(
+                    spec,
+                    scope.get(spec.key),
+                    service_id=cookie_service_id,
+                    service_label=self.service.NAME,
+                ),
+                _cookie_done,
+            )
         elif spec.kind == "choice" and spec.options:
             self.app.push_screen(_ChoiceEditor(spec, scope.get(spec.key)), _done)
         else:

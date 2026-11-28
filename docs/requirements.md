@@ -75,14 +75,21 @@ the normal `.exe`/`.cmd` extension.
   Matroska result; FFmpeg remains the fallback where possible.
 - **MP4Box** (GPAC) is optional and is used when MP4Box muxing is selected or
   for stereoscopic 3D VOD outputs.
-- **dovi_tool** is optional and is only needed for Dolby Vision + HDR10 hybrid
-  output.
+- **dovi_tool** is optional and is used for Dolby Vision + HDR10 hybrid output
+  (including automatic L5 active-area crop and L6 luminance metadata) and
+  HDR10+-to-DV Profile 8.1 generation.
+- **hdr10plus_tool** is optional and is only needed when `generate_dv_from_hdr10p`
+  is enabled to extract HDR10+ dynamic metadata into Dolby Vision Profile 8.1.
+- **shaka-packager** is optional for packaging/decryption paths or services that
+  use it.
 - **aria2c** is optional and is used only when the user selects that segment
   backend.
 - **curl** is optional for services that explicitly declare it as a helper or
   for transport fallbacks.
 
-Install these with the operating system's package manager and verify them with:
+Install these with your operating system's package manager—or directly inside
+the TUI from **Readiness → Install tools** (click the header button or press `i`
+to review and confirm platform install commands)—and verify them with:
 
 ~~~console
 ffmpeg -version
@@ -109,10 +116,12 @@ unidl
 unidl --config ./unidl.yaml
 ~~~
 
-Read-only checks are useful before opening a service:
+Read-only checks and Git service repository refreshes are also available from
+the CLI:
 
 ~~~console
 unidl --config ./unidl.yaml services
 unidl --config ./unidl.yaml cdm --check
 unidl --config ./unidl.yaml schedule list
+unidl --config ./unidl.yaml refresh-services          # add --force to bypass TTL
 ~~~

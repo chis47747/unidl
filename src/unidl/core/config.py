@@ -39,6 +39,56 @@ RENAMED_SERVICE_IDS: dict[str, tuple[str, ...]] = {
     "paramountplus": ("paramount",),
 }
 
+# YAML 1.1 reads unquoted ``no`` (Norwegian) and ``yes`` (Nyankpa) as booleans.
+# Restore those two ISO 639-1/639-3 tags anywhere a language field appears.
+BOOL_LANGUAGE_TAGS: dict[bool, str] = {False: "no", True: "yes"}
+LANGUAGE_KEYS: frozenset[str] = frozenset(
+    {
+        "lang",
+        "language",
+        "languages",
+        "locale",
+        "locales",
+        "audio_langs",
+        "sub_langs",
+        "default_audio",
+        "default_subtitle",
+        "default_language",
+        "v_lang",
+        "a_lang",
+        "s_lang",
+        "forced_s_lang",
+        "language_priority",
+        "require_audio",
+        "require_video",
+        "require_subs",
+    }
+)
+
+
+def restore_bool_languages(data: Any) -> Any:
+    """Restore YAML-coerced ``no``/``yes`` language tags inside language keys."""
+    if isinstance(data, list):
+        return [restore_bool_languages(item) for item in data]
+    if not isinstance(data, dict):
+        return data
+    fixed: dict[Any, Any] = {}
+    for key, value in data.items():
+        if str(key) in LANGUAGE_KEYS:
+            if isinstance(value, bool):
+                value = BOOL_LANGUAGE_TAGS[value]
+            elif isinstance(value, list):
+                value = [
+                    BOOL_LANGUAGE_TAGS[item] if isinstance(item, bool) else restore_bool_languages(item)
+                    for item in value
+                ]
+            else:
+                value = restore_bool_languages(value)
+        else:
+            value = restore_bool_languages(value)
+        fixed[key] = value
+    return fixed
+
 
 def _service_keys(service_id: str, legacy_ids: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
     """Return the canonical service id followed by accepted legacy ids.
@@ -474,7 +524,7 @@ class Config:
                 raise ValueError(f"{candidate} is not valid YAML: {exc}") from exc
             if not isinstance(data, dict):
                 raise ValueError(f"{candidate} must contain a mapping at the top level")
-            return cls(data, candidate)
+            return cls(restore_bool_languages(data), candidate)
         # Package data is a template, not a second local configuration source.
         # Resolve it beside the expected local file and never write to the
         # installation, even when running from a wheel.
@@ -1059,6 +1109,25 @@ class Config:
     def save_proxy_providers(self, entries: dict[str, Any]) -> Path:
         """Write supported VPN proxy-provider definitions."""
         return self.save_managed_section("proxy_providers", entries)
+
+    def service_repos(self) -> list[Any]:
+        """Configured Git service repository specs from ``service_repos``."""
+        raw = self.raw.get("service_repos")
+        return list(raw) if isinstance(raw, list) else []
+
+    def save_service_repos(self, entries: list[Any]) -> Path:
+        """Write Git service repository definitions."""
+        return self.save_managed_section("service_repos", list(entries))
+
+    def ipinfo_token(self) -> str:
+        """Optional ipinfo.io API token from ``ipinfo_token`` or ``ip_info.token``."""
+        direct = str(self.raw.get("ipinfo_token") or "").strip()
+        if direct:
+            return direct
+        section = self.raw.get("ip_info")
+        if isinstance(section, dict):
+            return str(section.get("token") or "").strip()
+        return ""
 
     def service_options(
         self,

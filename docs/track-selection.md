@@ -485,6 +485,45 @@ MP4 cannot copy ASS, WebVTT or SRT tracks directly, so UniDL muxes them as
 `mov_text`. That conversion may lose positioning and styling. Use MKV for
 positioned subtitles, or keep standalone originals if required.
 
+## Priority tie-breakers, multi-language video, and strict gates
+
+Six additional settings under **Tracks and output** refine automated ranking and
+missing-track enforcement:
+
+- **`audio_codec_priority`** — optional comma-separated codec preference order
+  used when `audio_selection=best` chooses among passing audio tracks (for
+  example `atmos,eac3,ac3,aac`).
+- **`subtitle_type_priority`** — optional comma-separated subtitle-kind order
+  used when `subtitle_selection=best` chooses among passing subtitles (for
+  example `normal,forced,sdh`).
+- **`merge_video`** — when enabled, keeps distinct-language video variants that
+  share the same resolution, dynamic range, and codec in one container instead
+  of dropping alternate-language video angles.
+- **`require_video` / `require_audio` / `require_subtitles`** — strict
+  requirement gates (off by default). When enabled, missing a requested video
+  quality/language, audio language, or subtitle language/kind fails the job (or
+  keeps a scheduled download waiting inside its retry window) rather than
+  silently falling back.
+
+## HDR bitstream probing, VUI normalization, and HDR10+ → DV
+
+Under **Settings → Download behavior** (and **Services → Dolby Vision hybrid**):
+
+- **`probe_hdr_metadata`** — before track selection, inspects clear HEVC HDR
+  samples for SMPTE ST 2094-40 HDR10+ SEI messages and Dolby Vision RPU NAL
+  units (stripping emulation prevention bytes) to upgrade dynamic-range labels
+  when a manifest omits them.
+- **`dolby_vision_hybrid`** — combines a selected HDR10/HDR10+ base with the
+  lowest-resolution Dolby Vision donor using `dovi_tool` (mode 3), running
+  bounded `ffmpeg cropdetect` for L5 active-area crop offsets and carrying
+  base-layer `MaxCLL`/`MaxFALL` luminance into L6 via `--edit-config`.
+- **`generate_dv_from_hdr10p`** — when an HDR10+ track has no matching DV donor,
+  extracts HDR10+ dynamic metadata with `hdr10plus_tool` (`UNIDL_HDR10PLUS_TOOL`)
+  and synthesizes Dolby Vision Profile 8.1 RPU metadata with `dovi_tool`.
+- **`normalize_vui`** — losslessly patches missing or mismatched BT.2020 PQ/HLG
+  VUI colour tags on downloaded HDR video bitstreams using FFmpeg bitstream
+  filters.
+
 ## Interactive, automatic, and batch behavior
 
 - `track_mode=interactive` opens the picker with the automatic result prechecked;

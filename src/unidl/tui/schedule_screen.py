@@ -1013,6 +1013,7 @@ class ScheduleManagerScreen(Screen[None]):
         self._radar_generation = 0
         self._radar_signature: tuple[tuple[str, ...], str, str] | None = None
         self._tab_highlights: dict[str, int] = {}
+        self._selected_job_id: str | None = None
         self._supported_only = False
         self._poster_override: str | None = None
         self._host_status: schedule_host.HostScheduleStatus | None = None
@@ -1189,15 +1190,23 @@ class ScheduleManagerScreen(Screen[None]):
         return (sources, region, tmdb_key)
 
     def refresh_data(self) -> None:
+        prev_job_id = self._selected_job_id
+        if self._active_tab == "tab-jobs" and self._jobs:
+            cur_idx = self.query_one("#schedule-list", OptionList).highlighted
+            if cur_idx is not None and 0 <= cur_idx < len(self._jobs):
+                prev_job_id = self._jobs[cur_idx].id
         store = self.app.schedule_store
         self._jobs = store.list_jobs()
         if self._pending_focus_job_id and self._active_tab == "tab-jobs":
             wanted = self._pending_focus_job_id
             self._pending_focus_job_id = None
+            self._selected_job_id = wanted
             for idx, job in enumerate(self._jobs):
                 if job.id == wanted:
                     self._tab_highlights["tab-jobs"] = idx
                     break
+        elif prev_job_id and self._active_tab == "tab-jobs":
+            self._selected_job_id = prev_job_id
         self._history = store.list_history(limit=100)
         self._update_tab_labels()
         self._render_help_text()
@@ -1576,8 +1585,10 @@ class ScheduleManagerScreen(Screen[None]):
     def _render_jobs(self) -> None:
         options = self.query_one("#schedule-list", OptionList)
         prev = self._tab_highlights.get("tab-jobs")
+        wanted_id = self._selected_job_id
         options.clear_options()
         if not self._jobs:
+            self._selected_job_id = None
             options.add_option(
                 Option(
                     f"  [$dim]{_safe(tr('schedule.empty_jobs', default='No scheduled downloads yet. Click + New job (or press n), or switch to Upcoming radar (2).'))}[/]",
@@ -1587,10 +1598,17 @@ class ScheduleManagerScreen(Screen[None]):
             return
         now = utc_now()
         avail = self._list_inner_width()
-        for job in self._jobs:
+        target_idx: int | None = None
+        for idx, job in enumerate(self._jobs):
             prompt = self._format_job_option_prompt(job, now=now, avail=avail)
             options.add_option(Option(prompt, id=f"job:{job.id}"))
-        options.highlighted = min(prev or 0, len(self._jobs) - 1)
+            if wanted_id and job.id == wanted_id:
+                target_idx = idx
+        if target_idx is None:
+            target_idx = min(prev or 0, len(self._jobs) - 1)
+        options.highlighted = target_idx
+        self._tab_highlights["tab-jobs"] = target_idx
+        self._selected_job_id = self._jobs[target_idx].id
 
     def _render_radar(self, needle: str = "") -> None:
         options = self.query_one("#schedule-list", OptionList)
@@ -1991,6 +2009,8 @@ class ScheduleManagerScreen(Screen[None]):
         cur_idx = self.query_one("#schedule-list", OptionList).highlighted
         if cur_idx is not None:
             self._tab_highlights[self._active_tab] = cur_idx
+            if self._active_tab == "tab-jobs" and 0 <= cur_idx < len(self._jobs):
+                self._selected_job_id = self._jobs[cur_idx].id
         found = self.query("#poster-rail")
         if found:
             found.first(PosterPreviewWidget).clear_graphics()
@@ -2033,6 +2053,8 @@ class ScheduleManagerScreen(Screen[None]):
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         event.stop()
         self._tab_highlights[self._active_tab] = event.option_index
+        if self._active_tab == "tab-jobs" and 0 <= event.option_index < len(self._jobs):
+            self._selected_job_id = self._jobs[event.option_index].id
         self._update_poster_for_index(event.option_index)
         self._refresh_actions()
 

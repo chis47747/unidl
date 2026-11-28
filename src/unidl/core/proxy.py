@@ -31,6 +31,9 @@ PROVIDER_ALIASES = {
     "surfsharkvpn": "surfsharkvpn",
     "windscribe": "windscribevpn",
     "windscribevpn": "windscribevpn",
+    "proton": "protonvpn",
+    "protonvpn": "protonvpn",
+    "gluetun": "gluetun",
     "basic": "basic",
 }
 PROVIDER_LABELS = {
@@ -38,9 +41,19 @@ PROVIDER_LABELS = {
     "nordvpn": "NordVPN",
     "surfsharkvpn": "Surfshark",
     "windscribevpn": "Windscribe",
+    "protonvpn": "Proton VPN",
+    "gluetun": "Gluetun",
     "basic": "Basic static proxies",
 }
-PROVIDER_ORDER = ("basic", "expressvpn", "nordvpn", "surfsharkvpn", "windscribevpn")
+PROVIDER_ORDER = (
+    "basic",
+    "expressvpn",
+    "nordvpn",
+    "surfsharkvpn",
+    "windscribevpn",
+    "protonvpn",
+    "gluetun",
+)
 
 _URI_RE = re.compile(r"^(?:https?|socks(?:4|5)?h?)://", re.IGNORECASE)
 _HOST_PORT_RE = re.compile(r"^(?:[^:@/\s]+(?::[^@/\s]+)?@)?[^:/\s]+:\d+$")
@@ -310,6 +323,15 @@ def _provider_proxy(
         return _surfshark(spec, query)
     if name == "windscribevpn":
         return _windscribe(spec, query)
+    if name == "protonvpn":
+        from .proxy_proton import ProtonVPNClient
+
+        root = Path(token_root) if token_root is not None else Path.home() / ".unidl" / "tokens" / "vpn"
+        return ProtonVPNClient(spec, root).proxy(query)
+    if name == "gluetun":
+        from .proxy_gluetun import GluetunClient
+
+        return GluetunClient(spec).proxy(query)
     raise ProxyResolutionError(f"Unsupported proxy provider: {name}")
 
 
@@ -350,6 +372,13 @@ def resolve_proxy(
         # The cached session is still inert until the user chooses an ExpressVPN
         # route, so discovering it does not turn a proxy on by itself.
         specs["expressvpn"] = {}
+    proton_cache = (
+        Path(token_root) / "protonvpn_tokens.json"
+        if token_root is not None
+        else None
+    )
+    if "protonvpn" not in specs and proton_cache is not None and proton_cache.is_file():
+        specs["protonvpn"] = {}
     prefix, separator, remainder = query.partition(":")
     canonical = PROVIDER_ALIASES.get(prefix.lower())
     if separator and canonical:

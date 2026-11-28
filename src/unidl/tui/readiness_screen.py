@@ -22,16 +22,17 @@ from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
-from textual.screen import Screen
-from textual.widgets import Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Label, OptionList, Static
+from textual.widgets.option_list import Option
 
 from .. import __version__
 from ..core import readiness
-from ..core.i18n import cell_width, get_translator, tr
+from ..core.i18n import cell_width, get_translator, phrase, tr
 from ..core.redact import redact
 from .bidi import rtl_terminal_mode, visual_text
-from .chrome import Chrome, KeyBar, StatusChip, refresh_locale_widgets
+from .chrome import Chrome, CloseMark, KeyBar, StatusChip, fit_modal_card, refresh_locale_widgets
 from .poster import DEFAULT_POSTER_PREVIEW, detect_terminal_poster_capability, normalize_poster_preview
 from .terminal_progress import supports_osc_progress
 
@@ -132,8 +133,16 @@ def format_diagnostics_report(app: object, report: readiness.Report) -> str:
             f"semantic={semantic} · density={density} · posters={poster_mode}({poster_cap})"
         ),
         f"DRM:       system={drm_system} · device={device_kind}",
-        "",
     ]
+    try:
+        from ..core.binaries import collect_tool_versions
+
+        tool_versions = collect_tool_versions()
+        if tool_versions:
+            lines.append("Tools:     " + " · ".join(f"{k}={v}" for k, v in sorted(tool_versions.items())))
+    except Exception:
+        pass
+    lines.append("")
     for group in readiness.GROUPS:
         items = report.group(group)
         if not items:
@@ -168,6 +177,7 @@ class ReadinessScreen(Screen[None]):
         Binding("slash", "app.global_search", "Search", show=False),
         Binding("escape", "app.global_quit", "Quit", show=False),
         Binding("ctrl+r", "reload", "Check again", show=True),
+        Binding("i", "setup_tools", "Install tools", show=True),
         Binding("ctrl+y", "copy_all", "Copy the report", show=True),
     ]
 
@@ -181,9 +191,10 @@ class ReadinessScreen(Screen[None]):
         yield Chrome(can_go_back=True)
         with Horizontal(id="ready-bar"):
             yield Static("", id="ready-head")
+            yield StatusChip("setup_tools", id="ready-setup")
             yield StatusChip("copy_all", id="ready-copy")
         yield VerticalScroll(id="ready-body")
-        yield KeyBar(("^r", "check again"), ("^y", "copy the report"), ("^b", "back"))
+        yield KeyBar(("^r", "check again"), ("i", tr("ready.setup.key", default="install tools")), ("^y", "copy the report"), ("^b", "back"))
 
     def on_mount(self) -> None:
         signal = getattr(self.app, "theme_changed_signal", None)
@@ -230,9 +241,10 @@ class ReadinessScreen(Screen[None]):
             head.append("  ·  ", style=palette.dim)
             head.append("…", style=palette.muted)
             self.query_one("#ready-head", Static).update(head)
-            copy_chips = self.query("#ready-copy")
-            if copy_chips:
-                copy_chips.first(StatusChip).display = False
+            for chip_id in ("#ready-setup", "#ready-copy"):
+                chips = self.query(chip_id)
+                if chips:
+                    chips.first(StatusChip).display = False
         self._run_survey(fresh=fresh, notify=notify, generation=generation)
 
     @work(exclusive=True, group="readiness-survey")
@@ -269,6 +281,11 @@ class ReadinessScreen(Screen[None]):
         else:
             head.append(tr("ready.ok"), style=palette.ok)
         self.query_one("#ready-head", Static).update(head)
+        setup_chips = self.query("#ready-setup")
+        if setup_chips:
+            chip = setup_chips.first(StatusChip)
+            chip.update(tr("ready.setup.button", default="Install tools"))
+            chip.display = True
         copy_chips = self.query("#ready-copy")
         if copy_chips:
             chip = copy_chips.first(StatusChip)
@@ -337,6 +354,139 @@ class ReadinessScreen(Screen[None]):
             self.notify(text, title=tr("ready.title"), timeout=12)
             return
         self.notify(tr("ready.copied", count=len(report.items)), timeout=3)
+
+    def action_setup_tools(self) -> None:
+        """Open explicit external-tool dependency setup modal."""
+        self.app.push_screen(
+            _ToolSetupModal(),
+            lambda installed: self.build(fresh=True, notify=True) if installed else None,
+        )
+
+
+class _ToolSetupModal(ModalScreen[bool]):
+    """Explicit user-confirmed installer for missing external CLI dependencies."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False),
+        Binding("ctrl+b", "close", "Close", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._missing: list[object] = []
+        self._installed_any = False
+        self._inspect_generation = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-card"):
+            with Horizontal(classes="modal-head"):
+                yield Label(tr("ready.setup.title", default="External tool setup"), classes="modal-card-title")
+                yield CloseMark(id="modal-close")
+            yield Label(
+                tr("ready.setup.help", default="Select a missing tool to install via your system package manager, or run the shown command manually."),
+                classes="modal-card-help",
+            )
+            yield OptionList(id="ready-setup-list")
+            with Horizontal(classes="modal-card-actions"):
+                yield Button(tr("ready.setup.install", default="Install selected"), variant="primary", id="ready-setup-install")
+                yield Button(phrase("Close"), id="ready-setup-close")
+
+    def on_mount(self) -> None:
+        self._start_inspect()
+        fit_modal_card(self, "#modal-card", "#ready-setup-list")
+        self.query_one("#ready-setup-list", OptionList).focus()
+
+    def on_unmount(self) -> None:
+        self._inspect_generation += 1
+        self.workers.cancel_group(self, "tool-setup-inspect")
+
+    def _start_inspect(self) -> None:
+        self._inspect_generation += 1
+        generation = self._inspect_generation
+        self._missing = []
+        option_list = self.query_one("#ready-setup-list", OptionList)
+        option_list.clear_options()
+        option_list.add_option(
+            Option(tr("ready.setup.loading", default="Checking installed tools…"), disabled=True)
+        )
+        self.query_one("#ready-setup-install", Button).disabled = True
+        self._inspect_worker(generation)
+
+    @work(thread=True, exclusive=True, group="tool-setup-inspect")
+    def _inspect_worker(self, generation: int) -> None:
+        from ..core.setup_tools import inspect_tools
+
+        statuses = inspect_tools(include_registered=True, use_cache=False)
+        try:
+            self.app.call_from_thread(self._apply_statuses, generation, statuses)
+        except RuntimeError:
+            pass
+
+    def _apply_statuses(self, generation: int, statuses: list[object]) -> None:
+        if not self.is_attached or generation != self._inspect_generation:
+            return
+        option_list = self.query_one("#ready-setup-list", OptionList)
+        option_list.clear_options()
+        self._missing = [st for st in statuses if not st.installed]
+        if not self._missing:
+            option_list.add_option(Option(tr("ready.setup.all_ok", default="All catalogued CLI tools are installed."), disabled=True))
+            self.query_one("#ready-setup-install", Button).disabled = True
+            fit_modal_card(self, "#modal-card", "#ready-setup-list")
+            return
+        self.query_one("#ready-setup-install", Button).disabled = False
+        for st in self._missing:
+            option_list.add_option(Option(f"{st.spec.name:<16}  {st.install_command}", id=st.spec.name))
+        option_list.highlighted = 0
+        fit_modal_card(self, "#modal-card", "#ready-setup-list")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "ready-setup-install":
+            self._trigger_install()
+        else:
+            self.action_close()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self._trigger_install()
+
+    def _trigger_install(self) -> None:
+        option_list = self.query_one("#ready-setup-list", OptionList)
+        idx = option_list.highlighted
+        if idx is None or idx >= len(self._missing):
+            return
+        target = self._missing[idx].spec.name
+        self.notify(tr("ready.setup.running", tool=target, default=f"Installing {target}…"), timeout=6)
+        self._run_install(target)
+
+    @work(thread=True, exclusive=True)
+    def _run_install(self, tool_name: str) -> None:
+        from ..core.setup_tools import install_tool
+
+        result = install_tool(tool_name)
+        if result.ok:
+            self._installed_any = True
+        try:
+            self.app.call_from_thread(self._after_install, result)
+        except RuntimeError:
+            pass
+
+    def _after_install(self, result) -> None:
+        if not self.is_attached:
+            return
+        self.notify(
+            f"{result.tool}: {result.detail}",
+            severity="information" if result.ok else "warning",
+            timeout=8,
+        )
+        self._start_inspect()
+
+    def action_close(self) -> None:
+        self.dismiss(self._installed_any)
+
+    def go_back(self) -> bool:
+        self.action_close()
+        return True
 
 
 __all__ = [

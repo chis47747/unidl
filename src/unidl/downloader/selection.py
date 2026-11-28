@@ -29,6 +29,12 @@ class SelectionOptions:
     select_video: str | None = None
     select_audio: str | None = None
     select_subtitle: str | None = None
+    require_video: bool = False
+    require_audio: bool = False
+    require_subtitles: bool = False
+    audio_codec_priority: str | None = None
+    subtitle_type_priority: str | None = None
+    merge_video: bool = False
 
     @property
     def has_filters(self) -> bool:
@@ -52,6 +58,12 @@ class SelectionOptions:
                 self.select_video,
                 self.select_audio,
                 self.select_subtitle,
+                self.require_video,
+                self.require_audio,
+                self.require_subtitles,
+                self.audio_codec_priority,
+                self.subtitle_type_priority,
+                self.merge_video,
             ]
         )
 
@@ -77,7 +89,11 @@ def select_streams_detailed(streams: list[StreamInfo], options: SelectionOptions
     audio_candidates = [stream for stream in streams if stream.media_type == "audio"]
     subtitle_candidates = [stream for stream in streams if stream.media_type in {"subtitle", "subtitles", "text"}]
 
-    if options.video or options.video_lang or options.video_range or options.select_video:
+    video_selected: list[StreamInfo] = []
+    audio_selected: list[StreamInfo] = []
+    subtitle_selected: list[StreamInfo] = []
+
+    if options.video or options.video_lang or options.video_range or options.select_video or options.require_video:
         video_selected = _select_video(video_candidates, options)
         selected.extend(video_selected)
         if video_candidates and not video_selected:
@@ -92,18 +108,35 @@ def select_streams_detailed(streams: list[StreamInfo], options: SelectionOptions
         or options.audio_selection
         or options.audio_channels
         or options.select_audio
+        or options.require_audio
     ):
         audio_selected = _select_audio(audio_candidates, options)
         selected.extend(audio_selected)
         if audio_candidates and not audio_selected:
             unmatched.append(_audio_constraint_text(options))
-    if options.subtitle_lang or options.subtitle_kind or options.subtitle_selection or options.select_subtitle:
+    if (
+        options.subtitle_lang
+        or options.subtitle_kind
+        or options.subtitle_selection
+        or options.select_subtitle
+        or options.require_subtitles
+    ):
         subtitle_selected = _select_subtitle(subtitle_candidates, options)
         selected.extend(subtitle_selected)
         if subtitle_candidates and not subtitle_selected:
             unmatched.append(_subtitle_constraint_text(options))
 
-    return SelectionResult(_dedupe(selected), tuple(unmatched))
+    unmatched.extend(
+        _check_strict_requirements(
+            options,
+            video_selected=video_selected,
+            audio_selected=audio_selected,
+            subtitle_selected=subtitle_selected,
+            already_unmatched=unmatched,
+        )
+    )
+
+    return SelectionResult(_dedupe(selected), tuple(dict.fromkeys(unmatched)))
 
 
 def _select_video(candidates: list[StreamInfo], options: SelectionOptions) -> list[StreamInfo]:
@@ -120,15 +153,18 @@ def _select_video(candidates: list[StreamInfo], options: SelectionOptions) -> li
     mode = (options.video_selection or _mode(options.video, expr, default="best")).lower()
     if mode == "all":
         if heights:
-            return _dedupe(
+            picked = _dedupe(
                 stream
                 for bucket in buckets
                 for stream in bucket
                 if _height(stream) in heights
             )
-        return _dedupe(stream for bucket in buckets for stream in bucket)
+        else:
+            picked = _dedupe(stream for bucket in buckets for stream in bucket)
+        return _expand_merged_video_variants(picked, candidates) if options.merge_video else picked
     if mode.startswith("best") and not heights:
-        return _dedupe(stream for bucket in buckets for stream in _top_n(bucket, _best_count(mode), key=_video_sort_key))
+        picked = _dedupe(stream for bucket in buckets for stream in _top_n(bucket, _best_count(mode), key=_video_sort_key))
+        return _expand_merged_video_variants(picked, candidates) if options.merge_video else picked
     if heights:
         selected: list[StreamInfo] = []
         for bucket in buckets:
@@ -136,8 +172,10 @@ def _select_video(candidates: list[StreamInfo], options: SelectionOptions) -> li
                 matches = [stream for stream in bucket if _height(stream) == height]
                 if matches:
                     selected.extend(_top_n(matches, _best_count(mode), key=_video_sort_key))
-        return selected
-    return _dedupe(stream for bucket in buckets for stream in _top_n(bucket, 1, key=_video_sort_key))
+        picked = _dedupe(selected)
+        return _expand_merged_video_variants(picked, candidates) if options.merge_video else picked
+    picked = _dedupe(stream for bucket in buckets for stream in _top_n(bucket, 1, key=_video_sort_key))
+    return _expand_merged_video_variants(picked, candidates) if options.merge_video else picked
 
 
 def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> list[StreamInfo]:
@@ -171,6 +209,10 @@ def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> li
                 if closest is not None:
                     selected.append(closest)
         return selected
+    codec_priority = _tokens(options.audio_codec_priority)
+
+    def sort_key(stream: StreamInfo):
+        return _audio_sort_key(stream, codec_priority)
     if quality.startswith("best"):
         buckets = _language_buckets(candidates, options.audio_lang or expr.get("lang"))
         if not buckets:
@@ -178,7 +220,7 @@ def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> li
         selected: list[StreamInfo] = []
         for bucket in buckets:
             bucket = _prefer_ordinary_audio(bucket)
-            selected.extend(_top_n(bucket, _best_count(mode), key=_audio_sort_key))
+            selected.extend(_top_n(bucket, _best_count(mode), key=sort_key))
         return selected
     if quality.startswith("worst"):
         buckets = _language_buckets(candidates, options.audio_lang or expr.get("lang"))
@@ -187,9 +229,9 @@ def _select_audio(candidates: list[StreamInfo], options: SelectionOptions) -> li
         selected = []
         for bucket in buckets:
             bucket = _prefer_ordinary_audio(bucket)
-            selected.extend(_bottom_n(bucket, _best_count(mode), key=_audio_sort_key))
+            selected.extend(_bottom_n(bucket, _best_count(mode), key=sort_key))
         return selected
-    return _top_n(_prefer_ordinary_audio(candidates), 1, key=_audio_sort_key)
+    return _top_n(_prefer_ordinary_audio(candidates), 1, key=sort_key)
 
 
 def _select_subtitle(candidates: list[StreamInfo], options: SelectionOptions) -> list[StreamInfo]:
@@ -197,6 +239,10 @@ def _select_subtitle(candidates: list[StreamInfo], options: SelectionOptions) ->
     candidates = _apply_common_expr(candidates, expr)
     candidates = _filter_language(candidates, options.subtitle_lang or expr.get("lang"))
     candidates = _filter_subtitle_kind(candidates, options.subtitle_kind or expr.get("kind"))
+    type_priority = _tokens(options.subtitle_type_priority)
+
+    def sub_key(stream: StreamInfo):
+        return _subtitle_sort_key(stream, type_priority)
     mode = (options.subtitle_selection or _mode(None, expr, default="all")).lower()
     if mode.startswith("best"):
         language_value = options.subtitle_lang or expr.get("lang")
@@ -205,9 +251,9 @@ def _select_subtitle(candidates: list[StreamInfo], options: SelectionOptions) ->
             buckets = [candidates]
         selected: list[StreamInfo] = []
         for bucket in buckets:
-            selected.extend(_top_n(bucket, _best_count(mode), key=_subtitle_sort_key))
+            selected.extend(_top_n(bucket, _best_count(mode), key=sub_key))
         return selected
-    return candidates
+    return sorted(candidates, key=sub_key, reverse=True) if type_priority else candidates
 
 
 def _parse_filter_expr(value: str | None) -> dict[str, str]:
@@ -409,9 +455,29 @@ def _video_sort_key(stream: StreamInfo):
     return (_height(stream) or 0, stream.bandwidth or 0, stream.frame_rate or 0)
 
 
-def _audio_sort_key(stream: StreamInfo):
+def _audio_codec_priority_score(stream: StreamInfo, priority: list[str]) -> int:
+    if not priority:
+        return 0
+    total = len(priority)
+    for idx, token in enumerate(priority):
+        norm = _normalize_audio_type(token)
+        if norm == "atmos":
+            if _audio_profile_matches(stream, "atmos"):
+                return total - idx
+        elif _audio_codec_matches(stream, "eac3" if norm == "ddplus" else "ac3" if norm == "dd" else norm):
+            return total - idx
+    return 0
+
+
+def _audio_sort_key(stream: StreamInfo, codec_priority: list[str] | None = None):
     channels = _channels(stream)
-    return (_audio_primary_score(stream), channels, _audio_kbps(stream) or 0, stream.bandwidth or 0)
+    return (
+        _audio_primary_score(stream),
+        _audio_codec_priority_score(stream, codec_priority or []),
+        channels,
+        _audio_kbps(stream) or 0,
+        stream.bandwidth or 0,
+    )
 
 
 def _audio_primary_score(stream: StreamInfo) -> int:
@@ -677,12 +743,105 @@ def _subtitle_kinds(stream: StreamInfo) -> set[str]:
     return kinds
 
 
-def _subtitle_sort_key(stream: StreamInfo):
+def _subtitle_sort_key(stream: StreamInfo, type_priority: list[str] | None = None):
     kinds = _subtitle_kinds(stream)
-    # Prefer a normal full subtitle when the user asks for one best track, then
-    # forced, SDH/CC and service-specific alternatives.
-    priority = 4 if "normal" in kinds else 3 if "forced" in kinds else 2 if "sdh" in kinds else 1
+    if type_priority:
+        total = len(type_priority)
+        priority = max(
+            (total - idx for idx, item in enumerate(type_priority) if item in kinds),
+            default=0,
+        )
+    else:
+        # Prefer a normal full subtitle when the user asks for one best track, then
+        # forced, SDH/CC and service-specific alternatives.
+        priority = 4 if "normal" in kinds else 3 if "forced" in kinds else 2 if "sdh" in kinds else 1
     return (priority, _extra_bool(stream, "default"), stream.name or "")
+
+
+def _video_merge_group(stream: StreamInfo) -> tuple[int, str, str]:
+    height = _height(stream) or 0
+    vrange = str(stream.video_range or "sdr").strip().lower()
+    codec = (pretty_codec(stream.codecs, "video") or stream.codecs or "").strip().lower()
+    return (height, vrange, codec)
+
+
+def _expand_merged_video_variants(
+    picked: list[StreamInfo],
+    pool: list[StreamInfo],
+) -> list[StreamInfo]:
+    """Include distinct-language video variants sharing (resolution, range, codec)."""
+    if not picked:
+        return picked
+    expanded: list[StreamInfo] = list(picked)
+    for base in picked:
+        group = _video_merge_group(base)
+        base_lang = _language_tag(base.language)
+        if not base_lang or base_lang == "und":
+            continue
+        by_lang: dict[str, list[StreamInfo]] = {}
+        for cand in pool:
+            if _video_merge_group(cand) != group:
+                continue
+            cand_lang = _language_tag(cand.language)
+            if not cand_lang or cand_lang == "und" or cand_lang == base_lang:
+                continue
+            by_lang.setdefault(cand_lang, []).append(cand)
+        for _lang, group_cands in sorted(by_lang.items()):
+            best = max(group_cands, key=_video_sort_key)
+            expanded.append(best)
+    return _dedupe(expanded)
+
+
+def _missing_required_languages(selected: list[StreamInfo], lang_expr: str | None) -> list[str]:
+    tokens = _tokens(lang_expr)
+    if not tokens:
+        return []
+    missing: list[str] = []
+    for token in dict.fromkeys(tokens):
+        if token in {"*", "all", "any", "none"}:
+            continue
+        if token == "original":
+            if not any(_original_stream(stream) for stream in selected):
+                missing.append("original")
+        elif not any(_language_matches(stream.language, [token]) for stream in selected):
+            missing.append(token)
+    return missing
+
+
+def _check_strict_requirements(
+    options: SelectionOptions,
+    *,
+    video_selected: list[StreamInfo],
+    audio_selected: list[StreamInfo],
+    subtitle_selected: list[StreamInfo],
+    already_unmatched: list[str],
+) -> list[str]:
+    missing: list[str] = []
+    if options.require_video:
+        if not video_selected and not any(item.startswith("video") for item in already_unmatched):
+            missing.append(_video_constraint_text(options))
+        else:
+            v_expr = _parse_filter_expr(options.select_video)
+            v_langs = _missing_required_languages(video_selected, options.video_lang or v_expr.get("lang"))
+            if v_langs:
+                missing.append(f"video (missing required language: {', '.join(v_langs)})")
+    if options.require_audio:
+        if not audio_selected and not any(item.startswith("audio") for item in already_unmatched):
+            missing.append(_audio_constraint_text(options))
+        else:
+            a_expr = _parse_filter_expr(options.select_audio)
+            a_langs = _missing_required_languages(audio_selected, options.audio_lang or a_expr.get("lang"))
+            if a_langs:
+                missing.append(f"audio (missing required language: {', '.join(a_langs)})")
+    if options.require_subtitles:
+        if not subtitle_selected and not any(item.startswith("subtitle") for item in already_unmatched):
+            missing.append(_subtitle_constraint_text(options))
+        else:
+            s_expr = _parse_filter_expr(options.select_subtitle)
+            s_langs = _missing_required_languages(subtitle_selected, options.subtitle_lang or s_expr.get("lang"))
+            if s_langs:
+                missing.append(f"subtitle (missing required language: {', '.join(s_langs)})")
+    return missing
 
 
 def _video_constraint_text(options: SelectionOptions) -> str:

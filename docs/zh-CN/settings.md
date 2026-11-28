@@ -16,7 +16,12 @@ UniDL 的设置刻意划分为三个独立层级。在任意界面点击“设�
 
 ## 服务与主页显示
 
-全局 **设置 → 服务** 包含全局 **许可方式**（License action）默认值、**按服务设置章节元数据**、**按服务获取标题附件**、**按服务测量实际视频码率**、**注册服务**、**主页显示的服务** 以及 **导出 manifest 类型**。UniDL 会从当前运行的包目录、源码检出目录中的 `src/unidl/services`、当前项目的 `services` 目录以及可写的 `<paths.home>/services` 目录中发现服务包，并将已注册的包显示为禁用条目。要添加新服务，请将完整的服务包（或单文件服务模块）复制到主页初始化提示中显示的可写目录，打开 **设置 → 服务 → 注册服务** 并选中它。注册操作会记录选择并提示你重启 UniDL；必须重启后新进程才会导入该服务包，注册结果才会出现在主页网格和全局搜索中。如果你不确定当前运行的是哪一份安装副本，可打开 **设置 → 文件与命名 → 高级路径**，其中 **服务目录** 显示了当前安装实际使用的服务目录，点击该行或按 Enter 即可直接打开。如果当前处于源码目录，但运行的 `unidl` 命令来自其他安装副本，请在源码目录中执行 `uv sync`（或 `python -m pip install -e .`），或者将 `UNIDL_SERVICES` 环境变量指向存放服务包的目录。主页显示列表是一个独立的多选框列表：取消勾选已注册的服务会将其从主页网格中隐藏，但在全局搜索中依然可用。如果之前注册的服务包在启动时暂时不可用，UniDL 会保留其注册记录，待下次重新发现该包时继续使用。
+全局 **设置 → 服务** 包含全局 **许可方式**（License action）默认值、**杜比视界混合输出**、**按服务设置章节元数据**、**按服务获取标题附件**、**按服务测量实际视频码率**、**注册服务**、**主页显示的服务**、**导出 manifest 类型**、**Git 服务仓库** 以及 **Firefox Cookie 导入**。UniDL 会从当前运行的包目录、源码检出目录中的 `src/unidl/services`、当前项目的 `services` 目录、可写的 `<paths.home>/services` 目录以及已启用的 `<paths.home>/service_repos/` Git 仓库中发现服务包，并将已注册的包显示为禁用条目。要添加新服务，请将完整的服务包（或单文件服务模块）复制到主页初始化提示中显示的可写目录，打开 **设置 → 服务 → 注册服务** 并选中它。注册操作会记录选择并提示你重启 UniDL；必须重启后新进程才会导入该服务包，注册结果才会出现在主页网格和全局搜索中。
+
+- **Git 服务仓库**：打开支持鼠标点击与快捷键的 TUI 管理弹窗，可 **添加**（`a`）、**编辑**（`e` / `Enter`）、**启停**（`Space`）、**删除**（`d`）、**拉取更新**（`r`）及 **强制刷新**（`f`）保存在 `unidl.yaml` 的 `service_repos` 列表。仓库会克隆至 `<paths.home>/service_repos/<名称>`，遵循每仓库独立的 `ttl_hours` 缓存时间（默认 24 小时），并在检测到本地未提交修改时自动跳过拉取以防覆盖本地改动。命令行同样支持 `unidl refresh-services [--force]` 同步更新。
+- **Firefox Cookie 导入**：打开 TUI 提取弹窗（也可在任意单个服务的 **Cookie 配置** 选择器中点击 **从 Firefox 提取…** 或按 `f` 直接打开）。该工具会对本地 Firefox 的 `cookies.sqlite` 建立临时 WAL 安全快照（并可选检查旧版 `webappsstore.sqlite` 与现代 LSNG `storage/default/.../ls/data.sqlite` 中的 `localStorage` 键值），再将匹配域名的 Cookie 保存为 `<paths.cookies>/<service>/<profile>.txt`。
+
+如果你不确定当前运行的是哪一份安装副本，可打开 **设置 → 文件与命名 → 高级路径**，其中 **服务目录** 显示了当前安装实际使用的服务目录，点击该行或按 Enter 即可直接打开。如果当前处于源码目录，但运行的 `unidl` 命令来自其他安装副本，请在源码目录中执行 `uv sync`（或 `python -m pip install -e .`），或者将 `UNIDL_SERVICES` 环境变量指向存放服务包的目录。主页显示列表是一个独立的多选框列表：取消勾选已注册的服务会将其从主页网格中隐藏，但在全局搜索中依然可用。如果之前注册的服务包在启动时暂时不可用，UniDL 会保留其注册记录，待下次重新发现该包时继续使用。
 
 **导出 manifest 类型** 独立保存在各个已注册服务的 `settings.json` 命名空间中。传统/默认值为 **主 manifest**（master manifest）：原生导出会像以往一样保留原始已授权的 MPD、ISM 或 HLS 入口。若合并了多个已授权的主 manifest，则会记录所有参与合并的主 manifest URL，而不会展开它们的完整分片列表。导入时只读取这些保存下来的 URL，不会让已安装的服务重新授权新的变体。如果原始引用无法安全还原（例如内联 JSON 源或拼接时间线），则会改为保存原始源与所需轨道元数据的打包集合。缺少来源信息会直接明确报错，绝不会静默生成不完整的导出文件。
 
@@ -86,12 +91,12 @@ UniDL 的设置刻意划分为三个独立层级。在任意界面点击“设�
 
 | 设置项 | 可选值 | 默认值 | 说明 |
 |---------|--------|---------|-------|
-| `download_manager` | 管理器界面 | — | 打开 **下载行为**，管理 `after_resolve`、直播默认行为、批量确认及原生下载器传输选项。许可时机默认值在 **服务** 中配置，并可按服务单独覆盖。 |
-| `services_manager` | 管理器界面 | — | 打开 **服务**，包含服务注册、主页显示、章节元数据、标题附件、实际视频码率、许可默认值以及导出 manifest 类型。元数据与码率开关可按服务独立配置。 |
-| `resource_manager` | 管理器界面 | — | 打开 **DRM 与密钥库**，统一用于选择全局 DRM/CDM、编辑 CDM 规则、增删改远程 CDM 与密钥库、启用/禁用后端、选择本地密钥库以及打开密钥库策略。 |
+| `download_manager` | 管理器界面 | — | 打开 **下载行为**，管理 `after_resolve`、直播默认行为、批量确认、HDR 码流探测 / VUI 修复 / HDR10+ 转 DV 后处理、下载后钩子及原生下载器传输选项。许可时机默认值在 **服务** 中配置，并可按服务单独覆盖。 |
+| `services_manager` | 管理器界面 | — | 打开 **服务**，包含服务注册、主页显示、章节元数据、标题附件、实际视频码率、许可默认值、杜比视界混合输出、导出 manifest 类型、Git 服务仓库以及 Firefox Cookie 导入。元数据与码率开关可按服务独立配置。 |
+| `resource_manager` | 管理器界面 | — | 打开 **DRM 与密钥库**，统一用于选择全局 DRM/CDM、编辑 CDM 规则、增删改远程 CDM 与密钥库（编辑已保存令牌/密码时默认以圆点掩码并提供「显示」开关）、启用/禁用后端、选择本地密钥库以及打开密钥库策略。 |
 | `storage_manager` | 管理器界面 | — | 打开 **文件与命名**，统一用于编辑常规输出目录和文件名模板、预览示例发布名，以及查看敏感运行时路径（不会移动文件）。 |
-| `proxy_manager` | 管理器界面 | — | 打开 **代理与 VPN**，集中管理默认路由、分片下载路由、命名代理端点以及 HTTPS 代理服务商。 |
-| `justwatch_manager` | 管理器界面 | — | 打开 **JustWatch 搜索**，集中编辑标题目录国家、上架查询地区列表、即将上映雷达数据源以及可选的 TMDB API 密钥。各项底层配置值仍相互独立。 |
+| `proxy_manager` | 管理器界面 | — | 打开 **代理与 VPN**，集中管理默认路由、分片下载路由、命名代理端点、代理服务商（含 Proton VPN 与 Gluetun）以及 **查看出口 IP**（`i`）实时出口 IP 与时区检测。 |
+| `justwatch_manager` | 管理器界面 | — | 打开 **搜索与计划下载**，集中编辑标题目录国家、上架查询地区列表、即将上映雷达数据源、可选的掩码 TMDB API 密钥以及计划下载相关偏好。各项底层配置值仍相互独立。 |
 | `interface_manager` | 管理器界面 | — | 打开 **界面与诊断**，管理 `theme`、`accent_color`、`title_color`、`layout_density`、`semantic_colors`、`completion_alert`、`poster_preview`、`interface_locale`、`beta_interface`、`beta_auto_results` 和 `debug`。 |
 | `after_resolve` | `download` / `command` / `list` / `export` / `ask` | `download` | 由 **下载行为** 控制的兼容键。`command` 写出可复现的命令文件；`list` 打印解析后的轨道阶梯而不请求许可；`export` 写出可移植的 JSON 导出包。在主页按快捷键 `d` 可在五种模式间循环切换。 |
 | `fetch_actual_bitrate` | 开 / 关 | **开** | 由 **设置 → 服务 → 按服务测量实际视频码率** 或各服务自身设置控制。未单独配置的服务继承全局默认值；保存的服务覆盖项彼此独立。在服务行上按 `r` 可恢复继承，已有全局偏好会被保留。在最终视频轨道选定且下载详情界面显示后，UniDL 会对分布式的媒体分片进行采样，在 manifest 估算码率旁显示实际码率。同一探测过程还可能读取所选视频有限大小的 MP4 初始化元数据，在最终命名前补正缺失的 HLG/HDR 标签。仅当能够获知完整分片大小时才会采纳探测结果，不可靠的 CDN 响应会被忽略。关闭则会跳过以上全部操作，仅保留 manifest 元数据。 |
@@ -118,10 +123,18 @@ UniDL 的设置刻意划分为三个独立层级。在任意界面点击“设�
 | `vault_write_targets` | 多选可写密钥库 | 全部可写 | 全局 **存储获得的密钥** 目标列表，服务默认继承直至覆盖。标记为 `no_push` 的后端会被排除。 |
 | `live_record` | 开 / 关 | **关** | 由 **下载行为** 控制的兼容键。在 TUI 中用于预选最终选轨后“录制 vs 生成命令”的默认选项；无头模式（headless）下直接使用该值。除非用户在当次运行中手动调整，录制将沿用该服务的 `live_record_limit` 默认时长；`00:00:00` 表示无时长限制直至手动停止。请参阅 [live.md](live.md)。 |
 | `license_action` | `before` / `after` / `custom` | **before**，支持自定义的服务默认为 **custom** | 全局 Before/After 默认值位于 **设置 → 服务**；按服务覆盖位于 **授权与密钥库**。仅显式声明支持的服务才会显示 `custom`。旧版布尔键 `license_after_tracks` 的 true/false 仍可兼容读取为 After/Before。请参阅[许可方式](drm.md)。 |
-| `dolby_vision_hybrid` | 开 / 关 | **关** | 全局默认值位于 **设置 → 服务**，服务默认继承直至在 **授权与密钥库** 中覆盖。仅适用于点播（VOD）：使用 `dovi_tool` 将所选 HDR10/HDR10+ 基础层与同一 manifest 或合并档位阶梯中分辨率最低的可用 DV 层合成为混合视频。 |
+| `dolby_vision_hybrid` | 开 / 关 | **关** | 全局默认值位于 **设置 → 服务**，服务默认继承直至在 **授权与密钥库** 中覆盖。仅适用于点播（VOD）：使用 `dovi_tool` 将所选 HDR10/HDR10+ 基础层与同一 manifest 或合并档位阶梯中分辨率最低的可用 DV 层合成为混合视频（自动执行 L5 有效画面黑边检测与 L6 `MaxCLL`/`MaxFALL` 亮度写入）。 |
+| `probe_hdr_metadata` | 开 / 关 | **关** | 由 **下载行为** 控制。在选轨前对明文 HEVC HDR 样本执行 SMPTE ST 2094-40 HDR10+ SEI 与 Dolby Vision RPU NAL 单元探测，用于校正流动态范围标签。 |
+| `generate_dv_from_hdr10p` | 开 / 关 | **关** | 由 **下载行为** 控制。当 HDR10+ 轨道缺少匹配的杜比视界层时，通过 `hdr10plus_tool` 与 `dovi_tool` 合成 Dolby Vision Profile 8.1 RPU 元数据。 |
+| `normalize_vui` | 开 / 关 | **关** | 由 **下载行为** 控制。使用 FFmpeg 码流过滤器无损修补下载后的 HDR 视频流中缺失或不匹配的 BT.2020 PQ/HLG VUI 色彩标记。 |
+| `post_download_hook` | 命令模板 | 空 | 由 **下载行为** 控制。下载完成后自动执行的本地命令。在展开 `{变量}` 占位符之前先以 `shlex.split` 分词（不使用 `shell=True`），同时通过 `UNIDL_*` 环境变量传入安全元数据。 |
+| `post_download_hook_on_failure` | 开 / 关 | **关** | 由 **下载行为** 控制。下载失败时也运行 `post_download_hook`（用户主动取消时不触发）。 |
 | `download_dir` | 路径 | 空 | 由 **文件与命名 → 输出位置** 控制的兼容键。下载文件与直播录制的保存位置。留空时使用已配置目录或默认目录，并按服务分子目录存放。无需编辑 YAML；支持展开 `~`，目录不存在会自动创建。 |
 | `episode_folder_template` | 相对路径模板 | 空 | 由 **文件与命名 → 命名模板** 控制的兼容键。仅对剧集类标题在 `downloads/<service>/` 下增加可选子目录，留空则保持扁平目录结构。可用占位符包括 `{series}`、`{season}`、`{season_number}`、`{year}`、`{season_episode}` 和 `{service}`，常见写法为 `{series}/{season}`。在剧集目录模板中，`{year}` 优先采用服务提供的剧集首播/发行年份，缺失时回退到单集年份。电影、直播和纯音频仍直接保存在服务目录中。 |
 | `filename_style` | `dot` / `space` / `hyphen` | `dot` | 由 **文件与命名 → 命名模板** 控制的兼容键。控制最终标题和发布名的分隔符风格，同时保留所选模板中的各个字段。 |
+| `unicode_filenames` | 开 / 关 | **开** | 由 **文件与命名 → 命名模板** 控制。开启时保留非 ASCII 字符与变音符号；关闭时转写为安全 ASCII 文件名。 |
+| `repack_tag` | 开 / 关 | **关** | 由 **文件与命名 → 命名模板** 控制。在生成的电影与剧集发布后缀中附加 `REPACK` 标签。 |
+| `audio_lang_tag` | `off` / `auto` / `multi_only` | `off` | 由 **文件与命名 → 命名模板** 控制。根据最终选中的音轨语言数量自动附加 `DUAL`（2 种主语言）或 `MULTI`（3 种及以上，`multi_only` 下 2 种及以上即标 `MULTI`）。 |
 | `debug` | 开 / 关 | 关 | 由 **界面与诊断** 控制的兼容键。开启详细日志、记录完整 URL、保留临时文件，并写出流元数据与单任务日志。服务可在其服务类中显式设置 `DEBUG_LOGGING = False` 来禁用该服务的诊断文件，TUI 会提示这一豁免。同时启用主页的 `ctrl+r` 手动重载服务代码功能（不存在自动文件监听）。 |
 | `confirm_batch` | 开 / 关 | 关 | 由 **下载行为** 控制的兼容键。处理多集选择前弹窗确认一次。 |
 | `retries` | 整数 | `5` | 由 **下载行为** 控制的兼容键。原生下载器引擎的分片重试次数。 |
@@ -152,18 +165,26 @@ UniDL 的设置刻意划分为三个独立层级。在任意界面点击“设�
 - 实时混流文件在录制期间直接显示在下载目录中，分离轨道则存放在 `<name>.recording/` 目录内。正常完成录制后，只有在最终文件提交落盘之后，系统才会按既有留存设置清理被替代的临时轨道。若遇到退出、混流失败或提交失败，已捕获的媒体都会保留在原处；收尾失败时会停留在当前界面便于检查或重试。系统只会清理自身创建的空录制目录或空文件。
 - 常规 VOD 取消以及按 **VOD 方式** 下载的直播回看（DVR）沿用原有的取消与续传行为。
 
-### JustWatch 搜索与即将上映雷达数据源
+### 搜索与计划下载
 
-**JustWatch 搜索** 管理器将四项相关的片源发现设置整合在一起：
+**搜索与计划下载** 管理器（原名 **JustWatch 搜索**）整合了片源发现与计划下载相关设置：
 
 - **标题目录**（`justwatch_search_region`）为单一国家代码，决定标题匹配结果、本地化片名以及即将上映雷达中按地区展示的流媒体上线信息来源于哪个目录。
 - **上架查询地区**（`justwatch_regions`）为地区列表。JustWatch 会按国家逐一查询播放源，用来回答所选标题在哪些地区上架。
 - **即将上映数据源**（`upcoming_sources`）用于为 **定时下载** 里的“即将上映雷达”标签页选择一个或多个数据源（`JustWatch`、`TVMaze`、`AniList`、`TMDB`）。
-- **TMDB API 密钥**（`tmdb_api_key`）保存可选的、经过脱敏显示的 TMDB v3 API 密钥或 v4 Read Access Token。
+- **TMDB API 密钥**（`tmdb_api_key`）保存可选的 TMDB v3 API 密钥或 v4 Read Access Token（编辑时以圆点掩码显示，可点击「显示」查看原值）。
 
 JustWatch 搜索界面和上架查询界面各自保留了 `Ctrl+R` 地区选择器，**定时下载 → 设置** 则将雷达数据源、TMDB 密钥、地区与海报预览开关集中在一处展示。
 
-全局设置的一级菜单刻意只展示上述七个管理器：**下载行为**、**服务**、**DRM 与密钥库**、**文件与命名**、**代理与 VPN**、**JustWatch 搜索** 和 **界面与诊断**。上表中位于它们下方的条目均为持久化兼容键，不会在一级菜单中重复列出。
+全局设置的一级菜单刻意只展示上述七个管理器：**下载行为**、**服务**、**DRM 与密钥库**、**文件与命名**、**代理与 VPN**、**搜索与计划下载** 和 **界面与诊断**。上表中位于它们下方的条目均为持久化兼容键，不会在一级菜单中重复列出。
+
+### 下载后钩子（Post-download hooks）
+
+在 **设置 → 下载行为** 中配置 **下载后钩子命令**（`post_download_hook`），可在交付完成后自动调用本地脚本或命令（配合 **失败时运行下载后钩子** `post_download_hook_on_failure` 可选择是否在失败时触发，用户取消时永不触发）：
+
+- **安全执行**：UniDL 会先以 `shlex.split` 解析命令模板，*再* 替换 `{变量}` 占位符，且始终使用 `shell=False`（默认超时 `120s`），片名或文件名中的空格与特殊字符绝不会造成命令注入。
+- **可用占位符与 `UNIDL_*` 环境变量**：`{status}`、`{exit_code}`、`{service}`、`{title}`、`{title_kind}`、`{episode_name}`、`{season}`、`{episode}`、`{year}`、`{air_date}`、`{edition}`、`{save_name}`、`{quality}`、`{output_dir}`、`{output_file}`、`{output_path}`、`{artifacts_json}`、`{artifact_count}`、`{failure}`（同时以对应大写的 `UNIDL_<NAME>` 环境变量传入）。
+- **进程环境**：钩子会继承 UniDL 的进程环境并接收下载元数据。请只配置你信任的本地命令。
 
 ### 文件与命名
 
@@ -172,7 +193,7 @@ JustWatch 搜索界面和上架查询界面各自保留了 `Ctrl+R` 地区选择
 - **输出位置** — 包含 `download_dir` 以及 `paths.subtitles`、`paths.commands` 和 `paths.exports`。保存路径时会创建目标目录，但绝不会移动已有文件。重置某一项会移除覆盖并恢复为已配置或默认位置。
 - **命名模板** — 包含 `name_template_episode`、`name_template_movie`、`release_template` 和 `release_tag`，并附带剧集与电影命名预览。这些仍然是普通的 `settings.json` 键，管理器只是它们的统一界面。`episode_folder_template` 也在同一标签页编辑，用于在服务目录下控制可选的剧集子目录；它不会改动文件名，也不会移动已下载文件。
   上方的 **文件名格式** 是快速预设：**点分隔（scene 风格）** 保留传统的 `Real.Time.With.Bill.Maher.S24E29.720p...` 形式，**空格分隔** 使用 `Real Time With Bill Maher S24E29 720p...`，**分区连字符** 使用 `Real Time With Bill Maher-S24E29-720p...`。该选项只改变分隔符，具体包含哪些标题、画质、音频、视频和发布组字段仍由模板控制。
-  发布模板支持 `audio`、`audio_channels`、`audio_full`、`atmos` 和 `video`。当存在明确标识为立体 3D 的视频轨道时，`{three_d?}` 会追加 `3D`；默认位置在画质动态范围标签之后，例如 `H.265.DV.3D`。该标记独立于 DV/HDR，且仅依据最终选中的视频轨道判断；自定义模板可自行调整位置或省略。其余默认字段会生成类似 `AAC2.0`、`DDP5.1.Atmos`、`H.265` 的名称。所有这些值都仅在输出选择器确认后，根据用户最终保留勾选的轨道实时计算——而非依据初始自动勾选项或完整 manifest 清单。
+  同页还提供 **文件名保留 Unicode 字符**（`unicode_filenames`，默认开启；关闭则转写为 ASCII）、**附加 REPACK 发布标签**（`repack_tag`）以及 **多语言音轨标签**（`audio_lang_tag`：`off` / `auto` 自动标注 `DUAL`/`MULTI` / `multi_only`）。标题模板支持 `{air_date}`（规范化 `YYYY-MM-DD`，无季集号时作为日期型节目的自动回退）与 `{edition}`；发布模板支持 `edition`、`repack`、`lang_tag`、`audio`、`audio_channels`、`audio_full`、`atmos` 和 `video`。当存在明确标识为立体 3D 的视频轨道时，`{three_d?}` 会追加 `3D`；默认位置在画质动态范围标签之后，例如 `H.265.DV.3D`。该标记独立于 DV/HDR，且仅依据最终选中的视频轨道判断；自定义模板可自行调整位置或省略。其余默认字段会生成类似 `AAC2.0`、`DDP5.1.Atmos`、`H.265` 的名称。所有这些值都仅在输出选择器确认后，根据用户最终保留勾选的轨道实时计算——而非依据初始自动勾选项或完整 manifest 清单。
 - **高级路径** — 展示当前运行实例的 **服务目录**、`home`、缓存/临时/日志目录、令牌（tokens）、Cookie、外部工具（helpers）、CDM 目录以及默认本地密钥库。这些路径保持只读：点击某行或按 Enter 可在系统文件管理器中打开对应文件夹（密钥库行打开的是其所在目录，而不是数据库文件本身）。绝不会移动已有文件，也不会改动任何路径设置。查看或打开路径不会创建新目录，目录不存在时仅做提示而不自动创建。若系统缺少桌面文件管理器，UniDL 会直接显示完整路径。
 
 已安装的服务路径直接根据当前运行的包位置推导，而非基于工作目录猜测，因此源码运行、pip、虚拟环境和 uv 安装都会准确显示各自的路径。将完整服务包复制到该目录，在 **设置 → 服务 → 注册服务** 中注册，再重启 UniDL 即可生效。这一只读行不会引入新的 `paths.services` 配置键；既有的用户服务目录、自定义 `UNIDL_SERVICES` 以及项目目录发现机制均保持原样。
@@ -181,9 +202,17 @@ JustWatch 搜索界面和上架查询界面各自保留了 `Ctrl+R` 地区选择
 
 ### 代理与 VPN
 
-全局设置列表提供单独的 **代理与 VPN** 行。其路由（Routing）标签页接受空值（直连）、完整的 `http(s)://` / `socks` URI、`proxies` 中定义的名称，或服务商查询表达式（如 `expressvpn:us`、`nordvpn:us`、`surfshark:gb` 或 `windscribe:ca:toronto`）。`proxy_downloads` 单独控制原生下载器核心的分片请求是否走解析后的代理路由；UniDL 自身的 API、manifest 与许可请求仍走该路由。
+全局设置列表提供单独的 **代理与 VPN** 行。其路由（Routing）标签页接受空值（直连）、完整的 `http(s)://` / `socks` URI、`proxies` 中定义的名称，或服务商查询表达式（如 `expressvpn:us`、`nordvpn:us`、`surfshark:gb`、`windscribe:ca:toronto`、`proton:us` / `proton:us:new_york` / `proton:us12` 或 `gluetun` / `gluetun:jp`）。`proxy_downloads` 单独控制原生下载器核心的分片请求是否走解析后的代理路由；UniDL 自身的 API、manifest 与许可请求仍走该路由。
 
-该管理器支持静态 HTTP/HTTPS/SOCKS 端点池，以及来自 ExpressVPN、NordVPN、Surfshark 和 Windscribe 的 HTTPS 代理端点。ExpressVPN 使用显式的 OAuth 设备授权界面（在其服务商行上按 `l` 触发）；轮换的刷新/访问/连接令牌以仅所有者可读权限写入 `<paths.tokens>/vpn/expressvpn_tokens.json`，后续可无头自动刷新。NordVPN、Surfshark 和 Windscribe 使用保存在 `unidl.yaml` 中的手动配置服务凭据。代理服务商仅在被选中时解析，不会修改本机的系统 VPN 或默认路由。Gluetun、Proton TV 登录和 Hola 仍需要外部进程或不同的登录生命周期，不会作为静默 URI 回退。服务级的代理设置依然保留，非空时会覆盖全局路由。
+该管理器支持静态 HTTP/HTTPS/SOCKS 端点池及以下代理服务商：
+
+- **ExpressVPN**：使用显式 OAuth 设备授权界面（在其服务商行上按 `l` 触发）；轮换令牌以仅所有者可读权限写入 `<paths.tokens>/vpn/expressvpn_tokens.json`，后续可无头自动刷新。
+- **NordVPN、Surfshark、Windscribe**：使用保存在 `unidl.yaml` 中的手动配置服务凭据。
+- **Proton VPN**：支持按国家（`proton:us`）、城市（`proton:us:new_york`）或节点编号（`proton:us12`）挑选逻辑节点，支持可选 `server_map` 别名，并读取 `unidl.yaml` 凭据或 `<paths.tokens>/vpn/protonvpn_tokens.json` 缓存。
+- **Gluetun**：对接 Docker Gluetun HTTP 代理（`url` 或 `host`/`port`，或按地区映射的 `instances`），开启 `verify_region: true` 时会查询 Control Server `/v1/publicip/ip`（可选 `api_key`）校验当前出口国家。
+- **实时出口 IP 与时区检测**：在 **代理与 VPN** 页面点击 **查看出口 IP** 按钮或按 `i`（直连与代理下均可用），即可查看当前出口 IP、地区、时区、ASN/运营商及查询来源（支持 `unidl.yaml` 中的可选 `ipinfo_token` 并自动回退），弹窗提供可点击的 **复制**（`c`）与 **关闭**（`Esc`/`Enter`）按钮。
+
+代理服务商仅在被选中时解析，不会修改本机的系统 VPN 或默认路由。Hola 仍需外部进程且不作为静默 URI 回退。服务级的代理设置依然保留，非空时会覆盖全局路由。
 
 无论上述设置如何配置，**每次**运行都会执行以下两件事：
 
@@ -196,7 +225,7 @@ JustWatch 搜索界面和上架查询界面各自保留了 `Ctrl+R` 地区选择
 
 启用 **许可方式 → 最终选轨后获取许可** 时，只有最终选中的加密轨道会提供 KID/PSSH 参与密钥库查询与许可请求，未选中的 manifest 变体不会被查询或请求许可。
 
-**杜比视界混合输出（Dolby Vision hybrid output）** 是一项独立的下载后处理转换，既不是 manifest 档位，也不替代最终轨道选择。启用后，Core 会把配对的 DV/HDR10 素材加入选中阶梯，使两路素材都走正常的服务自有许可与密钥库流程。两份解密文件下载完成后，由 `ffmpeg`、`dovi_tool` 和 `mkvmerge` 将 DV RPU 注入 HDR10 基础层，再将合成后的单条混合视频送入最终混流。该功能默认关闭，直播/回看流会忽略此设置；若缺少任一层、帧率/时长/帧数不兼容或缺少 HEVC 数据，则会安全地保留原始轨道不动。DV 输入选取的是可用分辨率最低的 DV 层，无需与 HDR 基础层分辨率一致。系统中必须安装 `dovi_tool` 且位于 `PATH` 中（或通过 `UNIDL_DOVI_TOOL` 指定路径）。初始实现使用 dovi mode 3 规范化 RPU 并保留源画面几何尺寸，不会凭空生成 L5/L6 裁切元数据。
+**杜比视界混合输出（Dolby Vision hybrid output）** 是一项独立的下载后处理转换，既不是 manifest 档位，也不替代最终轨道选择。启用后，Core 会把配对的 DV/HDR10 素材加入选中阶梯，使两路素材都走正常的服务自有许可与密钥库流程。两份解密文件下载完成后，由 `ffmpeg`、`dovi_tool` 和 `mkvmerge` 将 DV RPU 注入 HDR10 基础层，再将合成后的单条混合视频送入最终混流。该功能默认关闭，直播/回看流会忽略此设置；若缺少任一层、帧率/时长/帧数不兼容或缺少 HEVC 数据，则会安全地保留原始轨道不动。DV 输入选取的是可用分辨率最低的 DV 层，无需与 HDR 基础层分辨率一致。系统中必须安装 `dovi_tool` 且位于 `PATH` 中（或通过 `UNIDL_DOVI_TOOL` 指定路径）。流水线使用 dovi mode 3 规范化 RPU，结合有界 `ffmpeg cropdetect` 自动计算 L5 黑边裁切参数，并将基础层的 `MaxCLL`/`MaxFALL` 亮度写入 L6（经由 `dovi_tool --edit-config`）。当开启 `generate_dv_from_hdr10p` 且 HDR10+ 流缺少匹配的 DV 层时，还可借助 `hdr10plus_tool`（`UNIDL_HDR10PLUS_TOOL`）与 `dovi_tool` 合成 Dolby Vision Profile 8.1 RPU。
 
 本区域即 **轨道输出选择**（Track output selection），用于决定原生下载器核心从已解析的轨道中下载、保留并混流哪些轨道。这些设置本身不是许可轨道选择器，绝不能静默决定服务的 PSSH 种子、请求的 KID 或许可档位/API 路由。
 
@@ -227,6 +256,12 @@ JustWatch 搜索界面和上架查询界面各自保留了 `Ctrl+R` 地区选择
 | `sub_langs` | 逗号分隔、`all`，或留空以跳过 | `all` |
 | `subtitle_kinds` | 逗号分隔的 `normal`、`forced`、`sdh`、`commentary`、`audio_description`，或 `all` | `normal,forced` |
 | `subtitle_selection` | `all` / `best` | `all` |
+| `audio_codec_priority` | 逗号分隔编码顺序（如 `atmos,eac3,ac3,aac`） | 空 |
+| `subtitle_type_priority` | 逗号分隔字幕类型顺序（如 `normal,forced,sdh`） | 空 |
+| `merge_video` | 开 / 关 | 关 |
+| `require_video` | 开 / 关 | 关 |
+| `require_audio` | 开 / 关 | 关 |
+| `require_subtitles` | 开 / 关 | 关 |
 | `drop_video` | 正则表达式 | 带词边界的 `trick` / `trickplay` / `thumbnail` / `image` |
 | `sub_format` | `srt` / `vtt` / `ass` / `raw` | `srt` |
 | `mux_format` | `mkv` / `mp4` | `mkv` |

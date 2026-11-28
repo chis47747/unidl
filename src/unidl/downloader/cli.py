@@ -1345,6 +1345,27 @@ def _download_impl(args: argparse.Namespace) -> int:
             _log_line(args, "Dolby Vision hybrid: combined matching DV and HDR10 video tracks")
         except Exception as exc:
             raise RuntimeError(f"Dolby Vision hybrid processing failed: {exc}") from exc
+    if bool(getattr(args, "service_context", {}).get("unidl_generate_dv_from_hdr10p")):
+        try:
+            from .hybrid import process_generate_dv_tracks
+
+            before_ranges = [getattr(t.stream, "video_range", "") for t in downloaded_tracks]
+            downloaded_tracks = process_generate_dv_tracks(
+                downloaded_tracks,
+                enabled=True,
+                temp_dir=getattr(args, "tmp_dir", None),
+            )
+            if [getattr(t.stream, "video_range", "") for t in downloaded_tracks] != before_ranges:
+                _log_line(args, "Dolby Vision P8.1: generated DV metadata from HDR10+ track")
+        except Exception as exc:
+            raise RuntimeError(f"HDR10+ to Dolby Vision generation failed: {exc}") from exc
+    if bool(getattr(args, "service_context", {}).get("unidl_normalize_vui")):
+        try:
+            from .hdr_probe import normalize_tracks_vui
+
+            downloaded_tracks = normalize_tracks_vui(downloaded_tracks, enabled=True)
+        except Exception as exc:
+            _log_line(args, f"SPS VUI normalization skipped: {exc}")
     downloaded_paths = [track.path for track in downloaded_tracks]
     intermediate_paths = [
         path for track in downloaded_tracks for path in track.cleanup_paths
@@ -9931,6 +9952,9 @@ def _mux_inputs_for_tracks(
         if default_subtitle is not None
         else None
     )
+    video_tracks = [track for track in tracks if track.stream.media_type == "video"]
+    multi_video = len(video_tracks) > 1
+    first_video = video_tracks[0].stream if multi_video else None
     return [
         replace(
             item,
@@ -9941,11 +9965,15 @@ def _mux_inputs_for_tracks(
                     track.stream is subtitle_choice.stream
                     if subtitle_choice is not None
                     and track.stream.media_type in {"subtitle", "subtitles", "text"}
-                    else item.default
+                    else (
+                        track.stream is first_video
+                        if multi_video and track.stream.media_type == "video" and item.default is None
+                        else item.default
+                    )
                 )
             ),
         )
-        if track.stream.media_type in {"audio", "subtitle", "subtitles", "text"}
+        if track.stream.media_type in {"audio", "subtitle", "subtitles", "text"} or (multi_video and track.stream.media_type == "video")
         else item
         for item, track in zip(inputs, tracks, strict=True)
     ]

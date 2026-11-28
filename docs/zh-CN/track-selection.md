@@ -251,6 +251,24 @@ ASS 映射会近似还原 WebVTT 的 snap-to-line 位置以及常见水平 TTML 
 
 MP4 无法直接复制封装 ASS、WebVTT 或 SRT 轨道，因此 UniDL 会将其转为 `mov_text` 封装，这可能导致定位和样式丢失。如需保留带定位的字幕，请使用 MKV，或在需要时单独保留原始外挂字幕。
 
+## 优先级排序、多语言视频与严格必选校验
+
+**轨道与输出** 下另有六项进阶规则用于细化自动选轨与缺失校验：
+
+- **`audio_codec_priority`** — 可选的逗号分隔音频编码优先级顺序（如 `atmos,eac3,ac3,aac`），在 `audio_selection=best` 时决定候选音轨的先后排名。
+- **`subtitle_type_priority`** — 可选的逗号分隔字幕类型优先级顺序（如 `normal,forced,sdh`），在 `subtitle_selection=best` 时决定候选字幕的先后排名。
+- **`merge_video`** — 开启后，若存在分辨率、动态范围与编码相同但语言不同的多个视频变体，会将它们一并合并封装，而不丢弃其他语言画面版本。
+- **`require_video` / `require_audio` / `require_subtitles`** — 严格必选校验开关（默认关闭）。开启后，若请求的画质/语言、音轨语言或字幕语言/类型缺失，任务会直接判定失败（在定时下载中则继续在重试窗口内等待），不会静默降级回退。
+
+## HDR 码流探测、VUI 规范化与 HDR10+ 转杜比视界
+
+位于 **设置 → 下载行为**（以及 **服务 → 杜比视界混合输出**）：
+
+- **`probe_hdr_metadata`** — 在选轨前抽样检测明文 HEVC HDR 码流中的 SMPTE ST 2094-40 HDR10+ SEI 与 Dolby Vision RPU NAL 单元（自动剥离防竞争字节），当 manifest 漏标动态范围时自动修正标签。
+- **`dolby_vision_hybrid`** — 使用 `dovi_tool`（mode 3）将选中的 HDR10/HDR10+ 基础层与可用最低分辨率 DV 层合成为混合视频，并自动执行有界 `ffmpeg cropdetect` 计算 L5 黑边裁切以及通过 `--edit-config` 写入基础层的 L6 `MaxCLL`/`MaxFALL` 亮度元数据。
+- **`generate_dv_from_hdr10p`** — 当 HDR10+ 视频缺少匹配的 DV 层时，借助 `hdr10plus_tool`（`UNIDL_HDR10PLUS_TOOL`）提取动态元数据并由 `dovi_tool` 合成 Dolby Vision Profile 8.1 RPU。
+- **`normalize_vui`** — 通过 FFmpeg 码流过滤器无损修补已下载 HDR 视频中缺失或不匹配的 BT.2020 PQ/HLG VUI 色彩标记。
+
 ## 交互模式、自动模式与批量行为
 
 - `track_mode=interactive` 会打开轨道选择器并预勾选自动选择的结果；用户可自由修改并手动勾选任意可见行。

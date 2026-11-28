@@ -202,19 +202,29 @@ class MuxedSourceCache:
 
     @staticmethod
     def key(stream: StreamInfo) -> str:
-        # Full source identity, not a language/codec guess: distinct renditions
-        # may contain different audio, even when their labels look identical.
-        from .downloader import _stream_resume_key
+        # Full physical source identity independent of mutable per-delivery
+        # init/version caches so concurrent sibling projections (video +
+        # embedded captions, or demuxed video + audio) always hash to the exact
+        # same cache slot regardless of thread scheduling order.
+        from . import downloader as _dl
 
+        timeline_fn = getattr(_dl, "source_timeline_identity", None)
+        timeline_id = timeline_fn(stream) if callable(timeline_fn) else None
+        segments = _dl._segment_urls(stream)
+        part_identities = [_dl._resume_part_identity(seg) for seg in segments]
         return hashlib.sha256(
             json.dumps(
                 [
-                    _stream_resume_key(stream),
+                    _dl._stream_resume_identity(stream),
+                    timeline_id,
+                    part_identities,
+                    stream.vod_resume_id,
                     stream.codecs,
                     stream.encryption_scheme,
                     stream.extra.get("_unidl_source_headers"),
                 ],
                 sort_keys=True,
+                separators=(",", ":"),
             ).encode()
         ).hexdigest()[:24]
 

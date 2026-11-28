@@ -328,6 +328,29 @@ def _hybrid_items() -> list[Item]:
     return items
 
 
+def _registered_binary_items() -> list[Item]:
+    """Surface custom binaries registered by service plugins."""
+    from .binaries import probe_binary_version, registered_binaries, resolve_binary
+
+    items: list[Item] = []
+    for spec in registered_binaries():
+        found = resolve_binary(spec)
+        ver = probe_binary_version(found, spec.version_args) if found else ""
+        items.append(
+            Item(
+                group="tools",
+                label=spec.name,
+                ok=bool(found),
+                detail=ver or found or "not found",
+                hint=spec.install_hint or f"Install {spec.name} into PATH or binaries/",
+                without=f"Custom helper binary for {spec.service_id}" if spec.service_id else "Custom registered binary",
+                needed_by=(spec.service_id,) if spec.service_id else (),
+                level=ENHANCEMENT,
+            )
+        )
+    return items
+
+
 def _mp4box_items() -> list[Item]:
     from ..downloader.mp4box import INSTALL_HINT, find_mp4box
 
@@ -472,6 +495,7 @@ def survey(config, registry=None, *, fresh: bool = False, settings=None) -> Repo
         + _cdm_items(config)
         + _helper_items(config, registry, resolver)
         + _hybrid_items()
+        + _registered_binary_items()
         + _mp4box_items()
         + _compiled_service_items()
         + _folder_items(config, settings)

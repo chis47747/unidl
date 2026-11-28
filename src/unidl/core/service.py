@@ -1306,6 +1306,7 @@ class Service:
             "episode": str(read("name_template_episode", "") or ""),
             "movie": str(read("name_template_movie", "") or ""),
             "style": str(read("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
+            "unicode_filenames": bool(read("unicode_filenames", True)),
         }
 
     # -------------------------------------------------------------------- drm

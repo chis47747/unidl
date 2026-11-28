@@ -22,6 +22,7 @@ import requests
 
 from ...core.attachments import Attachment
 from ...core.chapters import Chapter
+from ...core.playback import SubtitleReference
 from ...downloader.models import StreamInfo
 from ...downloader.parsers.dash import parse_dash
 
@@ -74,8 +75,17 @@ QUALITY_PRIORITY = ("1080", "720", "sd", "sd-low")
 
 HTTP_TIMEOUT = 30
 DASH_PROBE_TIMEOUT = 10
-#: Refresh JWT this many seconds before ``exp``. Matches the legacy client.
+MAX_SUBTITLE_BYTES = 16 * 1024 * 1024
 JWT_MIN_TTL = 300
+_SUBTITLE_EXTENSIONS = frozenset({"vtt", "srt", "ttml", "dfxp", "xml", "ass", "ssa"})
+_CAPTION_KEYS = (
+    ("src-vtt", "vtt"),
+    ("src-srt", "srt"),
+    ("src-ttml", "ttml"),
+    ("src-dfxp", "dfxp"),
+    ("src-xml", "xml"),
+    ("url", ""),
+)
 
 _SHOW_URL = re.compile(
     r"(?:https?://)?(?:iview\.)?abc\.net\.au/show/(?P<id>[^/?#]+)",
@@ -228,12 +238,15 @@ class Source:
     duration: int | None = None
     chapters: list[Chapter] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
+    subtitles: list[SubtitleReference] = field(default_factory=list)
 
     def line(self) -> str:
         bits = [self.stream_type or "stream"]
         bits.append("Widevine" if self.protected else "clear")
         if self.is_live:
             bits.append("live")
+        if self.subtitles:
+            bits.append("subtitles")
         return " · ".join(bits)
 
 
@@ -1158,6 +1171,7 @@ class AbcIviewApi:
             duration=_int(video.get("duration")) or None,
             chapters=[] if is_live else _video_chapters(video),
             attachments=_video_attachments(video),
+            subtitles=[] if is_live else _video_subtitles(playlist_item),
         )
 
     def _prefer_dash_1080(self, manifest: str, *, duration: int | None) -> str:
@@ -1318,6 +1332,56 @@ class AbcIviewApi:
                 f"KeyOS answered {response.status_code}: {_preview(response.text)}"
             )
         return response.content
+
+    def subtitle_bytes(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> bytes:
+        target = _valid_http_url(url)
+        if not target:
+            raise AbcIviewError("ABC iView returned an invalid subtitle URL")
+        request_headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/vtt, text/plain, */*",
+        }
+        for key, value in (headers or {}).items():
+            if key and value is not None:
+                request_headers[str(key)] = str(value)
+        try:
+            with self.session.get(
+                target,
+                headers=request_headers,
+                timeout=HTTP_TIMEOUT,
+                stream=True,
+            ) as response:
+                if response.status_code != 200:
+                    raise AbcIviewError(
+                        f"ABC iView subtitle request failed (HTTP {response.status_code})"
+                    )
+                size = str(response.headers.get("Content-Length") or "").strip()
+                total = int(size) if size.isdigit() else None
+                if total is not None and total > MAX_SUBTITLE_BYTES:
+                    raise AbcIviewError("ABC iView subtitle exceeds the 16 MiB size limit")
+                data = bytearray()
+                for chunk in response.iter_content(chunk_size=65_536):
+                    if not chunk:
+                        continue
+                    data.extend(chunk)
+                    if len(data) > MAX_SUBTITLE_BYTES:
+                        raise AbcIviewError("ABC iView subtitle exceeds the 16 MiB size limit")
+                    if progress is not None:
+                        progress(len(data), total)
+        except requests.RequestException as exc:
+            raise AbcIviewError(f"ABC iView subtitle request failed: {exc}") from exc
+        if not data:
+            raise AbcIviewError("ABC iView subtitle response was empty")
+        head = bytes(data[:512]).lstrip().lower()
+        if head.startswith((b"<!doctype html", b"<html")):
+            raise AbcIviewError("ABC iView subtitle response was HTML instead of captions")
+        return bytes(data)
 
     def _json(
         self,
@@ -1673,6 +1737,96 @@ def _video_chapters(video: dict[str, Any]) -> list[Chapter]:
     return chapters
 
 
+def _valid_http_url(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return ""
+    url = raw.strip()
+    if not url or any(character.isspace() for character in url):
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
+        return ""
+    return url
+
+
+def normalize_subtitle_format(raw: Any, *, url: str = "", default: str = "") -> str:
+    explicit = str(raw or "").strip().lower().lstrip(".")
+    if explicit:
+        normalized = "vtt" if explicit == "webvtt" else explicit
+        return normalized if normalized in _SUBTITLE_EXTENSIONS else ""
+    path = urlsplit(url).path if url else ""
+    suffix = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    normalized = "vtt" if suffix == "webvtt" else suffix
+    if normalized in _SUBTITLE_EXTENSIONS:
+        return normalized
+    return default
+
+
+def _normalize_subtitle_kind(raw: Any) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if value == "forced":
+        return "forced"
+    if value in {"sdh", "cc", "closed_captions", "closedcaptions", "captions"}:
+        return "sdh"
+    if value == "commentary":
+        return "commentary"
+    if value in {"audio_description", "audiodescription", "descriptive"}:
+        return "audio_description"
+    return "normal"
+
+
+def _video_subtitles(playlist_item: dict[str, Any]) -> list[SubtitleReference]:
+    raw = playlist_item.get("captions")
+    if isinstance(raw, dict):
+        entries = [raw]
+    elif isinstance(raw, list):
+        entries = [item for item in raw if isinstance(item, dict)]
+    else:
+        return []
+
+    subtitles: list[SubtitleReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in entries:
+        url = ""
+        key_format = ""
+        for key, default_format in _CAPTION_KEYS:
+            candidate = _valid_http_url(entry.get(key))
+            if candidate:
+                url = candidate
+                key_format = default_format
+                break
+        if not url:
+            continue
+        fmt = normalize_subtitle_format(entry.get("format"), url=url, default=key_format or "vtt")
+        if not fmt:
+            continue
+        language = str(entry.get("language") or entry.get("lang") or "en").strip().replace("_", "-") or "en"
+        kind = _normalize_subtitle_kind(entry.get("kind") or entry.get("type"))
+        identity = (url, language.casefold(), kind)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        default_name = "English" if language.casefold() == "en" or language.casefold().startswith("en-") else language
+        name = str(entry.get("name") or entry.get("label") or default_name).strip() or default_name
+        subtitles.append(
+            SubtitleReference(
+                url=url,
+                language=language,
+                kind=kind,
+                name=name,
+                format=fmt,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/vtt, text/plain, */*",
+                },
+            )
+        )
+    return subtitles
+
+
 def _video_attachments(video: dict[str, Any]) -> list[Attachment]:
     images = video.get("images")
     if not isinstance(images, list):
@@ -1680,16 +1834,10 @@ def _video_attachments(video: dict[str, Any]) -> list[Attachment]:
     attachments: list[Attachment] = []
     seen: set[str] = set()
     for image in images:
-        if not isinstance(image, dict) or not isinstance(image.get("url"), str):
+        if not isinstance(image, dict):
             continue
-        url = image["url"].strip()
-        try:
-            parsed = urlsplit(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
-                continue
-        except ValueError:
-            continue
-        if url in seen:
+        url = _valid_http_url(image.get("url"))
+        if not url or url in seen:
             continue
         seen.add(url)
         image_type = str(image.get("type") or "")
@@ -1947,6 +2095,7 @@ __all__ = [
     "Source",
     "TvLinkChallenge",
     "normalize_login_method",
+    "normalize_subtitle_format",
     "parse_episode",
     "parse_input",
 ]

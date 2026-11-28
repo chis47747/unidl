@@ -150,20 +150,56 @@ kept separate from the app-wide default and from output-track settings.
 
 Remote CDMs are declared under remote_cdm and are selected by name. The endpoint
 receives only the challenge/parse operations supported by its DRM system. Use
-HTTPS and keep its token in a private configuration file.
+HTTPS and keep its token in a private configuration file. When editing an
+existing remote CDM in the TUI, saved tokens/passwords are masked with dots and
+can be revealed on demand with **Show**.
 
 ## Vault entries
 
 Declare one or more local/remote vaults under key_vaults. The vault manager
 supports enable/disable, read/write policy, service filters and manual KID:key
-entry. The TUI can edit these resources without hand-editing YAML. Keep vault
-tokens and keys private.
+entry. The TUI can edit these resources without hand-editing YAML, masking saved
+tokens/passwords with dots (with a **Show** toggle) and guarding against
+accidentally overwriting an existing `unidl.yaml` that was not loaded into
+memory. Keep vault tokens and keys private.
 
 For HTTP vaults, keep any operator-required trailing slash in the endpoint URL;
 some routers distinguish `/vault` from `/vault/`. A `supported_services` list is
 an explicit capability declaration for home-screen remote search. Automatic
 lookup and storage use the active service ID directly, while `service_map` aliases
 are applied to explicit searches.
+
+## Git service repositories (`service_repos`)
+
+External service packages can be tracked directly from Git repositories under
+`service_repos` (each entry is a repository URL string or a mapping):
+
+~~~yaml
+service_repos:
+  - url: https://github.com/org/unidl-services.git
+    name: custom-services   # optional folder name under <home>/service_repos/
+    branch: main            # optional branch or tag
+    subdir: services        # optional subdirectory inside the repo
+    ttl_hours: 24           # minimum interval between non-forced pulls
+    enabled: true
+~~~
+
+Manage repositories in the TUI under **Settings → Services → Git service
+repositories** (Add, Edit, Toggle, Delete, Refresh, Force refresh) or run
+`unidl refresh-services [--force]` from the CLI. Non-forced pulls honor
+`ttl_hours`, and every pull refuses to overwrite a clone that has uncommitted
+local edits (dirty-clone guard).
+
+## Proxy providers and IP info (`proxy_providers`, `ipinfo_token`)
+
+In addition to static `proxies`, `proxy_providers` supports `expressvpn`,
+`nordvpn`, `surfshark`, `windscribe`, `protonvpn` (`proton:<country>[:city|#num]`),
+and `gluetun` (`gluetun[:country]` with optional `instances` map and
+`verify_region: true` checking Gluetun Control Server `/v1/publicip/ip`).
+An optional `ipinfo_token` top-level key (or `ip_info.token`) supplies an
+ipinfo.io token for the live **Check IP** (`i`) exit-IP and timezone lookup in
+**Settings → Proxy & VPN**; without a token, UniDL still queries free endpoints
+with automatic fallback.
 
 ## Service-specific quality settings
 
@@ -177,7 +213,13 @@ does not choose which manifest profile a service requests.
 
 Credential slots are declared by the service. Values live under that service's
 namespace and are never shared implicitly with another service. Cookie profiles
-are selected by profile name and read only from <paths.cookies>/<service>/.
+are selected by profile name and read only from `<paths.cookies>/<service>/`.
+You can import cookies from a local Firefox profile directly inside the TUI via
+**Settings → Services → Firefox cookies** or by clicking **Extract from
+Firefox…** (or pressing `f`) inside any service's **Cookie profile** picker;
+UniDL reads a temporary WAL-safe snapshot of `cookies.sqlite` (and optionally
+inspects legacy `webappsstore.sqlite` and modern LSNG `localStorage`) and writes
+standard Netscape cookie files.
 
 Use a private override for real values:
 

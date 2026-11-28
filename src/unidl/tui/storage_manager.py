@@ -111,6 +111,24 @@ _NAMING_ROWS = (
         "tag",
         "Optional group tag written after the final dash.",
     ),
+    StorageRow(
+        "unicode_filenames",
+        "Preserve Unicode characters",
+        "bool",
+        "On keeps accents and non-ASCII scripts. Off transliterates filenames to ASCII.",
+    ),
+    StorageRow(
+        "repack_tag",
+        "REPACK tag",
+        "bool",
+        "Include REPACK in the release suffix for films and episodes.",
+    ),
+    StorageRow(
+        "audio_lang_tag",
+        "Multi-audio language tag",
+        "choice",
+        "Automatically include DUAL or MULTI in release names when multiple audio languages are selected.",
+    ),
 )
 
 _ADVANCED_ROWS = (
@@ -418,6 +436,9 @@ class StorageManagerScreen(Screen[None]):
             raw = self.app.config.raw.get("paths") or {}
             explicit = self.app.config.missing_config is None and isinstance(raw, dict) and bool(str(raw.get(row.key) or "").strip())
             return str(value), tr("storage.source.yaml") if explicit else tr("storage.source.home_default")
+        if row.kind == "bool":
+            value = bool(self.globals.get(row.key))
+            return (tr("value.on") if value else tr("value.off")), tr("storage.source.settings")
         if row.kind == "choice":
             value = self.globals.get(row.key)
             spec = self.globals.spec_by_key.get(row.key)
@@ -481,6 +502,9 @@ class StorageManagerScreen(Screen[None]):
             if value is not None:
                 self._save_value(row, value)
 
+        if row.kind == "bool":
+            self._save_value(row, not bool(self.globals.get(row.key)))
+            return
         if row.kind == "choice":
             from .settings_screen import _ChoiceEditor
 
@@ -517,15 +541,35 @@ class StorageManagerScreen(Screen[None]):
         if row is None or not row.editable:
             return
         if row.kind in {"setting-path", "config-path"}:
-            value = ""
+            value: object = ""
+        elif row.kind == "bool":
+            spec = self.globals.spec_by_key.get(row.key)
+            value = bool(spec.default) if spec is not None else False
         else:
             spec = self.globals.spec_by_key.get(row.key)
             value = str(spec.default if spec is not None and spec.default is not None else "")
         self._save_value(row, value)
 
-    def _save_value(self, row: StorageRow, value: str) -> bool:
+    def _save_value(self, row: StorageRow, value: object) -> bool:
         if not row.editable:
             return False
+        if row.kind == "bool":
+            try:
+                self.globals.set(row.key, bool(value))
+            except (OSError, ValueError) as exc:
+                self.notify(
+                    tr(
+                        "storage.notify.save_fail",
+                        label=tr(f"storage.row.{row.key}", default=row.label),
+                        error=exc,
+                    ),
+                    severity="error",
+                    timeout=8,
+                )
+                return False
+            self.notify(tr("storage.notify.saved", label=tr(f"storage.row.{row.key}", default=row.label)), timeout=4)
+            self.rebuild()
+            return True
         text = str(value or "").strip()
         if row.kind == "template":
             problems = template.validate(text, _TEMPLATE_FIELDS[row.key])

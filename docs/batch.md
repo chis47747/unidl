@@ -101,6 +101,15 @@ teach you to ignore red.
 the selection was made - there is no job yet, so there is nothing for screen 4 to
 be about. Declining raises `Back`, which unwinds to the list you chose from.
 
+## Multi-select filter expressions and compact selection summary
+
+When selecting episodes on screen 3, press `Tab` to focus the filter bar and
+enter either a text query or a set expression such as `S02`, `S01E05-S02E03`,
+`3-8,-5`, `13-`, or `all` (pressing `i` in the list inverts the current ticks).
+The selected counter in the top-right hint line merges the picked count and
+compact item spans (for example `Selected 2 / 27  #2, #4`) without duplicating
+a separate summary strip below the list.
+
 ## A failure stays on your screen
 
 Normally screen 4 is popped when the flow returns to the service menu: screens

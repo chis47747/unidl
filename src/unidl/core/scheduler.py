@@ -504,25 +504,32 @@ class ScheduleStore:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self.backup_path = self.path.with_name(self.path.name + ".bak")
+        self.last_error: str = ""
 
-    def _read_unlocked(self) -> tuple[list[ScheduledJob], list[ScheduleRunRecord]]:
-        if not self.path.is_file():
-            return [], []
+    @staticmethod
+    def _parse_store_text(text: str) -> tuple[list[ScheduledJob], list[ScheduleRunRecord]]:
         try:
-            raw = json.loads(self.path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return [], []
+            raw = json.loads(text)
+        except ValueError as exc:
+            raise ScheduleError(f"Invalid JSON: {exc}") from exc
         if not isinstance(raw, dict):
-            return [], []
+            raise ScheduleError("Root JSON value must be an object.")
+        raw_jobs = raw.get("jobs")
+        if raw_jobs is not None and not isinstance(raw_jobs, list):
+            raise ScheduleError("'jobs' field must be a list.")
+        raw_history = raw.get("history")
+        if raw_history is not None and not isinstance(raw_history, list):
+            raise ScheduleError("'history' field must be a list.")
         jobs: list[ScheduledJob] = []
-        for entry in raw.get("jobs") or ():
+        for entry in raw_jobs or ():
             if isinstance(entry, dict):
                 try:
                     jobs.append(ScheduledJob.from_dict(entry))
                 except (TypeError, ValueError):
                     continue
         history: list[ScheduleRunRecord] = []
-        for entry in raw.get("history") or ():
+        for entry in raw_history or ():
             if isinstance(entry, dict):
                 try:
                     history.append(ScheduleRunRecord.from_dict(entry))
@@ -530,11 +537,50 @@ class ScheduleStore:
                     continue
         return jobs, history[:MAX_HISTORY_RECORDS]
 
+    def _read_unlocked(
+        self,
+        *,
+        for_write: bool = False,
+    ) -> tuple[list[ScheduledJob], list[ScheduleRunRecord]]:
+        self.last_error = ""
+        if not self.path.is_file():
+            if self.backup_path.is_file():
+                try:
+                    return self._parse_store_text(self.backup_path.read_text("utf-8"))
+                except (OSError, ScheduleError):
+                    pass
+            return [], []
+        try:
+            return self._parse_store_text(self.path.read_text("utf-8"))
+        except (OSError, ScheduleError) as exc:
+            if self.backup_path.is_file():
+                try:
+                    restored = self._parse_store_text(self.backup_path.read_text("utf-8"))
+                    self.last_error = f"Recovered schedules from backup after read error: {exc}"
+                    return restored
+                except (OSError, ScheduleError):
+                    pass
+            self.last_error = f"Could not read schedules file {self.path}: {exc}"
+            if for_write:
+                raise ScheduleError(
+                    f"Refusing to overwrite corrupt or unreadable schedules file {self.path}: {exc}"
+                ) from exc
+            return [], []
+
     def _write_unlocked(
         self,
         jobs: Sequence[ScheduledJob],
         history: Sequence[ScheduleRunRecord],
     ) -> None:
+        if self.path.is_file():
+            try:
+                previous = self.path.read_text("utf-8")
+                self._parse_store_text(previous)
+            except (OSError, ScheduleError):
+                previous = ""
+            if previous:
+                atomic_write_text(self.backup_path, previous, mode=FILE_MODE)
+                private_file(self.backup_path)
         payload = {
             "version": SCHEMA_VERSION,
             "jobs": [job.to_dict() for job in jobs],
@@ -572,7 +618,7 @@ class ScheduleStore:
 
     def upsert_job(self, job: ScheduledJob) -> ScheduledJob:
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             replaced = False
             for idx, existing in enumerate(jobs):
                 if existing.id == job.id:
@@ -594,7 +640,7 @@ class ScheduleStore:
         if not wanted:
             return None
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             updated: ScheduledJob | None = None
             for job in jobs:
                 if job.id == wanted:
@@ -613,7 +659,7 @@ class ScheduleStore:
         """
         recovered: list[ScheduledJob] = []
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             for job in jobs:
                 if job.status != "running":
                     continue
@@ -661,7 +707,7 @@ class ScheduleStore:
     def delete_job(self, job_id: str) -> bool:
         wanted = str(job_id or "").strip()
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             kept = [job for job in jobs if job.id != wanted]
             if len(kept) == len(jobs):
                 return False
@@ -671,7 +717,7 @@ class ScheduleStore:
     def toggle_job(self, job_id: str) -> ScheduledJob | None:
         wanted = str(job_id or "").strip()
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             updated: ScheduledJob | None = None
             for job in jobs:
                 if job.id != wanted:
@@ -699,13 +745,13 @@ class ScheduleStore:
 
     def append_history(self, record: ScheduleRunRecord) -> None:
         with locked_path(self.path):
-            jobs, history = self._read_unlocked()
+            jobs, history = self._read_unlocked(for_write=True)
             history.insert(0, record)
             self._write_unlocked(jobs, history[:MAX_HISTORY_RECORDS])
 
     def clear_history(self) -> None:
         with locked_path(self.path):
-            jobs, _history = self._read_unlocked()
+            jobs, _history = self._read_unlocked(for_write=True)
             self._write_unlocked(jobs, [])
 
     def due_jobs(self, *, now: datetime | None = None) -> list[ScheduledJob]:
@@ -1461,6 +1507,12 @@ def _deliver_playback(
         tracks = engine.load_tracks(playback, settings, service=service)
         selection_error = str(getattr(tracks, "selection_error", "") or "")
         if selection_error and not getattr(tracks, "selected", None):
+            strict_wait = any(
+                bool(settings.get(key, False))
+                for key in ("require_video", "require_audio", "require_subtitles")
+            )
+            if strict_wait:
+                raise ScheduleNotReleased(f"Waiting for required tracks: {selection_error}")
             raise ScheduleError(selection_error)
         _stage("keys")
         engine.resolve_keys(playback, service, tracks, settings)

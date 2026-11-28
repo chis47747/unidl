@@ -791,10 +791,27 @@ class Engine:
     def _debug_log_start(self, path: Path, playback: Playback) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        from .binaries import collect_tool_versions
+        from .diagnostics import current_recorder
+
+        tool_versions = collect_tool_versions()
         with self._debug_log_lock, path.open("a", encoding="utf-8") as file:
             task = self._debug_task_id.get()
             marker = f" [{task}]" if task else ""
             file.write(f"[{stamp}]{marker} UniDL debug task start: {playback.save_name}\n")
+            if tool_versions:
+                summary = ", ".join(f"{name}={ver}" for name, ver in sorted(tool_versions.items()))
+                file.write(f"[{stamp}]{marker} External tools: {summary}\n")
+        recorder = current_recorder()
+        if recorder is not None:
+            recorder.record_event(
+                "session.start",
+                stage="init",
+                save_name=playback.save_name,
+                service=getattr(getattr(playback, "title", None), "service", ""),
+                is_live=bool(getattr(playback, "is_live", False)),
+                tools=tool_versions,
+            )
 
     def _debug_log_end(self, path: Path, result: DownloadResult) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -3057,6 +3074,22 @@ class Engine:
         but matching media types can be shown prechecked for manual repair.
         Headless callers retain the empty result on any unmatched constraint.
         """
+        if not playback.is_live and bool(
+            settings.inherited("probe_hdr_metadata", False)
+            if callable(getattr(settings, "inherited", None))
+            else settings.get("probe_hdr_metadata", False)
+        ):
+            try:
+                from ..downloader.hdr_probe import probe_tracks_hdr_metadata
+
+                probe_tracks_hdr_metadata(
+                    tracks.selectable_streams,
+                    headers=playback.headers,
+                    proxy=playback.proxy,
+                    log=self.log,
+                )
+            except Exception as exc:
+                self.log(f"HDR metadata probe skipped: {exc}")
         result = self.auto_select_result(
             [
                 stream for stream in tracks.selectable_streams
@@ -3294,6 +3327,8 @@ class Engine:
                 parts.append(f"range={video_range}")
             options.select_video = ":".join(parts) if parts else "best"
             options.video_selection = str(video_selection or settings.get("video_selection", "best") or "best").lower()
+            options.require_video = bool(settings.get("require_video", False))
+            options.merge_video = bool(settings.get("merge_video", False))
 
         audio_parts = []
         if "audio" in selected_types:
@@ -3318,6 +3353,8 @@ class Engine:
             audio_quality = str(settings.get("audio_quality", "best") or "best").lower()
             audio_parts.append("for=all" if audio_selection == "all" else f"for={audio_quality}")
             options.select_audio = ":".join(audio_parts)
+            options.require_audio = bool(settings.get("require_audio", False))
+            options.audio_codec_priority = str(settings.get("audio_codec_priority", "") or "").strip() or None
 
         sub_langs = str(settings.get("sub_langs", "") or "").strip()
         if "subtitle" in selected_types and sub_langs and sub_langs != "none":
@@ -3330,6 +3367,11 @@ class Engine:
                 subtitle_parts.append(f"kind={subtitle_kinds}")
             subtitle_parts.append(f"for={subtitle_selection}")
             options.select_subtitle = ":".join(subtitle_parts)
+            options.require_subtitles = bool(settings.get("require_subtitles", False))
+            options.subtitle_type_priority = str(settings.get("subtitle_type_priority", "") or "").strip() or None
+        elif "subtitle" in selected_types and bool(settings.get("require_subtitles", False)):
+            options.require_subtitles = True
+            options.subtitle_type_priority = str(settings.get("subtitle_type_priority", "") or "").strip() or None
 
         result = select_streams_detailed(list(streams), options)
         if selected_types != {"video", "audio", "subtitle"}:
@@ -3411,6 +3453,8 @@ class Engine:
         quality = str(settings.get("audio_quality", "best") or "best").lower()
         parts.append(f"for={quality}")
         options.select_audio = ":".join(parts)
+        options.require_audio = bool(settings.get("require_audio", False))
+        options.audio_codec_priority = str(settings.get("audio_codec_priority", "") or "").strip() or None
 
         chosen = [s for s in select_streams(list(streams), options) if s.media_type == "audio"]
         return chosen
@@ -4041,6 +4085,24 @@ class Engine:
                 **(dict(playback.drm.context) if playback.drm is not None else {}),
                 "unidl_hybrid_dv_hdr10": self.hybrid_enabled(
                     settings, playback=playback, tracks=tracks
+                ),
+                "unidl_generate_dv_from_hdr10p": (
+                    not playback.is_live
+                    and not self.original_track_output(settings)
+                    and bool(
+                        settings.inherited("generate_dv_from_hdr10p", False)
+                        if callable(getattr(settings, "inherited", None))
+                        else settings.get("generate_dv_from_hdr10p", False)
+                    )
+                ),
+                "unidl_normalize_vui": (
+                    not playback.is_live
+                    and not self.original_track_output(settings)
+                    and bool(
+                        settings.inherited("normalize_vui", False)
+                        if callable(getattr(settings, "inherited", None))
+                        else settings.get("normalize_vui", False)
+                    )
                 ),
             },
             policy=policy,
@@ -5014,6 +5076,15 @@ class Engine:
         finally:
             if progress_screen is not None:
                 progress_screen.finish()
+            if debug_recorder is not None:
+                debug_recorder.record_event(
+                    "delivery.complete" if exit_code == 0 else ("delivery.cancelled" if exit_code == CANCELLED_EXIT else "delivery.failed"),
+                    stage="finish",
+                    save_name=playback.save_name,
+                    exit_code=exit_code,
+                    artifacts=[str(p) for p in artifacts],
+                    failure=failure,
+                )
             if debug_path is not None:
                 result_status = DownloadResult(
                     exit_code=exit_code,
@@ -5034,13 +5105,42 @@ class Engine:
                     debug_context.__exit__(None, None, None)
                 if debug_recorder is not None:
                     debug_recorder.close()
-        return DownloadResult(
+        download_result = DownloadResult(
             exit_code=exit_code,
             output_dir=where,
             command=command,
             artifacts=artifacts,
             failure=failure,
         )
+        scoped_read = getattr(settings, "inherited", None)
+        hook_cmd = str(
+            (scoped_read("post_download_hook", "") if callable(scoped_read) else settings.get("post_download_hook", ""))
+            or ""
+        ).strip()
+        if hook_cmd:
+            run_on_failure = bool(
+                scoped_read("post_download_hook_on_failure", False)
+                if callable(scoped_read)
+                else settings.get("post_download_hook_on_failure", False)
+            )
+            should_run_hook = download_result.ok or (run_on_failure and not download_result.cancelled)
+            if should_run_hook:
+                from .hooks import build_hook_metadata, run_post_download_hook
+
+                hook_meta = build_hook_metadata(
+                    status="ok" if download_result.ok else "failed",
+                    exit_code=exit_code,
+                    service=playback.title.service,
+                    title=playback.title,
+                    save_name=playback.save_name,
+                    output_dir=where,
+                    artifacts=artifacts,
+                    failure=failure,
+                )
+                hook_res = run_post_download_hook(hook_cmd, hook_meta, log=self.log)
+                if not hook_res.ok and hook_res.error:
+                    self.log(f"post-download hook warning: {hook_res.error}")
+        return download_result
 
 def _hls_variants(text: str, base_url: str, *, append_query: bool = False) -> list[str]:
     """The variant playlist URLs a master lists, in the order it lists them."""

@@ -21,6 +21,7 @@ reads the same way as one named there.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from . import template
 from .titles import Title, TitleKind
@@ -120,8 +121,84 @@ _STANDARD_HEIGHTS = (2160, 1440, 1080, 720, 576, 480, 360)
 _HEIGHT_TOLERANCE = 10
 
 
-def clean_part(value: object) -> str:
+_ASCII_LATIN_MAP: dict[str, str] = {
+    "ß": "ss",
+    "ẞ": "SS",
+    "Æ": "AE",
+    "æ": "ae",
+    "Œ": "OE",
+    "œ": "oe",
+    "Ø": "O",
+    "ø": "o",
+    "Ð": "D",
+    "ð": "d",
+    "Đ": "D",
+    "đ": "d",
+    "Ł": "L",
+    "ł": "l",
+    "Þ": "Th",
+    "þ": "th",
+    "–": "-",
+    "—": "-",
+    "―": "-",
+    "‘": "'",
+    "’": "'",
+    "“": '"',
+    "”": '"',
+    "…": "...",
+    "・": ".",
+    "·": ".",
+    "　": " ",
+}
+
+
+def _transliterate_ascii(text: str) -> str:
+    """Fold Latin accents and fullwidth punctuation to ASCII consistently.
+
+    Uses ``anyascii`` or ``unidecode`` if installed. Otherwise folds Latin
+    diacritics/ligatures and fullwidth ASCII punctuation while preserving
+    non-Latin scripts (including Thai vowel/tone marks and CJK characters)
+    intact so mixed titles never drop characters inconsistently or collapse
+    to empty filenames.
+    """
+    if not text:
+        return ""
+    for mod_name, fn_name in (("anyascii", "anyascii"), ("unidecode", "unidecode")):
+        try:
+            mod = __import__(mod_name)
+            fn = getattr(mod, fn_name, None)
+            if callable(fn):
+                rendered = str(fn(text))
+                if rendered.strip():
+                    return rendered
+        except ImportError:
+            continue
+
+    composed = unicodedata.normalize("NFC", text)
+    out: list[str] = []
+    for ch in composed:
+        if ch.isascii():
+            out.append(ch)
+            continue
+        mapped = _ASCII_LATIN_MAP.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        if unicodedata.category(ch) == "Mn" and out and out[-1].isascii() and out[-1].isalpha():
+            continue
+        decomposed = unicodedata.normalize("NFKD", ch)
+        ascii_parts = "".join(part for part in decomposed if part.isascii())
+        if ascii_parts:
+            out.append(ascii_parts)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def clean_part(value: object, *, unicode_filenames: bool = True) -> str:
     text = str(value or "")
+    if not unicode_filenames:
+        text = _transliterate_ascii(text)
     text = text.replace("&", "and")
     text = text.replace("'", "").replace('"', "").replace("’", "")
     text = _TITLE_DASH.sub(".", text)
@@ -131,6 +208,17 @@ def clean_part(value: object) -> str:
     return text.strip(".")
 
 
+def _clean_air_date(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})", text)
+    if match:
+        y, m, d = match.groups()
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    return clean_part(text)
+
+
 def format_title(
     name: str,
     *,
@@ -138,12 +226,15 @@ def format_title(
     season: int | None = None,
     episode: int | None = None,
     episode_name: str | None = None,
+    air_date: str | None = None,
     separator: str = ".",
+    unicode_filenames: bool = True,
 ) -> str:
-    base = _styled_part(name, separator)
+    base = _styled_part(name, separator, unicode_filenames=unicode_filenames)
     has_season = season is not None
     season_number = int(season or 0)
     episode_number = int(episode or 0)
+    clean_date = _clean_air_date(air_date)
 
     if episode_number > 0:
         tag = (
@@ -152,10 +243,14 @@ def format_title(
             else f"E{episode_number:02d}"
         )
         if episode_name:
-            return separator.join((base, tag, _styled_part(episode_name, separator)))
+            return separator.join((base, tag, _styled_part(episode_name, separator, unicode_filenames=unicode_filenames)))
         return separator.join((base, tag))
+    if clean_date:
+        if episode_name:
+            return separator.join((base, clean_date, _styled_part(episode_name, separator, unicode_filenames=unicode_filenames)))
+        return separator.join((base, clean_date))
     if episode_name:
-        combined = separator.join((base, _styled_part(episode_name, separator)))
+        combined = separator.join((base, _styled_part(episode_name, separator, unicode_filenames=unicode_filenames)))
         return separator.join((combined, str(year))) if year else combined
     if year:
         return separator.join((base, str(year)))
@@ -221,13 +316,13 @@ def _styled_template(value: str, separator: str) -> str:
     return str(value or "").replace(".", separator)
 
 
-def _styled_part(value: object, separator: str) -> str:
-    return clean_part(value).replace(".", separator)
+def _styled_part(value: object, separator: str, *, unicode_filenames: bool = True) -> str:
+    return clean_part(value, unicode_filenames=unicode_filenames).replace(".", separator)
 
 #: What a title template may say. Kept as a set so the settings screen can tell the
 #: user what is available instead of letting a typo through to a file name.
 TITLE_FIELDS = frozenset(
-    {"title", "year", "season", "episode", "season_episode", "episode_name"}
+    {"title", "year", "season", "episode", "season_episode", "episode_name", "air_date", "edition"}
 )
 #: and what the release half may say
 RELEASE_FIELDS = frozenset(
@@ -242,38 +337,61 @@ RELEASE_FIELDS = frozenset(
         "video",
         "range",
         "three_d",
+        "edition",
+        "repack",
+        "lang_tag",
         "tag",
     }
 )
 
 
-def title_fields(title: Title, *, separator: str = ".") -> dict[str, str]:
+def title_fields(
+    title: Title,
+    *,
+    separator: str = ".",
+    unicode_filenames: bool = True,
+) -> dict[str, str]:
     """What a title template can be filled in with."""
     season = int(title.season or 0)
     episode = int(title.episode or 0)
+    air_date = _clean_air_date(getattr(title, "air_date", None))
     if episode > 0:
         tag = f"S{season:02d}E{episode:02d}" if title.season is not None else f"E{episode:02d}"
+    elif air_date:
+        tag = air_date
     else:
         tag = ""
+    edition = getattr(title, "edition", None)
     return {
-        "title": _styled_part(title.name, separator),
+        "title": _styled_part(title.name, separator, unicode_filenames=unicode_filenames),
         "year": str(title.year or ""),
         "season": f"{season:02d}" if title.season is not None else "",
         "episode": f"{episode:02d}" if episode else "",
         "season_episode": tag,
-        "episode_name": _styled_part(title.episode_name, separator) if title.episode_name else "",
+        "air_date": air_date,
+        "edition": _styled_part(edition, separator, unicode_filenames=unicode_filenames) if edition else "",
+        "episode_name": _styled_part(title.episode_name, separator, unicode_filenames=unicode_filenames) if title.episode_name else "",
     }
 
 
-def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
+def save_name_for(
+    title: Title,
+    templates: dict[str, str] | None = None,
+    *,
+    unicode_filenames: bool | None = None,
+) -> str:
     """Build the ``--save-name`` UniDL will use."""
-    style = _name_style((templates or {}).get("style"))
+    tpl = templates or {}
+    if unicode_filenames is None:
+        raw_uni = tpl.get("unicode_filenames")
+        unicode_filenames = True if raw_uni is None else bool(raw_uni)
+    style = _name_style(tpl.get("style"))
     section_separator = style["section_separator"]
     word_separator = style["word_separator"]
     if title.kind in (TitleKind.CHANNEL, TitleKind.PROGRAM, TitleKind.STATION):
-        parts = [_styled_part(title.channel or title.name, word_separator)]
+        parts = [_styled_part(title.channel or title.name, word_separator, unicode_filenames=unicode_filenames)]
         if title.kind in (TitleKind.PROGRAM, TitleKind.STATION) and title.episode_name:
-            parts.append(_styled_part(title.episode_name, word_separator))
+            parts.append(_styled_part(title.episode_name, word_separator, unicode_filenames=unicode_filenames))
         if title.starts_at:
             parts.append(title.starts_at.strftime("%Y%m%d_%H%M%S"))
         return section_separator.join(p for p in parts if p)
@@ -282,14 +400,19 @@ def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
         # The release date belongs in audio metadata, not in its file name.  In
         # particular, it is not a film year and audio services often group
         # several distinct episodes under the same date.
-        return format_title(title.name, episode_name=title.episode_name, separator=section_separator)
+        return format_title(
+            title.name,
+            episode_name=title.episode_name,
+            separator=section_separator,
+            unicode_filenames=unicode_filenames,
+        )
 
-    fields = title_fields(title, separator=word_separator)
+    fields = title_fields(title, separator=word_separator, unicode_filenames=unicode_filenames)
     # An episode can legitimately have no supplied number: sport, news and TV
     # specials still need the episode template so their supplied subtitle is not
     # discarded in favour of the film template.
     template_kind = "episode" if title.kind is TitleKind.EPISODE else "movie"
-    wanted = (templates or {}).get(template_kind, "")
+    wanted = tpl.get(template_kind, "")
     if wanted:
         rendered = template.render(_styled_template(wanted, section_separator), fields)
         if rendered:
@@ -302,7 +425,9 @@ def save_name_for(title: Title, templates: dict[str, str] | None = None) -> str:
         season=title.season,
         episode=title.episode,
         episode_name=title.episode_name,
+        air_date=getattr(title, "air_date", None),
         separator=section_separator,
+        unicode_filenames=unicode_filenames,
     )
 
 
@@ -566,6 +691,36 @@ def clean_tag(value: object) -> str:
     return text.strip(".")
 
 
+def audio_lang_tag_of(streams: object, *, mode: str = "off") -> str:
+    """Compute a release language tag (``DUAL`` / ``MULTI``) from selected audio tracks.
+
+    ``mode="off"`` returns ``""`` (default, preserving historical filenames).
+    ``mode="auto"`` returns ``"DUAL"`` when 2 distinct primary audio languages
+    are selected, and ``"MULTI"`` when 3 or more distinct audio languages are
+    selected.
+    """
+    normalized = str(mode or "off").strip().lower()
+    if normalized in {"", "off", "none", "false", "0"}:
+        return ""
+    langs: set[str] = set()
+    for stream in streams or ():
+        if getattr(stream, "media_type", "") != "audio":
+            continue
+        raw = str(getattr(stream, "language", "") or "").strip().replace("_", "-").lower()
+        primary = raw.partition("-")[0]
+        if primary and primary not in {"und", "unknown", "mul"}:
+            langs.add(primary)
+    if normalized in {"auto", "dual_multi", "true", "on", "1"}:
+        if len(langs) >= 3:
+            return "MULTI"
+        if len(langs) == 2:
+            return "DUAL"
+        return ""
+    if normalized == "multi_only":
+        return "MULTI" if len(langs) >= 2 else ""
+    return ""
+
+
 def release_suffix(
     *,
     quality: str = "",
@@ -577,6 +732,9 @@ def release_suffix(
     video: str = "",
     dynamic_range: str = "",
     three_d: str = "",
+    edition: str = "",
+    repack: bool | str = False,
+    lang_tag: str = "",
     tag: str = "",
     layout: str = "",
     style: str = DEFAULT_NAME_STYLE,
@@ -588,6 +746,7 @@ def release_suffix(
     template to use; the default is :data:`RELEASE_TEMPLATE`, and changing it is how
     the order of these parts is changed.
     """
+    repack_text = "REPACK" if repack is True else clean_part(repack) if repack else ""
     fields = {
         "quality": clean_part(quality),
         "platform": clean_part(platform),
@@ -599,6 +758,9 @@ def release_suffix(
         "video": clean_part(video),
         "range": clean_part(dynamic_range),
         "three_d": clean_part(three_d),
+        "edition": clean_part(edition),
+        "repack": repack_text,
+        "lang_tag": clean_part(lang_tag),
         "tag": clean_tag(tag),
     }
     style_fields = _name_style(style)
@@ -606,8 +768,20 @@ def release_suffix(
     # Other custom templates retain their layout and can opt in with {three_d?}.
     if layout == RELEASE_TEMPLATE.replace(".{three_d?}", ""):
         layout = RELEASE_TEMPLATE
+    effective_layout = layout or RELEASE_TEMPLATE
+    # If the user enabled edition/repack/lang_tag without editing the default
+    # template, insert them cleanly right before the standard suffix so the
+    # toggle works out of the box.
+    if effective_layout == RELEASE_TEMPLATE:
+        prefix_badges = "".join(
+            f"{{{name}?}}."
+            for name, present in (("edition", bool(fields["edition"])), ("repack", bool(fields["repack"])), ("lang_tag", bool(fields["lang_tag"])))
+            if present and f"{{{name}" not in effective_layout
+        )
+        if prefix_badges:
+            effective_layout = prefix_badges + effective_layout
     body = template.render(
-        _styled_template(layout or RELEASE_TEMPLATE, style_fields["release_separator"]),
+        _styled_template(effective_layout, style_fields["release_separator"]),
         fields,
     )
     return f"{style_fields['release_prefix']}{body}" if body else ""
@@ -644,6 +818,9 @@ def with_release(
     style: str = DEFAULT_NAME_STYLE,
     refresh: bool = False,
     base_name: str | None = None,
+    edition: str = "",
+    repack: bool | str = False,
+    lang_tag_mode: str = "off",
 ) -> str:
     """``save_name`` with the release half appended, for the kinds that take one.
 
@@ -662,6 +839,7 @@ def with_release(
         return save_name
     elif has_release and refresh:
         save_name = release_base_name(save_name, platform=platform)
+    resolved_edition = edition or str(getattr(title, "edition", "") or "")
     suffix = release_suffix(
         quality=quality_of(streams),
         platform=platform,
@@ -672,6 +850,9 @@ def with_release(
             getattr(stream, "media_type", "") == "video" and getattr(stream, "is_3d", False)
             for stream in streams or ()
         ) else "",
+        edition=resolved_edition,
+        repack=repack,
+        lang_tag=audio_lang_tag_of(streams, mode=lang_tag_mode),
         tag=tag,
         layout=layout,
         style=style,

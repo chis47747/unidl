@@ -4082,6 +4082,8 @@ class SessionController:
             style=str(self.settings.inherited("filename_style", naming.DEFAULT_NAME_STYLE) or naming.DEFAULT_NAME_STYLE),
             refresh=refresh,
             base_name=playback.release_name_base if refresh and playback.release_name_base else None,
+            repack=bool(self.settings.inherited("repack_tag", False)),
+            lang_tag_mode=str(self.settings.inherited("audio_lang_tag", "off") or "off"),
         )
         if playback.save_name == before:
             return

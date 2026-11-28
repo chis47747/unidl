@@ -521,6 +521,22 @@ class VaultDescriptor:
     path: Path | None = None
     #: True for a safe, read-only discovery candidate that is not in YAML yet.
     discovered: bool = False
+    #: Per-vault network timeout in seconds (applies to remote HTTP/API vaults).
+    timeout: float = 15.0
+
+
+def _vault_timeout(spec: Mapping[str, Any] | None, *, default: float = 15.0) -> float:
+    """Parse a per-vault network timeout safely, clamped to ``[1.0, 300.0]``."""
+    raw = spec.get("timeout") if isinstance(spec, Mapping) else None
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value <= 0 or value != value:  # reject <=0 and NaN
+        return default
+    return max(1.0, min(300.0, value))
 
 
 def _vault_definitions(config) -> list[tuple[dict[str, Any] | None, VaultDescriptor]]:
@@ -557,8 +573,10 @@ def _vault_definitions(config) -> list[tuple[dict[str, Any] | None, VaultDescrip
             and (spec.get("searchable") or spec.get("search_keys"))
             and spec.get("supported_services")
         )
+        timeout = _vault_timeout(spec)
         if remote:
-            detail = f"{kind.upper()} · remote"
+            suffix = f" · {timeout:g}s" if timeout != 15.0 else ""
+            detail = f"{kind.upper()} · remote{suffix}"
             local_path = None
         else:
             configured_path = spec.get("path")
@@ -576,6 +594,7 @@ def _vault_definitions(config) -> list[tuple[dict[str, Any] | None, VaultDescrip
                     enabled=enabled,
                     detail=detail,
                     path=local_path,
+                    timeout=timeout,
                 ),
             )
         )
@@ -1198,7 +1217,7 @@ def build(config, local: KeyVault | None = None, log: LineSink | None = None) ->
                         api_mode=str(spec.get("api_mode") or "json"),
                         name=name,
                         no_push=no_push,
-                        timeout=float(spec.get("timeout") or 15.0),
+                        timeout=_vault_timeout(spec),
                         supported_services=spec.get("supported_services"),
                         service_map=spec.get("service_map"),
                         searchable=descriptor.searchable,
@@ -1212,7 +1231,7 @@ def build(config, local: KeyVault | None = None, log: LineSink | None = None) ->
                         token=str(spec.get("token") or spec.get("secret") or ""),
                         name=name,
                         no_push=no_push,
-                        timeout=float(spec.get("timeout") or 15.0),
+                        timeout=_vault_timeout(spec),
                         enabled=enabled,
                     )
                 )

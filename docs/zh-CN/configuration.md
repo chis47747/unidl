@@ -88,13 +88,34 @@ Core 会按需创建目录，并在操作系统支持的平台上自动为凭据
 
 TUI 的 **DRM 与密钥库**管理器会自动扫描 `paths.cdm` 以及配置的搜索路径中的设备。各服务可以单独提供专属 CDM 设置，该配置与全局默认 CDM 以及输出轨道设置彼此独立。
 
-远程 CDM 在 `remote_cdm` 下声明，并按名称选用。远程端点仅接收其对应 DRM 系统支持的质询（challenge）与解析操作。请务必使用 HTTPS，并将访问令牌保存在私有配置文件中。
+远程 CDM 在 `remote_cdm` 下声明，并按名称选用。远程端点仅接收其对应 DRM 系统支持的质询（challenge）与解析操作。请务必使用 HTTPS，并将访问令牌保存在私有配置文件中。在 TUI 中编辑已有远程 CDM 时，已保存的令牌/密码默认以圆点掩码展示，可点击**显示**查看原值。
 
 ## 密钥库配置项
 
-可在 `key_vaults` 下声明一个或多个本地及远程密钥库。密钥库管理器支持启停切换、读写策略、服务过滤以及手动录入 `KID:key`。这些资源均可直接在 TUI 中编辑，无需手改 YAML。请妥善保管密钥库令牌与内容密钥。
+可在 `key_vaults` 下声明一个或多个本地及远程密钥库。密钥库管理器支持启停切换、读写策略、服务过滤以及手动录入 `KID:key`。这些资源均可直接在 TUI 中编辑，无需手改 YAML；编辑已有远程密钥库时同样会对已保存令牌/密码做圆点掩码并提供**显示**开关，同时配置写入路径具备防覆盖保护，避免将未加载到内存中的现有 `unidl.yaml` 意外覆盖。请妥善保管密钥库令牌与内容密钥。
 
 配置 HTTP 密钥库时，请保留服务端要求的末尾斜杠，因为部分路由会区分 `/vault` 与 `/vault/`。`supported_services` 列表是用于主页远程搜索的显式能力声明。自动查库与入库直接使用当前活跃服务 ID，而 `service_map` 别名映射仅作用于显式搜索。
+
+## Git 服务仓库（`service_repos`）
+
+可在 `service_repos` 下声明包含外部服务包的 Git 仓库（支持直接写 URL 字符串或映射对象）：
+
+~~~yaml
+service_repos:
+  - url: https://github.com/org/unidl-services.git
+    name: custom-services   # 可选，克隆到 <home>/service_repos/ 下的目录名
+    branch: main            # 可选分支或标签
+    subdir: services        # 可选仓库内子目录
+    ttl_hours: 24           # 非强制拉取的最小缓存间隔（小时）
+    enabled: true
+~~~
+
+可在 TUI 的**设置 → 服务 → Git 服务仓库**中通过按钮或快捷键完成添加、编辑、启停、删除、拉取更新与强制刷新，也可使用命令行 `unidl refresh-services [--force]`。常规拉取会遵循 `ttl_hours`，且只要检测到本地未提交修改（脏仓库保护），都会自动跳过 pull 以保护本地改动。
+
+## 代理服务商与出口 IP 检测（`proxy_providers`、`ipinfo_token`）
+
+除静态 `proxies` 外，`proxy_providers` 支持 `expressvpn`、`nordvpn`、`surfshark`、`windscribe`、`protonvpn`（如 `proton:us`、`proton:us:new_york`、`proton:us12`）与 `gluetun`（`gluetun` / `gluetun:jp`，支持按地区映射的 `instances` 与开启 `verify_region: true` 后通过 Control Server `/v1/publicip/ip` 校验出口国家）。
+可选的顶层键 `ipinfo_token`（或 `ip_info.token`）用于为**设置 → 代理与 VPN** 中的**查看出口 IP**（`i`）功能提供 ipinfo.io 令牌；未填写时也会使用免费接口并自动回退查询出口 IP 与时区。
 
 ## 服务专属画质设置
 
@@ -103,6 +124,7 @@ TUI 的 **DRM 与密钥库**管理器会自动扫描 `paths.cdm` 以及配置的
 ## 凭据与 Cookie
 
 凭据槽位由各服务自行声明，存储在对应服务的命名空间下，绝不会隐式跨服务共享。Cookie 配置按名称选取，且仅从 `<paths.cookies>/<service>/` 读取。
+如需从本地 Firefox 导入，可直接在 TUI 中打开**设置 → 服务 → Firefox Cookie 导入**，或在单个服务的**Cookie 配置**选择器里点击**从 Firefox 提取…**（或按 `f`）；UniDL 会建立 `cookies.sqlite` 的临时 WAL 安全快照（并可选查看旧版 `webappsstore.sqlite` 与现代 LSNG `localStorage`），将匹配域名的 Cookie 写出为标准 Netscape 文件。
 
 真实凭据请放入私有覆盖配置中使用：
 

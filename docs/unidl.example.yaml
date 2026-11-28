@@ -18,4 +18,9 @@ cdm:
 credentials: {}
 helpers: {}
 proxies: {}
+proxy_providers: {}
+# Optional ipinfo.io token for Proxy & VPN -> Check IP (i) exit-IP/timezone checks.
+# ipinfo_token: ""
+# Optional external Git service repositories (managed in Settings -> Services -> Git service repositories).
+service_repos: []
 services: {}

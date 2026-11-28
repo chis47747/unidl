@@ -2120,14 +2120,6 @@ TextWidget {
     width: 1fr;
     height: auto;
 }
-#multi-summary {
-    display: none;
-    height: 1;
-    padding: 0 1;
-    background: $recessed;
-    color: $fg2;
-    overflow: hidden;
-}
 /* an unbordered empty input looks like empty space; the accent bar says
    "the cursor is here", and the three rows are what make it a box rather than a
    coloured line. Same height as the filter on the main screen, because they are
@@ -3741,6 +3733,7 @@ ModalScreen {
     height: 1;
     padding: 0;
 }
+#ready-setup,
 #ready-copy {
     display: none;
     width: auto;
@@ -3750,6 +3743,7 @@ ModalScreen {
     color: $muted;
     background: $recessed;
 }
+#ready-setup:hover,
 #ready-copy:hover {
     background: $highlight;
     color: $accent;
@@ -3960,7 +3954,6 @@ JumpToBottom:hover {
 .rtl #job-modal-hint,
 .rtl .ask-title,
 .rtl .ask-hint,
-.rtl #multi-summary,
 .rtl .section-head,
 .rtl #import-head,
 .rtl #import-note,
